@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.core.config import load_settings
-from dailycast.db.models import TaskRun, TaskRunStatus, TaskType, TriggerType
+from dailycast.db.models import AudioSegment, Episode, TaskRun, TaskRunStatus, TaskType, TriggerType
 from dailycast.db.repositories import TaskRunRepository
 from dailycast.db.revision import build_alembic_config
 from dailycast.db.session import create_session_factory, create_sqlite_engine
@@ -142,6 +142,56 @@ class DelayStep:
         return StepResult()
 
 
+class CheckingReviseStep:
+    """Record the review outcome that prevents Episode creation."""
+
+    name = "checking"
+
+    async def run(self, context: PipelineContext) -> StepResult:
+        """Keep the review artifact outcome while allowing its gate to run next."""
+        del context
+        return StepResult(
+            input_count=1,
+            output_count=0,
+            warning_count=1,
+            details={"review_verdict": "revise"},
+        )
+
+
+class ReviewGatedCreateEpisodeStep:
+    """Model the real create_episode review gate without manufacturing business data."""
+
+    name = "create_episode"
+
+    async def run(self, context: PipelineContext) -> StepResult:
+        """Stop normally and leave the editorial artifacts available for human revision."""
+        del context
+        return StepResult(
+            input_count=1,
+            output_count=0,
+            warning_count=1,
+            stop_pipeline=True,
+            terminal_status=TaskRunStatus.WAITING_ACTION,
+            completion_code="EDITORIAL_REVIEW_NOT_PASS",
+            completion_summary="editorial review verdict requires human revision",
+        )
+
+
+class UnexpectedAudioStep:
+    """Fail loudly if a waiting-action run ever reaches audio generation."""
+
+    name = "generate_audio"
+
+    def __init__(self) -> None:
+        self.called = False
+
+    async def run(self, context: PipelineContext) -> StepResult:
+        """Expose any regression in terminal pipeline control flow."""
+        del context
+        self.called = True
+        raise AssertionError("generate_audio must not run after editorial review requests revision")
+
+
 def executor_test_pipeline(step_delay_seconds: float) -> tuple[PipelineStep, ...]:
     """Create test-local checkpoint instances after production fake steps were removed."""
     return (
@@ -186,6 +236,39 @@ def test_fake_pipeline_executes_and_records_steps(
                 assert all(step.status == "succeeded" for step in task_run.steps)
         finally:
             await executor.shutdown(grace_seconds=1)
+
+    asyncio.run(scenario())
+
+
+def test_revise_review_waits_for_human_action_without_episode_or_audio(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A revise verdict ends normally before Episode and audio-dependent checkpoints."""
+
+    async def scenario() -> None:
+        audio_step = UnexpectedAudioStep()
+        orchestrator = PipelineOrchestrator(
+            migrated_session_factory,
+            (CheckingReviseStep(), ReviewGatedCreateEpisodeStep(), audio_step),
+        )
+        executor = RecordingExecutor(migrated_session_factory)
+        submitted = TaskSubmissionService(migrated_session_factory, executor).submit(
+            task_command(idempotency_key="review-revise-waits")
+        )
+
+        completed = await orchestrator.execute(submitted.id)
+
+        assert completed is not None
+        assert completed.status is TaskRunStatus.WAITING_ACTION
+        assert completed.error_code == "EDITORIAL_REVIEW_NOT_PASS"
+        assert audio_step.called is False
+        with UnitOfWork(migrated_session_factory) as unit:
+            assert unit.session is not None
+            task_run = TaskRunRepository(unit.session).get(submitted.id)
+            assert task_run is not None
+            assert [step.step_name for step in task_run.steps] == ["checking", "create_episode"]
+            assert unit.session.scalars(select(Episode)).all() == []
+            assert unit.session.scalars(select(AudioSegment)).all() == []
 
     asyncio.run(scenario())
 
@@ -316,6 +399,7 @@ def test_task_run_state_validation_rejects_invalid_transition() -> None:
     """Only the Sprint 2 TaskRun transitions are accepted by the state validator."""
     validate_task_run_transition(TaskRunStatus.QUEUED, TaskRunStatus.RUNNING)
     validate_task_run_transition(TaskRunStatus.INTERRUPTED, TaskRunStatus.QUEUED)
+    validate_task_run_transition(TaskRunStatus.RUNNING, TaskRunStatus.WAITING_ACTION)
 
     with pytest.raises(TaskStateTransitionError):
         validate_task_run_transition(TaskRunStatus.QUEUED, TaskRunStatus.FAILED)

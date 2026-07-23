@@ -20,15 +20,20 @@ def create_sqlite_engine(settings: DatabaseSettings) -> Engine:
 
     @event.listens_for(engine, "connect")
     def configure_sqlite_connection(dbapi_connection: object, connection_record: object) -> None:
-        """Enable SQLite safety settings on every new connection."""
+        """Enable per-connection SQLite safety settings without changing journal mode."""
         del connection_record
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
         try:
             cursor.execute("PRAGMA foreign_keys = ON")
             cursor.execute("PRAGMA busy_timeout = 5000")
-            cursor.execute("PRAGMA journal_mode = WAL")
         finally:
             cursor.close()
+
+    # WAL is a database-wide mode, not a per-connection setting. Reasserting it in the
+    # connection hook can block a new synchronous connection while a writer is active.
+    # Configure it once while building the application's single SQLite engine instead.
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA journal_mode = WAL")
 
     return engine
 

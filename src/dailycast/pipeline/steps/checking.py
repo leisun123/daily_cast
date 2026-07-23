@@ -25,6 +25,7 @@ class CheckingStep:
     data_dir: Path
     budget_factory: Callable[[], BudgetController] = BudgetController
     max_automatic_script_revisions: int = 1
+    enforce_quality_gate: bool = True
     name: str = "checking"
 
     async def run(self, context: PipelineContext) -> StepResult:
@@ -40,6 +41,7 @@ class CheckingStep:
         result = await ScriptCheckingService(
             self.editorial_service,
             max_automatic_script_revisions=self.max_automatic_script_revisions,
+            enforce_quality_gate=self.enforce_quality_gate,
         ).check(
             script,
             outline,

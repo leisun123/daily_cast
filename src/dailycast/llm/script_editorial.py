@@ -74,6 +74,7 @@ def _script_messages(
 ) -> tuple[LLMMessage, ...]:
     """Build the canonical outline-plus-excerpt request without raw bodies or stored prompts."""
     payload = {
+        "output_constraints": _script_output_constraints(outline, dossiers),
         "outline": outline.model_dump(mode="json"),
         "evidence_dossiers": [dossier.model_dump(mode="json") for dossier in dossiers],
     }
@@ -84,3 +85,37 @@ def _script_messages(
             content=json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         ),
     )
+
+
+def _script_output_constraints(
+    outline: EpisodeOutline, dossiers: Sequence[EvidenceDossier]
+) -> dict[str, object]:
+    """Expose exact per-section reference allowlists instead of asking the model to infer them."""
+    article_ids_by_event = {
+        dossier.event_id: tuple(source.article_id for source in dossier.evidence_sources)
+        for dossier in dossiers
+    }
+    allowed_references = []
+    for section in outline.sections:
+        allowed_article_ids = tuple(
+            sorted(
+                {
+                    article_id
+                    for event_id in section.event_ids
+                    for article_id in article_ids_by_event.get(event_id, ())
+                }
+            )
+        )
+        allowed_references.append(
+            {
+                "section_id": section.section_id,
+                "section_type": section.type,
+                "allowed_event_ids": list(section.event_ids),
+                "allowed_article_ids": list(allowed_article_ids),
+            }
+        )
+    return {
+        "schema_version": "1",
+        "required_section_ids": [section.section_id for section in outline.sections],
+        "allowed_references_by_section": allowed_references,
+    }

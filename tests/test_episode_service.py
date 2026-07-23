@@ -154,6 +154,44 @@ def test_non_pass_review_never_creates_episode(app_config_path) -> None:
         factory.kw["bind"].dispose()
 
 
+def test_relaxed_quality_gate_still_rejects_unknown_script_references(app_config_path) -> None:
+    """Alpha relaxation never permits a script that escapes the selected evidence topology."""
+    factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)
+    try:
+        artifacts = accepted_artifacts(factory, key="relaxed-structural-invalid")
+        payload = artifacts.script.model_dump(mode="json")
+        sections = payload["sections"]
+        assert isinstance(sections, list)
+        news_section = sections[1]
+        assert isinstance(news_section, dict)
+        news_section["article_ids"] = [999_999]
+        claims = news_section["claims"]
+        assert isinstance(claims, list)
+        claim = claims[0]
+        assert isinstance(claim, dict)
+        claim["article_ids"] = [999_999]
+
+        with pytest.raises(EpisodeCreationPreconditionError):
+            EpisodeService(factory).create_from_editorial_artifacts(
+                episode_date=artifacts.episode_date,
+                edition="daily",
+                outline=artifacts.outline,
+                script=payload,
+                validation=artifacts.validation,
+                review=artifacts.review,
+                metadata=artifacts.metadata,
+                selected_event_ids=artifacts.selected_event_ids,
+                evidence_dossiers=artifacts.dossiers,
+                enforce_quality_gate=False,
+            )
+
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            assert EpisodeRepository(unit.session).list() == []
+    finally:
+        factory.kw["bind"].dispose()
+
+
 def test_episode_item_uses_immutable_selected_event_snapshot(app_config_path) -> None:
     """EpisodeItem freezes event title, score, reason, source IDs, and outline position."""
     factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)

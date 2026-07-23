@@ -20,12 +20,18 @@ storage:
   data_dir: ./data
   public_dir: ./public
 
+# Missing IDs from this seed file are created at startup. Existing Source rows
+# remain authoritative, so user edits are never overwritten by a restart.
+sources:
+  config_path: ./config/sources.example.yaml
+
 # The in-process scheduler is opt-in to prevent surprise local daily runs.
 scheduler:
   enabled: false
   cron_expression: "0 8 * * *"
 
-# The direct OpenAI-compatible provider deliberately has no API key here.
+# Supported direct providers are openai_compatible (Chat Completions) and
+# openai_responses (Responses/Codex). The key deliberately stays out of YAML.
 # Set DAILYCAST_LLM__API_KEY in .env or the deployment environment instead.
 llm:
   provider: openai_compatible
@@ -43,6 +49,9 @@ llm:
     max_output_tokens: 15000
 
 editorial:
+  # Alpha records deterministic/LLM quality findings but does not block output.
+  # Set true to restore the strict review-required Episode gate.
+  enforce_quality_gate: false
   max_candidates: 30
   max_selected_events: 8
   max_sources_per_event: 3
@@ -80,10 +89,12 @@ ffmpeg:
   sample_rate: 24000
   bitrate: "64k"
 
-# RSS publishing stays review-gated by default. public_base_url is the public
-# enclosure origin and should be HTTPS for non-loopback deployment.
+# Alpha automatically approves and publishes structurally valid Episode/audio
+# pairs after merge. Set false to retain a local review-required draft only.
+# public_base_url is the public enclosure origin and should be HTTPS for
+# non-loopback deployment.
 publishing:
-  auto_publish: false
+  auto_publish: true
   public_base_url: http://127.0.0.1:8000
   feed_title: DailyCast
   feed_description: A personal AI news podcast.

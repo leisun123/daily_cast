@@ -81,7 +81,7 @@ class FFmpegMerger:
             raise AudioMergeError("FFmpeg output has no decodable audio stream")
         raw_duration = audio_stream.get("duration") or metadata.get("format", {}).get("duration")
         raw_sample_rate = audio_stream.get("sample_rate")
-        if not isinstance(raw_sample_rate, (str, int)):
+        if not isinstance(raw_sample_rate, str | int):
             raise AudioMergeError("FFmpeg output metadata is incomplete")
         try:
             duration_ms = round(float(raw_duration) * 1000)

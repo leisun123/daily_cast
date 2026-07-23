@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}最新任务 · DailyCast{% endblock %}
+{% block content %}
+  <h1>最新任务</h1>
+  {% if task_run %}
+    <section>
+      <p><strong>任务 ID：</strong>{{ task_run.id }}</p>
+      <p><strong>状态：</strong><span class="status">{{ task_run.status.value }}</span></p>
+      <p><strong>耗时：</strong>{{ duration }}</p>
+      {% if task_run.current_step %}<p><strong>当前步骤：</strong>{{ task_run.current_step }}</p>{% endif %}
+      {% if task_run.error_summary %}<p><strong>错误：</strong>{{ task_run.error_summary }}</p>{% endif %}
+    </section>
+    <section>
+      <h2>步骤</h2>
+      <table>
+        <thead><tr><th>步骤</th><th>状态</th><th>输入 / 输出</th><th>错误</th></tr></thead>
+        <tbody>
+          {% for step in steps %}
+            <tr><td>{{ step.step_name }}{% if step.attempt > 1 %}（第 {{ step.attempt }} 次）{% endif %}</td><td class="status">{{ step.status.value }}</td><td>{{ step.input_count if step.input_count is not none else "—" }} / {{ step.output_count if step.output_count is not none else "—" }}</td><td>{{ step.error_summary or "—" }}</td></tr>
+          {% else %}
+            <tr><td colspan="4" class="muted">任务尚未开始写入步骤。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% else %}
+    <p class="muted">尚无任务。回到首页提交一次生成任务。</p>
+  {% endif %}
+{% endblock %}

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from dailycast.db.models import TaskRunStatus
 from dailycast.db.repositories import TaskRunRepository
 from dailycast.db.transactions import UnitOfWork
 from dailycast.episodes.service import EpisodeService
@@ -28,6 +29,7 @@ class CreateEpisodeStep:
 
     episode_service: EpisodeService
     data_dir: Path
+    enforce_quality_gate: bool = True
     name: str = "create_episode"
 
     async def run(self, context: PipelineContext) -> StepResult:
@@ -44,9 +46,11 @@ class CreateEpisodeStep:
         review = ScriptReview.model_validate(store.read_json(context.task_run_id, "review.json"))
         selected_event_ids = _event_ids(context.values.get("outlined_news_event_ids"))
         artifact_refs = _artifact_refs(context.task_run_id)
-        if validation.has_blocking_issues:
+        if self.enforce_quality_gate and validation.has_blocking_issues:
             return _skipped_result(selected_event_ids, artifact_refs, "SCRIPT_VALIDATION_FAILED")
-        if review.verdict != "pass" or any(issue.severity == "blocking" for issue in review.issues):
+        if self.enforce_quality_gate and (
+            review.verdict != "pass" or any(issue.severity == "blocking" for issue in review.issues)
+        ):
             return _skipped_result(selected_event_ids, artifact_refs, "EDITORIAL_REVIEW_NOT_PASS")
         if not selected_event_ids:
             return _skipped_result(selected_event_ids, artifact_refs, "NO_SELECTED_EVENTS")
@@ -73,6 +77,7 @@ class CreateEpisodeStep:
             selected_event_ids=selected_event_ids,
             evidence_dossiers=evidence_dossiers,
             task_run_id=context.task_run_id,
+            enforce_quality_gate=self.enforce_quality_gate,
         )
         context.values["episode_id"] = episode.id
         return StepResult(
@@ -149,7 +154,7 @@ def _artifact_refs(task_run_id: str) -> list[JSONValue]:
 def _skipped_result(
     selected_event_ids: tuple[int, ...], artifact_refs: list[JSONValue], reason: str
 ) -> StepResult:
-    """Keep rejected editorial work visible without manufacturing an incomplete Episode."""
+    """Keep incomplete editorial work visible and stop before Episode-dependent checkpoints."""
     return StepResult(
         input_count=len(selected_event_ids),
         output_count=0,
@@ -158,6 +163,12 @@ def _skipped_result(
             {"artifact_refs": artifact_refs, "episode_created": False, "skip_reason": reason}
         ),
         details={"artifact_refs": artifact_refs, "episode_created": False, "skip_reason": reason},
+        stop_pipeline=True,
+        terminal_status=TaskRunStatus.WAITING_ACTION,
+        completion_code=reason,
+        completion_summary=(
+            "episode was not created; resolve the editorial gate before continuing with audio"
+        ),
     )
 
 

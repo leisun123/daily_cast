@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}DailyCast{% endblock %}
+{% block content %}
+  <h1>DailyCast</h1>
+  <p class="muted">每天一档由新闻、编辑与语音生成流程驱动的个人播客。</p>
+  <form action="/generate" method="post">
+    <button type="submit">生成今日节目</button>
+  </form>
+  {% if episode %}
+    <article>
+      <p class="status">状态：{{ episode.status.value }}</p>
+      <h2><a href="/episodes/{{ episode.id }}">{{ episode.title or "未命名节目" }}</a></h2>
+      {% if episode.description %}<p>{{ episode.description }}</p>{% endif %}
+      {% if audio_url %}
+        <audio controls preload="metadata"><source src="{{ audio_url }}" type="audio/mpeg">当前浏览器不支持音频播放。</audio>
+      {% else %}
+        <p class="muted">当前节目尚未公开发布，公开音频将在 RSS 发布后显示。</p>
+      {% endif %}
+      <p><a href="/feed.xml">订阅 RSS Feed</a></p>
+    </article>
+  {% else %}
+    <p class="muted">尚无节目。点击“生成今日节目”提交一次任务。</p>
+  {% endif %}
+{% endblock %}

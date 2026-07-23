@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from dailycast.db.models import LLMOperation
 from dailycast.llm.budget import BudgetController
 from dailycast.llm.editorial_service import AIEditorialService
+from dailycast.llm.prompts.generate_script_v2 import GENERATE_SCRIPT_V2
+from dailycast.llm.script_editorial import _script_messages
 
 
 @pytest.fixture
@@ -64,3 +67,28 @@ def test_generate_script_returns_traceable_structured_script(
     assert result.script.sections[1].section_id == "news-1"
     assert result.script.sections[1].article_ids == (fixture.article_id,)
     assert full_article not in canonical_messages(provider)
+
+
+def test_script_request_exposes_exact_reference_allowlists_for_json_only_providers(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """The model receives exact section order and IDs instead of inferring cross-field rules."""
+    fixture = create_selected_event(
+        migrated_session_factory,
+        key="script-contract",
+        content="Bounded supporting evidence.",
+    )
+    outline = build_outline(fixture.event_id)
+    dossiers = build_dossiers(migrated_session_factory, fixture)
+
+    messages = _script_messages(outline, dossiers, GENERATE_SCRIPT_V2)
+    payload = json.loads(messages[1].content)
+    constraints = payload["output_constraints"]
+
+    assert GENERATE_SCRIPT_V2.version == "generate_script_v2"
+    assert constraints["required_section_ids"] == [
+        section.section_id for section in outline.sections
+    ]
+    news_constraints = constraints["allowed_references_by_section"][1]
+    assert news_constraints["allowed_event_ids"] == [fixture.event_id]
+    assert news_constraints["allowed_article_ids"] == [fixture.article_id]

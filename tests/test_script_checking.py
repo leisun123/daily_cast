@@ -230,3 +230,91 @@ def test_deterministic_blocker_requires_human_review_without_metadata(
         assert any(issue.code == "CLAIM_WITHOUT_SOURCE" for issue in result.validation.issues)
     finally:
         factory.kw["bind"].dispose()
+
+
+def test_relaxed_quality_gate_keeps_short_revise_artifacts_and_generates_metadata(
+    app_config_path: Path,
+) -> None:
+    """Alpha mode records quality findings but still creates metadata for a valid script."""
+    factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)
+    try:
+        fixture = create_selected_event(
+            factory, key="alpha-relaxed-checking", content="可信新闻证据。"
+        )
+        outline = build_outline(fixture.event_id)
+        dossiers = build_dossiers(factory, fixture)
+        provider = FakeLLMProvider(
+            {
+                LLMOperation.REVIEW_SCRIPT: [_review("revise", fixture)],
+                LLMOperation.GENERATE_METADATA: [_metadata_payload()],
+            }
+        )
+        task_run_id, task_step_id = create_task_provenance(
+            factory, step_name="checking", step_order=9
+        )
+
+        result = asyncio.run(
+            ScriptCheckingService(
+                AIEditorialService(factory, provider),
+                max_automatic_script_revisions=1,
+                enforce_quality_gate=False,
+            ).check(
+                _script(outline, fixture, dossiers, text="过短的播报稿。"),
+                outline,
+                dossiers,
+                selected_event_titles=["事件 alpha-relaxed-checking"],
+                task_run_id=task_run_id,
+                task_step_id=task_step_id,
+                budget=BudgetController(),
+            )
+        )
+
+        assert result.requires_human_review is True
+        assert result.review.verdict == "revise"
+        assert any(issue.code == "SCRIPT_TOO_SHORT" for issue in result.validation.issues)
+        assert result.automatic_revision_count == 0
+        assert result.metadata is not None
+        assert LLMOperation.GENERATE_SCRIPT not in provider.calls_by_operation
+        assert provider.calls_by_operation[LLMOperation.REVIEW_SCRIPT] == 1
+        assert provider.calls_by_operation[LLMOperation.GENERATE_METADATA] == 1
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_strict_quality_gate_keeps_short_revise_artifacts_without_metadata(
+    app_config_path: Path,
+) -> None:
+    """The same content-quality findings remain a strict-mode metadata gate."""
+    factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)
+    try:
+        fixture = create_selected_event(
+            factory, key="alpha-strict-checking", content="可信新闻证据。"
+        )
+        outline = build_outline(fixture.event_id)
+        dossiers = build_dossiers(factory, fixture)
+        provider = FakeLLMProvider({LLMOperation.REVIEW_SCRIPT: [_review("revise", fixture)]})
+        task_run_id, task_step_id = create_task_provenance(
+            factory, step_name="checking", step_order=9
+        )
+
+        result = asyncio.run(
+            ScriptCheckingService(
+                AIEditorialService(factory, provider),
+                max_automatic_script_revisions=0,
+                enforce_quality_gate=True,
+            ).check(
+                _script(outline, fixture, dossiers, text="过短的播报稿。"),
+                outline,
+                dossiers,
+                selected_event_titles=["事件 alpha-strict-checking"],
+                task_run_id=task_run_id,
+                task_step_id=task_step_id,
+                budget=BudgetController(),
+            )
+        )
+
+        assert result.requires_human_review is True
+        assert result.metadata is None
+        assert LLMOperation.GENERATE_METADATA not in provider.calls_by_operation
+    finally:
+        factory.kw["bind"].dispose()

@@ -60,12 +60,14 @@ class ScriptCheckingService:
         editorial_service: AIEditorialService,
         *,
         max_automatic_script_revisions: int = 1,
+        enforce_quality_gate: bool = True,
     ) -> None:
         if max_automatic_script_revisions not in {0, 1}:
             msg = "Sprint 4B-3 permits at most one automatic script revision"
             raise ValueError(msg)
         self._editorial_service = editorial_service
         self._max_automatic_script_revisions = max_automatic_script_revisions
+        self._enforce_quality_gate = enforce_quality_gate
 
     async def check(
         self,
@@ -78,7 +80,7 @@ class ScriptCheckingService:
         task_step_id: int,
         budget: BudgetController,
     ) -> ScriptCheckingResult:
-        """Check once, optionally revise once, rereview once, then generate metadata if accepted."""
+        """Record checks, revising only when strict quality enforcement requires it."""
         validated_outline = EpisodeOutline.model_validate(outline)
         dossiers = tuple(EvidenceDossier.model_validate(dossier) for dossier in evidence_dossiers)
         validated_script = self._validated_script(script, validated_outline, dossiers)
@@ -100,7 +102,11 @@ class ScriptCheckingService:
             ScriptReviewResult | ScriptRevisionResult | MetadataGenerationResult
         ] = [review_result]
 
-        if review_result.review.verdict == "revise" and self._max_automatic_script_revisions == 1:
+        if (
+            self._enforce_quality_gate
+            and review_result.review.verdict == "revise"
+            and self._max_automatic_script_revisions == 1
+        ):
             revision_result = await self._editorial_service.revise_script(
                 validated_script,
                 validated_outline,
@@ -133,7 +139,7 @@ class ScriptCheckingService:
             or any(issue.severity == "blocking" for issue in review_result.review.issues)
         )
         metadata_result = None
-        if not requires_human_review:
+        if not requires_human_review or not self._enforce_quality_gate:
             metadata_result = await self._editorial_service.generate_metadata(
                 validated_script,
                 selected_event_titles,

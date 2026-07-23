@@ -5,7 +5,8 @@ sources:
   - id: hacker-news-rss
     name: Hacker News
     kind: rss
-    entry_url: https://news.ycombinator.com/rss
+    # The maintained mirror serves the Hacker News front page feed with valid TLS.
+    entry_url: https://hnrss.org/frontpage
     priority: 80
     language: en
     request_timeout_seconds: 20

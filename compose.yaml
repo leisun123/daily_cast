@@ -3,6 +3,11 @@ services:
     build:
       context: .
     image: dailycast:0.1.0-alpha
+    # Optional local settings and secrets. This preserves YAML defaults when
+    # .env is absent while letting Pydantic receive documented DAILYCAST_* keys.
+    env_file:
+      - path: .env
+        required: false
     environment:
       DAILYCAST_CONFIG_PATH: /app/config/app.example.yaml
       DAILYCAST_APP__SERVER__HOST: 0.0.0.0

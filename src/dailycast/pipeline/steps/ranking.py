@@ -27,6 +27,21 @@ class RankingStep:
         if not isinstance(task_step_id, int):
             msg = "ranking requires an active persisted TaskStep ID"
             raise RuntimeError(msg)
+        if not event_ids:
+            return StepResult(
+                input_count=0,
+                output_count=0,
+                warning_count=1,
+                checkpoint_json=json.dumps(
+                    {"scored_event_ids": [], "selected_event_ids": []}, separators=(",", ":")
+                ),
+                details={"skip_reason": "NO_PUBLISHABLE_EVENTS"},
+                stop_pipeline=True,
+                completion_code="NO_PUBLISHABLE_EVENTS",
+                completion_summary=(
+                    "no eligible NewsEvents were available after deterministic processing"
+                ),
+            )
         budget = _task_budget(context, self.budget_factory)
         result = await self.editorial_service.score_events(
             event_ids,

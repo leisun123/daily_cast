@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from dailycast.db.models import EpisodeStatus
+from dailycast.episodes.service import EpisodeService
 from dailycast.pipeline.context import PipelineContext
 from dailycast.pipeline.contracts import JSONValue, StepResult
 from dailycast.publishing.service import PublicationPreconditionError, PublicationService
@@ -12,20 +14,30 @@ from dailycast.publishing.service import PublicationPreconditionError, Publicati
 
 @dataclass(frozen=True, slots=True)
 class PublishStep:
-    """Keep generation review-gated while supporting an explicitly enabled publish checkpoint."""
+    """Publish only after explicit human approval or the configured auto-publish handoff."""
 
+    episode_service: EpisodeService
     publication_service: PublicationService
     auto_publish: bool
     name: str = "publish"
 
     async def run(self, context: PipelineContext) -> StepResult:
-        """Publish an approved Episode or record a normal review-gate no-op."""
+        """Publish an approved Episode or explicitly approve a valid draft in auto mode."""
         _active_task_step_id(context)
         episode_id = context.values.get("episode_id")
         if not isinstance(episode_id, int):
             raise RuntimeError("publish requires an Episode produced by create_episode")
         if not self.auto_publish:
             return _skipped_result(episode_id, "AUTO_PUBLISH_DISABLED")
+        episode = self.episode_service.get_episode(episode_id)
+        if episode is None:
+            raise RuntimeError(f"Episode {episode_id} does not exist")
+        auto_approved = False
+        if episode.status is EpisodeStatus.REVIEW_REQUIRED:
+            self.episode_service.approve(episode_id)
+            auto_approved = True
+        elif episode.status is not EpisodeStatus.APPROVED:
+            return _skipped_result(episode_id, "EPISODE_NOT_REVIEWABLE")
         try:
             publication = self.publication_service.publish(episode_id)
         except PublicationPreconditionError:
@@ -34,6 +46,7 @@ class PublishStep:
         details: dict[str, JSONValue] = {
             "asset_path": publication.public_asset_path,
             "asset_reused": response_summary.get("asset_reused", False),
+            "auto_approved": auto_approved,
             "episode_id": episode_id,
             "feed_version": response_summary.get("feed_version"),
             "feed_guid": publication.feed_guid,

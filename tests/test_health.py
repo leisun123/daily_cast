@@ -2,19 +2,24 @@
 
 from pathlib import Path
 
+from editorial_test_support import upgraded_session_factory
 from fastapi.testclient import TestClient
 
 from dailycast.main import create_app
 
 
 def test_root_and_healthz_are_available(app_config_path: Path) -> None:
-    """Sprint 0 exposes only service identity and liveness before readiness."""
-    with TestClient(create_app(config_path=app_config_path)) as client:
-        root = client.get("/")
-        health = client.get("/healthz", headers={"X-Request-ID": "test-request"})
+    """The minimal web home and process liveness endpoint are available."""
+    factory = upgraded_session_factory(app_config_path)
+    try:
+        with TestClient(create_app(config_path=app_config_path)) as client:
+            root = client.get("/")
+            health = client.get("/healthz", headers={"X-Request-ID": "test-request"})
+    finally:
+        factory.kw["bind"].dispose()
 
     assert root.status_code == 200
-    assert root.json() == {"message": "DailyCast API"}
+    assert "DailyCast" in root.text
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
     assert health.headers["X-Request-ID"] == "test-request"

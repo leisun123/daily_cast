@@ -101,7 +101,20 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             database_url=database_url,
         )
         assert revision.is_current is True
-        assert revision.current == ("0001_initial_schema",)
+        assert revision.current == ("0002_task_run_waiting_action",)
+    finally:
+        engine.dispose()
+
+
+def test_sqlite_safety_pragmas_apply_to_each_connection(app_config_path: Path) -> None:
+    """Every pooled connection keeps foreign keys and busy timeout after one-time WAL setup."""
+    engine, _, _ = upgrade_empty_database(app_config_path)
+    try:
+        with engine.connect() as first_connection, engine.connect() as second_connection:
+            for connection in (first_connection, second_connection):
+                assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+                assert connection.execute(text("PRAGMA busy_timeout")).scalar_one() == 5000
+                assert connection.execute(text("PRAGMA journal_mode")).scalar_one() == "wal"
     finally:
         engine.dispose()
 

@@ -246,7 +246,6 @@ def test_edge_provider_is_async_and_uses_configured_voice_speed_without_network(
             "text": "测试内容",
             "voice": "zh-CN-XiaoxiaoNeural",
             "rate": "+20%",
-            "output_format": "audio-24khz-48kbitrate-mono-mp3",
         }
     ]
 

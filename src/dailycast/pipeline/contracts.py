@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
-from dailycast.db.models import TaskType, TriggerType
+from dailycast.db.models import TaskRunStatus, TaskType, TriggerType
 
 if TYPE_CHECKING:
     from dailycast.pipeline.context import PipelineContext
@@ -50,6 +50,10 @@ class StepResult:
     details: Mapping[str, JSONValue] = field(default_factory=dict)
     artifact_path: str | None = None
     retryable: bool = False
+    stop_pipeline: bool = False
+    terminal_status: TaskRunStatus | None = None
+    completion_code: str | None = None
+    completion_summary: str | None = None
 
     @property
     def details_json(self) -> str:

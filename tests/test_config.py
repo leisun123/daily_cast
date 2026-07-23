@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from dailycast.core.config import load_settings
+from dailycast.core.config import EditorialSettings, PublishingSettings, load_settings
 from dailycast.core.errors import ConfigurationError
 
 
@@ -51,13 +51,23 @@ def test_tts_and_ffmpeg_defaults_are_explicit_configuration(app_config_path: Pat
     assert settings.ffmpeg.bitrate == "64k"
 
 
-def test_publishing_defaults_keep_review_gated_rss_explicit(app_config_path: Path) -> None:
-    """RSS channel identity and origin do not default to automatic publication."""
-    settings = load_settings(config_path=app_config_path)
+def test_alpha_example_unblocks_quality_gated_output_and_auto_publish(tmp_path: Path) -> None:
+    """The shipped Alpha configuration records quality findings without blocking output."""
+    settings = load_settings(
+        config_path=Path(__file__).resolve().parents[1] / "config" / "app.example.yaml",
+        env_file=tmp_path / "absent.env",
+    )
 
-    assert settings.publishing.auto_publish is False
+    assert settings.editorial.enforce_quality_gate is False
+    assert settings.publishing.auto_publish is True
     assert settings.publishing.public_base_url == "http://127.0.0.1:8000"
     assert settings.publishing.feed_title == "DailyCast"
+
+
+def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:
+    """Deployments must opt in to Alpha relaxation rather than inherit it silently."""
+    assert EditorialSettings().enforce_quality_gate is True
+    assert PublishingSettings().auto_publish is False
 
 
 def test_missing_yaml_fails_fast(tmp_path: Path) -> None:

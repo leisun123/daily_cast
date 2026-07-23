@@ -20,8 +20,10 @@ from dailycast.db.revision import RevisionStatus, inspect_revision
 from dailycast.db.session import create_session_factory, create_sqlite_engine
 from dailycast.episodes.service import EpisodeService
 from dailycast.llm.budget import BudgetController
+from dailycast.llm.contracts import LLMProvider
 from dailycast.llm.editorial_service import AIEditorialService
 from dailycast.llm.providers.openai_compatible import OpenAICompatibleLLMProvider
+from dailycast.llm.providers.openai_responses import OpenAIResponsesLLMProvider
 from dailycast.news.service import NewsProcessor
 from dailycast.news.types import ProcessingPolicy
 from dailycast.pipeline.contracts import TaskCommand
@@ -32,6 +34,7 @@ from dailycast.pipeline.submission import TaskSubmissionService
 from dailycast.publishing.rss import RSSPublisher, RSSSettings
 from dailycast.publishing.service import PublicationService
 from dailycast.scheduler.service import SchedulerService
+from dailycast.sources.bootstrap import seed_missing_sources
 from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import ArticleService, SourceCollectionService
@@ -86,6 +89,13 @@ def build_lifespan(
         scheduler: SchedulerService | None = None
         llm_client: httpx.AsyncClient | None = None
         if startup_revision_status is not None and startup_revision_status.is_current:
+            created_source_count = seed_missing_sources(
+                session_factory,
+                settings.resolve_path(settings.sources.config_path),
+            )
+            logger.info(
+                "source_seed_completed", extra={"created_source_count": created_source_count}
+            )
             fetcher = SafeHttpFetcher()
             article_service = ArticleService(session_factory)
             collection_service = SourceCollectionService(
@@ -104,18 +114,7 @@ def build_lifespan(
                 timezone=settings.app.timezone,
             )
             llm_client = httpx.AsyncClient()
-            llm_provider = OpenAICompatibleLLMProvider(
-                base_url=settings.llm.base_url,
-                api_key=settings.llm.api_key,
-                model=settings.llm.model,
-                timeout_seconds=settings.llm.timeout_seconds,
-                temperature=settings.llm.temperature,
-                top_p=settings.llm.top_p,
-                max_output_tokens=settings.llm.max_output_tokens,
-                max_retries=settings.llm.max_retries,
-                response_format=settings.llm.response_format,
-                http_client=llm_client,
-            )
+            llm_provider = build_llm_provider(settings, http_client=llm_client)
             editorial_service = AIEditorialService(
                 session_factory,
                 llm_provider,
@@ -187,6 +186,7 @@ def build_lifespan(
                     ),
                     data_dir=settings.data_dir,
                     auto_publish=settings.publishing.auto_publish,
+                    enforce_quality_gate=settings.editorial.enforce_quality_gate,
                     max_automatic_script_revisions=(
                         settings.editorial.max_automatic_script_revisions
                     ),
@@ -199,24 +199,8 @@ def build_lifespan(
             await RecoveryService(session_factory, submission_service).recover()
             scheduler = SchedulerService(
                 submission_service,
-                lambda: TaskCommand(
-                    task_type=TaskType.DAILY_GENERATE,
-                    request={
-                        "edition": "daily",
-                        "episode_date": datetime.now(ZoneInfo(settings.app.timezone))
-                        .date()
-                        .isoformat(),
-                    },
-                    config_snapshot={
-                        "pipeline": "rss-v1",
-                        "processing": settings.processing.model_dump(mode="json"),
-                        "editorial": settings.editorial.model_dump(mode="json"),
-                        "ffmpeg": settings.ffmpeg.model_dump(mode="json"),
-                        "tts": settings.tts.model_dump(mode="json"),
-                        "publishing": settings.publishing.model_dump(mode="json"),
-                    },
-                    pipeline_version="rss-v1",
-                    trigger_type=TriggerType.SCHEDULED,
+                lambda: build_daily_generation_command(
+                    settings, trigger_type=TriggerType.SCHEDULED
                 ),
                 cron_expression=settings.scheduler.cron_expression,
                 timezone=settings.app.timezone,
@@ -248,3 +232,56 @@ def build_lifespan(
             logger.info("application_stopped")
 
     return lifespan
+
+
+def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) -> LLMProvider:
+    """Select the configured provider without leaking protocol details into editorial flow."""
+    if settings.llm.provider == "openai_compatible":
+        return OpenAICompatibleLLMProvider(
+            base_url=settings.llm.base_url,
+            api_key=settings.llm.api_key,
+            model=settings.llm.model,
+            timeout_seconds=settings.llm.timeout_seconds,
+            temperature=settings.llm.temperature,
+            top_p=settings.llm.top_p,
+            max_output_tokens=settings.llm.max_output_tokens,
+            max_retries=settings.llm.max_retries,
+            response_format=settings.llm.response_format,
+            http_client=http_client,
+        )
+    if settings.llm.provider == "openai_responses":
+        return OpenAIResponsesLLMProvider(
+            base_url=settings.llm.base_url,
+            api_key=settings.llm.api_key,
+            model=settings.llm.model,
+            timeout_seconds=settings.llm.timeout_seconds,
+            temperature=settings.llm.temperature,
+            top_p=settings.llm.top_p,
+            max_output_tokens=settings.llm.max_output_tokens,
+            max_retries=settings.llm.max_retries,
+            response_format=settings.llm.response_format,
+            http_client=http_client,
+        )
+    msg = f"unsupported configured LLM provider: {settings.llm.provider}"
+    raise RuntimeError(msg)
+
+
+def build_daily_generation_command(settings: Settings, *, trigger_type: TriggerType) -> TaskCommand:
+    """Build the one documented daily command for scheduler and manual submission alike."""
+    return TaskCommand(
+        task_type=TaskType.DAILY_GENERATE,
+        request={
+            "edition": "daily",
+            "episode_date": datetime.now(ZoneInfo(settings.app.timezone)).date().isoformat(),
+        },
+        config_snapshot={
+            "pipeline": "rss-v1",
+            "processing": settings.processing.model_dump(mode="json"),
+            "editorial": settings.editorial.model_dump(mode="json"),
+            "ffmpeg": settings.ffmpeg.model_dump(mode="json"),
+            "tts": settings.tts.model_dump(mode="json"),
+            "publishing": settings.publishing.model_dump(mode="json"),
+        },
+        pipeline_version="rss-v1",
+        trigger_type=trigger_type,
+    )

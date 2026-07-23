@@ -184,6 +184,15 @@ class EpisodeRepository:
         )
         return list(self._session.scalars(statement))
 
+    def latest(self) -> Episode | None:
+        """Return the newest Episode for the minimal single-user landing page."""
+        statement = (
+            select(Episode)
+            .order_by(Episode.episode_date.desc(), Episode.edition, Episode.id)
+            .limit(1)
+        )
+        return self._session.scalar(statement)
+
     def update_status(self, episode: Episode, status: EpisodeStatus | str) -> Episode:
         """Persist an explicit state change; lifecycle validation belongs to later services."""
         episode.status = status  # type: ignore[assignment]
@@ -238,6 +247,11 @@ class TaskRunRepository:
     def get(self, task_run_id: str) -> TaskRun | None:
         """Return a task run by UUID text identifier."""
         return self._session.get(TaskRun, task_run_id)
+
+    def latest(self) -> TaskRun | None:
+        """Return the most recently submitted run for the compact operator page."""
+        statement = select(TaskRun).order_by(TaskRun.created_at.desc(), TaskRun.id.desc()).limit(1)
+        return self._session.scalar(statement)
 
     def get_by_idempotency_key(self, idempotency_key: str) -> TaskRun | None:
         """Return the one task request bound to a client idempotency key."""
@@ -318,6 +332,15 @@ class TaskStepRepository:
     def get(self, step_id: int) -> TaskStep | None:
         """Return a TaskStep by its local identifier."""
         return self._session.get(TaskStep, step_id)
+
+    def list_by_task_run(self, task_run_id: str) -> list[TaskStep]:
+        """Return task attempts in their stable pipeline order for operator inspection."""
+        statement = (
+            select(TaskStep)
+            .where(TaskStep.task_run_id == task_run_id)
+            .order_by(TaskStep.step_order, TaskStep.attempt, TaskStep.id)
+        )
+        return list(self._session.scalars(statement))
 
     def finish(
         self,
@@ -513,6 +536,19 @@ class PublicationRepository:
                 Episode.public_id == episode_public_id,
                 Publication.public_asset_path == expected_path,
             )
+        )
+        return self._session.scalar(statement)
+
+    def get_published_for_episode(self, episode_id: int) -> Publication | None:
+        """Resolve one published public asset without exposing the mutable draft path."""
+        statement = (
+            select(Publication)
+            .where(
+                Publication.episode_id == episode_id,
+                Publication.status == PublicationStatus.PUBLISHED,
+            )
+            .order_by(Publication.published_at.desc(), Publication.id.desc())
+            .limit(1)
         )
         return self._session.scalar(statement)
 

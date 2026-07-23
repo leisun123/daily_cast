@@ -78,6 +78,21 @@ class PipelineOrchestrator:
                 return self._fail_step_and_run(task_run_id, task_step_id, error)
             self._finish_step(task_step_id, result)
             warning_count += result.warning_count
+            if result.terminal_status is not None:
+                return self._wait_for_action(
+                    task_run_id,
+                    warning_count,
+                    terminal_status=result.terminal_status,
+                    completion_code=result.completion_code,
+                    completion_summary=result.completion_summary,
+                )
+            if result.stop_pipeline:
+                return self._succeed(
+                    task_run_id,
+                    warning_count,
+                    completion_code=result.completion_code,
+                    completion_summary=result.completion_summary,
+                )
 
         return self._succeed(task_run_id, warning_count)
 
@@ -199,7 +214,14 @@ class PipelineOrchestrator:
                 retryable=True,
             )
 
-    def _succeed(self, task_run_id: str, warning_count: int) -> TaskRun:
+    def _succeed(
+        self,
+        task_run_id: str,
+        warning_count: int,
+        *,
+        completion_code: str | None = None,
+        completion_summary: str | None = None,
+    ) -> TaskRun:
         """Commit the completed TaskRun after every checkpoint has succeeded."""
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
@@ -208,12 +230,48 @@ class PipelineOrchestrator:
             if task_run is None:
                 msg = f"TaskRun {task_run_id} disappeared before success"
                 raise RuntimeError(msg)
-            validate_task_run_transition(task_run.status, TaskRunStatus.SUCCEEDED)
+            status = (
+                TaskRunStatus.SUCCEEDED_WITH_WARNINGS if warning_count else TaskRunStatus.SUCCEEDED
+            )
+            validate_task_run_transition(task_run.status, status)
             return task_runs.update_status(
                 task_run,
-                TaskRunStatus.SUCCEEDED,
+                status,
                 ended_at=self._clock.now(),
                 warning_count=warning_count,
+                error_code=completion_code,
+                error_summary=completion_summary,
+            )
+
+    def _wait_for_action(
+        self,
+        task_run_id: str,
+        warning_count: int,
+        *,
+        terminal_status: TaskRunStatus,
+        completion_code: str | None,
+        completion_summary: str | None,
+    ) -> TaskRun:
+        """End a non-failed run when a checkpoint requires a human decision or revision."""
+        if terminal_status is not TaskRunStatus.WAITING_ACTION:
+            msg = f"unsupported non-failed terminal TaskRun status: {terminal_status.value}"
+            raise ValueError(msg)
+        with UnitOfWork(self._session_factory) as unit:
+            assert unit.session is not None
+            task_runs = TaskRunRepository(unit.session)
+            task_run = task_runs.get(task_run_id)
+            if task_run is None:
+                msg = f"TaskRun {task_run_id} disappeared before waiting for human action"
+                raise RuntimeError(msg)
+            validate_task_run_transition(task_run.status, terminal_status)
+            return task_runs.update_status(
+                task_run,
+                terminal_status,
+                ended_at=self._clock.now(),
+                warning_count=warning_count,
+                retryable=False,
+                error_code=completion_code or "WAITING_ACTION",
+                error_summary=completion_summary or "pipeline stopped pending human action",
             )
 
 
@@ -230,6 +288,7 @@ def build_collection_pipeline(
     *,
     data_dir: Path,
     auto_publish: bool = False,
+    enforce_quality_gate: bool = True,
     collection_window_hours: int = 36,
     max_automatic_script_revisions: int = 1,
     clock: Clock | None = None,
@@ -252,9 +311,14 @@ def build_collection_pipeline(
                 data_dir,
                 budget_factory,
                 max_automatic_script_revisions=max_automatic_script_revisions,
+                enforce_quality_gate=enforce_quality_gate,
             ),
-            CreateEpisodeStep(episode_service, data_dir),
+            CreateEpisodeStep(
+                episode_service,
+                data_dir,
+                enforce_quality_gate=enforce_quality_gate,
+            ),
             GenerateAudioStep(audio_service),
-            PublishStep(publication_service, auto_publish=auto_publish),
+            PublishStep(episode_service, publication_service, auto_publish=auto_publish),
         ),
     )

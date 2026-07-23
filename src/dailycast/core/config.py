@@ -60,6 +60,12 @@ class StorageSettings(BaseModel):
     public_dir: Path = Path("public")
 
 
+class SourcesSettings(BaseModel):
+    """The seed-only YAML file used to create missing Source rows on first startup."""
+
+    config_path: Path = Path("config/sources.example.yaml")
+
+
 class SchedulerSettings(BaseModel):
     """Local APScheduler submission settings; disabled until a user opts in."""
 
@@ -76,7 +82,7 @@ class LLMBudgetSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    """Direct OpenAI-compatible settings; the key comes only from .env or environment."""
+    """Direct model-provider settings; the key comes only from .env or environment."""
 
     provider: str = "openai_compatible"
     base_url: str = "https://api.openai.com/v1"
@@ -90,10 +96,21 @@ class LLMSettings(BaseModel):
     response_format: str = "json_schema"
     budget: LLMBudgetSettings = Field(default_factory=LLMBudgetSettings)
 
+    @field_validator("provider")
+    @classmethod
+    def require_supported_provider(cls, value: str) -> str:
+        """Fail at configuration load instead of silently selecting an unsupported wire protocol."""
+        supported = {"openai_compatible", "openai_responses"}
+        if value not in supported:
+            msg = f"llm.provider must be one of: {', '.join(sorted(supported))}"
+            raise ValueError(msg)
+        return value
+
 
 class EditorialSettings(BaseModel):
     """Explicit limits for ranking, bounded evidence, and outline generation."""
 
+    enforce_quality_gate: bool = True
     max_candidates: int = Field(default=30, ge=1, le=30)
     max_selected_events: int = Field(default=8, ge=1, le=30)
     max_sources_per_event: int = Field(default=3, ge=1, le=3)
@@ -238,6 +255,7 @@ class Settings(BaseSettings):
     app: AppSettings = Field(default_factory=AppSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    sources: SourcesSettings = Field(default_factory=SourcesSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     editorial: EditorialSettings = Field(default_factory=EditorialSettings)

@@ -41,6 +41,7 @@ from dailycast.llm.artifacts import LLMResponseValidationError
 from dailycast.llm.budget import BudgetController
 from dailycast.llm.contracts import LLMMessage, LLMUsage, StructuredResult
 from dailycast.llm.editorial_service import AIEditorialService
+from dailycast.llm.prompts.score_events_v2 import SCORE_EVENTS_V2
 from dailycast.pipeline.context import PipelineContext
 from dailycast.pipeline.steps.ranking import RankingStep
 
@@ -210,6 +211,17 @@ def event_score(event_id: int, *, importance: int, relevance: int) -> dict[str, 
         "reason": f"Reason for event {event_id}",
         "risks": ["verify wording"],
     }
+
+
+def test_score_events_v2_prompt_declares_the_complete_json_object_contract() -> None:
+    """JSON-object mode needs an explicit semantic schema when strict output is unavailable."""
+    instruction = SCORE_EVENTS_V2.system_instruction
+
+    assert SCORE_EVENTS_V2.version == "score_events_v2"
+    assert "`scores`" in instruction
+    assert "event_id" in instruction
+    assert "recommend" in instruction
+    assert "exactly once" in instruction
 
 
 def test_event_card_is_bounded_and_excludes_full_article_content(

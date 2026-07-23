@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ episode.title or "DailyCast 节目" }}{% endblock %}
+{% block content %}
+  <p><a href="/">← 返回最新节目</a></p>
+  <h1>{{ episode.title or "未命名节目" }}</h1>
+  <p class="status">状态：{{ episode.status.value }} · {{ episode.episode_date }} · {{ episode.edition }}</p>
+  {% if episode.description %}<p>{{ episode.description }}</p>{% endif %}
+  {% if audio_url %}
+    <audio controls preload="metadata"><source src="{{ audio_url }}" type="audio/mpeg">当前浏览器不支持音频播放。</audio>
+  {% else %}
+    <p class="muted">当前节目尚未公开发布，因此不会暴露草稿音频。</p>
+  {% endif %}
+  <section>
+    <h2>节目条目</h2>
+    <p>来源数：{{ source_count }}</p>
+    <ol>
+      {% for item in items %}
+        <li><strong>{{ item.event_title_snapshot }}</strong>{% if item.selection_reason_snapshot %}：{{ item.selection_reason_snapshot }}{% endif %}</li>
+      {% else %}
+        <li class="muted">本节目尚无新闻条目。</li>
+      {% endfor %}
+    </ol>
+  </section>
+  <section>
+    <h2>播客稿</h2>
+    <pre>{{ episode.script_text or "暂无播客稿。" }}</pre>
+  </section>
+{% endblock %}

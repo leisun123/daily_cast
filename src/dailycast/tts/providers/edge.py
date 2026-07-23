@@ -35,9 +35,9 @@ class EdgeTTSProvider:
         return sha256_text(
             json.dumps(
                 {
-                    "implementation": "edge-tts-python",
+                    "implementation": "edge-tts-python-v7-default-mp3",
                     "endpoint_identity": "edge-tts-service",
-                    "semantic_options": {"output_format": "audio-24khz-48kbitrate-mono-mp3"},
+                    "semantic_options": {"output_format": "edge-tts-default-mp3"},
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -68,7 +68,6 @@ class EdgeTTSProvider:
             text,
             voice=voice,
             rate=_edge_rate(speed),
-            output_format="audio-24khz-48kbitrate-mono-mp3",
         )
         chunks: list[bytes] = []
         async for chunk in communication.stream():

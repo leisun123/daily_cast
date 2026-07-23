@@ -14,6 +14,8 @@ _ALLOWED_TRANSITIONS: dict[TaskRunStatus, frozenset[TaskRunStatus]] = {
     TaskRunStatus.RUNNING: frozenset(
         {
             TaskRunStatus.SUCCEEDED,
+            TaskRunStatus.SUCCEEDED_WITH_WARNINGS,
+            TaskRunStatus.WAITING_ACTION,
             TaskRunStatus.FAILED,
             TaskRunStatus.INTERRUPTED,
             TaskRunStatus.CANCELLED,

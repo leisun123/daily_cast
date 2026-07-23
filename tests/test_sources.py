@@ -494,7 +494,10 @@ def test_collection_pipeline_persists_articles_and_continues_after_one_extractio
                     assert unit.session is not None
                     current = TaskRunRepository(unit.session).get(task_run.id)
                     assert current is not None
-                    if current.status == TaskRunStatus.SUCCEEDED:
+                    if current.status in {
+                        TaskRunStatus.SUCCEEDED,
+                        TaskRunStatus.SUCCEEDED_WITH_WARNINGS,
+                    }:
                         break
                 await asyncio.sleep(0.01)
 
@@ -502,7 +505,7 @@ def test_collection_pipeline_persists_articles_and_continues_after_one_extractio
                 assert unit.session is not None
                 current = TaskRunRepository(unit.session).get(task_run.id)
                 assert current is not None
-                assert current.status == TaskRunStatus.SUCCEEDED
+                assert current.status == TaskRunStatus.SUCCEEDED_WITH_WARNINGS
                 assert [step.step_name for step in current.steps] == [
                     "collecting",
                     "extracting",

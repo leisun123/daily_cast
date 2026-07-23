@@ -31,12 +31,12 @@ from dailycast.llm.script_schemas import (
 
 
 class EpisodeCreationPreconditionError(DailyCastError):
-    """Raised when editorial artifacts are not safe to persist as an Episode draft."""
+    """Raised when editorial artifacts are not structurally safe to persist as an Episode."""
 
     def __init__(self) -> None:
         super().__init__(
             code="EPISODE_EDITORIAL_ARTIFACTS_INVALID",
-            message="Episode requires validated script, pass review verdict, and metadata",
+            message="Episode requires structurally valid outline, script, evidence, and metadata",
             status_code=422,
         )
 
@@ -90,6 +90,7 @@ class EpisodeService:
         selected_event_ids: Sequence[int],
         evidence_dossiers: Sequence[object],
         task_run_id: str | None = None,
+        enforce_quality_gate: bool = True,
     ) -> Episode:
         """Create one review-required Episode and frozen EpisodeItems, or reuse its identity."""
         with UnitOfWork(self._session_factory) as unit:
@@ -108,6 +109,7 @@ class EpisodeService:
                 metadata=metadata,
                 selected_event_ids=selected_event_ids,
                 evidence_dossiers=evidence_dossiers,
+                enforce_quality_gate=enforce_quality_gate,
             )
             events = NewsEventRepository(unit.session)
             selected_events = []
@@ -259,25 +261,37 @@ def _validated_artifacts(
     metadata: object,
     selected_event_ids: Sequence[int],
     evidence_dossiers: Sequence[object],
+    enforce_quality_gate: bool,
 ) -> _ValidatedArtifacts:
     """Validate every input crossing the editorial-to-persistence boundary exactly once."""
     try:
         validated_outline = EpisodeOutline.model_validate(outline)
-        validated_script = EpisodeScript.model_validate(script)
         validated_validation = ValidationReport.model_validate(validation)
-        validated_review = ScriptReview.model_validate(review)
         validated_metadata = EpisodeMetadata.model_validate(metadata)
         event_ids = tuple(selected_event_ids)
         dossiers = tuple(EvidenceDossier.model_validate(dossier) for dossier in evidence_dossiers)
+        validated_script = EpisodeScript.model_validate(
+            script,
+            context={"outline": validated_outline, "evidence_dossiers": dossiers},
+        )
+        validated_review = ScriptReview.model_validate(
+            review,
+            context={"script": validated_script, "evidence_dossiers": dossiers},
+        )
     except ValidationError as error:
         raise EpisodeCreationPreconditionError() from error
     if (
         not event_ids
         or len(event_ids) != len(set(event_ids))
         or not all(isinstance(event_id, int) and event_id > 0 for event_id in event_ids)
-        or validated_validation.has_blocking_issues
-        or validated_review.verdict != "pass"
-        or any(issue.severity == "blocking" for issue in validated_review.issues)
+        or (
+            enforce_quality_gate
+            and (
+                validated_validation.has_blocking_issues
+                or validated_review.verdict != "pass"
+                or any(issue.severity == "blocking" for issue in validated_review.issues)
+            )
+        )
     ):
         raise EpisodeCreationPreconditionError()
     dossiers_by_event_id = {dossier.event_id: dossier for dossier in dossiers}

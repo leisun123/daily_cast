@@ -114,6 +114,7 @@ class TaskRunStatus(StrEnum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    WAITING_ACTION = "waiting_action"
     SUCCEEDED = "succeeded"
     SUCCEEDED_WITH_WARNINGS = "succeeded_with_warnings"
     FAILED = "failed"
