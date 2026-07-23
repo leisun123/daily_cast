@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DailyCast test feed</title>
+    <link>https://feed.example.test/rss</link>
+    <description>Stable feed fixture</description>
+    <item>
+      <guid isPermaLink="false">hn-1001</guid>
+      <title>First collection candidate</title>
+      <link>https://article.example.test/first?utm_source=rss</link>
+      <description><![CDATA[<p>First <strong>summary</strong>.</p>]]></description>
+      <pubDate>Tue, 21 Jul 2026 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <guid isPermaLink="false">hn-1002</guid>
+      <title>Second collection candidate</title>
+      <link>https://article.example.test/second</link>
+      <description>Second summary.</description>
+      <pubDate>Tue, 21 Jul 2026 11:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,13 @@
+# Source configuration example. V0.1 Alpha ships an RSS collector and extracts
+# linked web-page text through the shared safe HTTP extractor. No source
+# credential belongs in this file.
+sources:
+  - id: hacker-news-rss
+    name: Hacker News
+    kind: rss
+    entry_url: https://news.ycombinator.com/rss
+    priority: 80
+    language: en
+    request_timeout_seconds: 20
+    max_items_per_run: 50
+    config: {}

@@ -1,0 +1,95 @@
+# Application identity and local development listener. Compose overrides the
+# container listener to 0.0.0.0 while retaining a loopback host-port mapping.
+app:
+  name: DailyCast
+  environment: development
+  timezone: Asia/Shanghai
+  server:
+    host: 127.0.0.1
+    port: 8000
+
+# SQLite is the V0.1 Alpha source of truth. Use an environment variable rather
+# than YAML if a deployment needs a different local database path.
+database:
+  url: sqlite:///./data/dailycast.db
+  echo: false
+
+# Private task artifacts and public immutable RSS/media roots. Set DATA_DIR and
+# PUBLIC_DIR in the environment to override these paths.
+storage:
+  data_dir: ./data
+  public_dir: ./public
+
+# The in-process scheduler is opt-in to prevent surprise local daily runs.
+scheduler:
+  enabled: false
+  cron_expression: "0 8 * * *"
+
+# The direct OpenAI-compatible provider deliberately has no API key here.
+# Set DAILYCAST_LLM__API_KEY in .env or the deployment environment instead.
+llm:
+  provider: openai_compatible
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  temperature: 0.1
+  top_p: null
+  max_output_tokens: 2000
+  timeout_seconds: 30
+  max_retries: 2
+  response_format: json_schema
+  budget:
+    max_calls: 12
+    max_input_tokens: 60000
+    max_output_tokens: 15000
+
+editorial:
+  max_candidates: 30
+  max_selected_events: 8
+  max_sources_per_event: 3
+  max_chars_per_source: 1200
+  max_total_evidence_chars: 24000
+  min_publishable_events: 1
+  target_duration_seconds: 900
+  outline_duration_tolerance_seconds: 60
+  max_outline_sections: 12
+  estimated_chars_per_second: 4.0
+  script_duration_tolerance_ratio: 0.20
+  max_script_chars: 12000
+  max_section_chars: 2400
+  max_automatic_script_revisions: 1
+
+# Bounded deterministic pre-LLM processing rules.
+processing:
+  max_age_hours: 36
+  min_content_length: 300
+  similarity_threshold: 0.58
+
+# Edge TTS is the default draft-audio provider; its voice configuration is not
+# a credential. Timeouts and retries are deliberately operational settings.
+tts:
+  provider: edge_tts
+  voice: zh-CN-XiaoxiaoNeural
+  speed: 1.0
+  format: mp3
+  timeout_seconds: 30
+  max_retries: 2
+  cache_enabled: true
+
+# Output normalization for the FFmpeg merger.
+ffmpeg:
+  sample_rate: 24000
+  bitrate: "64k"
+
+# RSS publishing stays review-gated by default. public_base_url is the public
+# enclosure origin and should be HTTPS for non-loopback deployment.
+publishing:
+  auto_publish: false
+  public_base_url: http://127.0.0.1:8000
+  feed_title: DailyCast
+  feed_description: A personal AI news podcast.
+  language: zh-CN
+  author: DailyCast
+
+# Structured JSON logs are written to the console at this minimum level.
+logging:
+  level: INFO

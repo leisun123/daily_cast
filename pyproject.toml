@@ -1,0 +1,69 @@
+[tool.poetry]
+name = "dailycast"
+version = "0.1.0a0"
+description = "Autonomous AI news podcast generation and RSS publishing"
+authors = ["DailyCast Contributors <maintainers@example.invalid>"]
+readme = "README.md"
+packages = [{ include = "dailycast", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+fastapi = "^0.115.0"
+uvicorn = { version = "^0.30.0", extras = ["standard"] }
+pydantic = "^2.10.0"
+pydantic-settings = "^2.6.0"
+python-dotenv = "^1.0.1"
+sqlalchemy = "^2.0.0"
+alembic = "^1.14.0"
+pyyaml = "^6.0.0"
+apscheduler = "^3.10.4"
+httpx = "^0.28.0"
+feedparser = "^6.0.0"
+trafilatura = "^2.0.0"
+edge-tts = "^7.2.8"
+ffmpeg-python = "^0.2.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.10.0"
+mypy = "^1.13.0"
+pre-commit = "^4.0.0"
+pytest = "^8.3.0"
+ruff = "^0.8.0"
+types-pyyaml = "^6.0.12"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["migrations"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dailycast"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src"]
+exclude = ["^migrations/"]
+
+[[tool.mypy.overrides]]
+module = ["yaml", "apscheduler", "apscheduler.*", "edge_tts", "feedparser", "ffmpeg", "trafilatura"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+  "docker: starts Docker Compose and requires DAILYCAST_RUN_DOCKER_TEST=1",
+]

@@ -1,0 +1,34 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+# Local SQLite schema and runtime state.
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+data/*
+!data/.gitkeep
+public/*
+!public/.gitkeep
+# Generated media and transient publication artifacts.
+*.mp3
+*.wav
+*.tmp
+*.part
+# Editor and operating-system metadata.
+.idea/
+.vscode/
+.DS_Store

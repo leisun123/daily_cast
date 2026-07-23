@@ -1,0 +1,25 @@
+services:
+  dailycast:
+    build:
+      context: .
+    image: dailycast:0.1.0-alpha
+    environment:
+      DAILYCAST_CONFIG_PATH: /app/config/app.example.yaml
+      DAILYCAST_APP__SERVER__HOST: 0.0.0.0
+      DAILYCAST_APP__SERVER__PORT: "8000"
+      DAILYCAST_UID: "${DAILYCAST_UID:-1000}"
+      DAILYCAST_GID: "${DAILYCAST_GID:-1000}"
+    ports:
+      # Keep the management API host-local unless an explicit deployment changes this.
+      - "${DAILYCAST_HOST_ADDRESS:-127.0.0.1}:${DAILYCAST_HOST_PORT:-8000}:8000"
+    volumes:
+      # SQLite/task artifacts are private; public contains only generated Feed/media assets.
+      - "${DAILYCAST_DATA_DIR:-./data}:/app/data"
+      - "${DAILYCAST_PUBLIC_DIR:-./public}:/app/public"
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
