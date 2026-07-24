@@ -42,7 +42,8 @@ def test_waiting_action_migration_upgrades_existing_task_run_schema(app_config_p
     try:
         with engine.begin() as connection:
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO task_runs (
                         id, task_type, business_key, idempotency_key, trigger_type, status,
                         pipeline_version, config_fingerprint, config_snapshot_json, request_json,
@@ -51,7 +52,8 @@ def test_waiting_action_migration_upgrades_existing_task_run_schema(app_config_p
                         'legacy-task', 'daily_generate', 'daily:legacy', 'legacy-key', 'manual',
                         'queued', 'test-v1', :fingerprint, '{}', '{}', :created_at, :updated_at
                     )
-                    """),
+                    """
+                ),
                 {
                     "fingerprint": "a" * 64,
                     "created_at": "2026-07-23 00:00:00",

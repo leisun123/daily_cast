@@ -340,7 +340,8 @@ def test_reliability_migration_adds_nonnegative_task_step_tts_usage(
             assert "tts_character_count" in columns
             with pytest.raises(IntegrityError):
                 connection.execute(
-                    text("""
+                    text(
+                        """
                         INSERT INTO task_runs (
                             id, task_type, business_key, idempotency_key, trigger_type, status,
                             pipeline_version, config_fingerprint, config_snapshot_json,
@@ -349,14 +350,19 @@ def test_reliability_migration_adds_nonnegative_task_step_tts_usage(
                             'tts-check-task', 'daily_generate', 'tts-check', 'tts-check-key',
                             'manual', 'queued', 'test', :fingerprint, '{}', '{}', :created, :updated
                         )
-                        """),
+                        """
+                    ),
                     {"fingerprint": "a" * 64, "created": now(), "updated": now()},
                 )
-                connection.execute(text("""
+                connection.execute(
+                    text(
+                        """
                         INSERT INTO task_steps (
                             task_run_id, step_name, step_order, attempt, status, details_json,
                             tts_character_count
                         ) VALUES ('tts-check-task', 'tts', 1, 1, 'succeeded', '{}', -1)
-                        """))
+                        """
+                    )
+                )
     finally:
         engine.dispose()
