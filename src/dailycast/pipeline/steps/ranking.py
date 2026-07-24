@@ -67,6 +67,9 @@ class RankingStep:
                 "llm_input_tokens": result.usage.input_tokens,
                 "llm_output_tokens": result.usage.output_tokens,
             },
+            llm_call_count=result.provider_call_count,
+            llm_input_tokens=result.usage.input_tokens if not result.cache_hit else 0,
+            llm_output_tokens=result.usage.output_tokens if not result.cache_hit else 0,
         )
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 import pytest
@@ -312,6 +312,53 @@ def test_existing_date_and_edition_are_reused_before_retry_artifact_validation(
         )
 
         assert retry.id == first.id
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_explicit_regenerate_replaces_unpublished_episode_and_invalidates_audio(
+    app_config_path,
+) -> None:
+    """A same-day regenerate is explicit; retries still reuse the immutable episode identity."""
+    factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)
+    try:
+        original_artifacts = accepted_artifacts(factory, key="regenerate-original")
+        service = EpisodeService(factory)
+        original = create_episode(service, original_artifacts)
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            current = EpisodeRepository(unit.session).get(original.id)
+            assert current is not None
+            current.audio_version = 3
+            current.draft_audio_path = "audio/drafts/1/revision-1.mp3"
+            current.draft_audio_sha256 = "a" * 64
+            current.approved_script_revision = 1
+            current.approved_audio_version = 3
+            current.status = EpisodeStatus.APPROVED
+        refreshed_artifacts = accepted_artifacts(factory, key="regenerate-new")
+        refreshed_artifacts = replace(
+            refreshed_artifacts, episode_date=original_artifacts.episode_date
+        )
+
+        regenerated = service.regenerate_from_editorial_artifacts(
+            episode_date=original_artifacts.episode_date,
+            edition="daily",
+            outline=refreshed_artifacts.outline,
+            script=refreshed_artifacts.script,
+            validation=refreshed_artifacts.validation,
+            review=refreshed_artifacts.review,
+            metadata=refreshed_artifacts.metadata,
+            selected_event_ids=refreshed_artifacts.selected_event_ids,
+            evidence_dossiers=refreshed_artifacts.dossiers,
+        )
+
+        assert regenerated.id == original.id
+        assert regenerated.script_revision == 2
+        assert regenerated.status is EpisodeStatus.DRAFT
+        assert regenerated.audio_version == 0
+        assert regenerated.draft_audio_path is None
+        assert regenerated.approved_script_revision is None
+        assert regenerated.approved_audio_version is None
     finally:
         factory.kw["bind"].dispose()
 

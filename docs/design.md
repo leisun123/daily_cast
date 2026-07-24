@@ -380,8 +380,9 @@ V1 实现 `OpenAICompatibleTTSProvider`。理由是配置与 LLM 类似、请求
 1. 稿件保存 `script_revision` 和 `script_hash`。
 2. 分段器优先保持段落边界，再按中文句号、问号、感叹号和安全长度切分；同样输入与算法版本得到同样片段。
 3. `provider_config_hash` 的唯一规范是对 `{provider_implementation_identity, endpoint_identity_hash, semantic_provider_options_sorted}` 做 canonical JSON SHA-256。endpoint 采用与 LLM 相同的脱敏规范化身份 hash；语义选项包括 Provider 特有且影响音频结果的参数。API Key、Authorization、timeout 和 retry 次数均排除。
-4. 缓存键的唯一公式为 `SHA-256(provider + provider_config_hash + model + voice + canonical_speed + format + segmenter_version + normalized_text)`。provider、model、voice、speed 和 format 即使也被 Provider 请求使用，仍显式保留在公式中；`provider_config_hash` 只承载实现/endpoint 和额外语义选项，避免双重定义。
-5. 每段只按上述完整 `cache_key` 和匹配的 `provider_config_hash` 查询 `succeeded` 缓存，并再次验证文件 checksum/解码；不得使用缺少 Provider 配置语义的旧 cache_key。未命中才调用 TTS。
+4. `tts_preprocess_hash` 是发音词典、金融数字规则、增强断句模式及其他影响口播输入的 non-secret canonical hash；timeout 和 retry 不参与。公开 `edge-tts` SDK 会转义调用者文本、不能接收自定义 SSML，因此模式名称为 `enhanced_text`：仅传递经过断句增强的纯文本，不声称发送 SSML。
+5. 缓存键的唯一公式为 `SHA-256(provider + provider_config_hash + model + voice + canonical_speed + format + segmenter_version + tts_preprocess_hash + normalized_text)`。provider、model、voice、speed 和 format 即使也被 Provider 请求使用，仍显式保留在公式中；`provider_config_hash` 只承载实现/endpoint 和额外语义选项，避免双重定义。
+6. 每段只按上述完整 `cache_key` 和匹配的 `provider_config_hash + tts_preprocess_hash` 查询 `succeeded` 缓存，并再次验证文件 checksum/解码；不得使用缺少 Provider 或预处理配置语义的旧 cache_key。未命中才调用 TTS。
 6. 片段先写 `.part`，完成后校验 MIME、解码、时长和 checksum，再原子改名并置为 `succeeded`。
 7. 重试只处理 `pending/failed/stale` 或文件校验失败片段。
 
@@ -401,7 +402,7 @@ V1 实现 `OpenAICompatibleTTSProvider`。理由是配置与 LLM 类似、请求
 
 TaskRun 表示一次可审计执行；TaskStep 表示一次步骤尝试。每日生成和发布是两个 TaskRun，人工等待不占用执行器。
 
-TaskRun 状态：`queued`、`running`、`succeeded`、`succeeded_with_warnings`、`failed`、`timed_out`、`interrupted`、`cancelled`。
+TaskRun 状态：`queued`、`running`、`waiting_action`、`succeeded`、`succeeded_with_warnings`、`failed`、`timed_out`、`interrupted`、`cancelled`。`waiting_action` 是非失败终态：保留已经写入的 artifact，并停止所有依赖后续步骤。
 
 TaskStep 状态：`pending`、`running`、`succeeded`、`succeeded_with_warnings`、`failed`、`skipped`。
 
@@ -429,6 +430,7 @@ stateDiagram-v2
     queued --> cancelled: 用户取消
     running --> succeeded: 全部步骤成功
     running --> succeeded_with_warnings: 局部失败但达到质量门槛
+    running --> waiting_action: 人工处理或严格质量门槛阻断
     running --> failed: 不可重试或重试耗尽
     running --> timed_out: 超过总时限
     running --> interrupted: 进程失联/重启恢复
@@ -438,6 +440,7 @@ stateDiagram-v2
     interrupted --> queued: 创建新的 queued 子 TaskRun
     succeeded --> [*]
     succeeded_with_warnings --> [*]
+    waiting_action --> [*]
     failed --> [*]
     timed_out --> [*]
     interrupted --> [*]
@@ -456,7 +459,7 @@ stateDiagram-v2
 
 ### 10.4 总超时
 
-TaskRun 保存 `deadline_at`。每个步骤、文章请求、LLM、TTS 和 FFmpeg 都有更小的超时。Orchestrator 在每个可中断点检查 deadline；子进程超时后终止进程组。超时任务已成功的检查点仍保留，可创建续跑任务。
+TaskRun 保存 `deadline_at`，由 `task_execution.deadline_seconds` 在提交时计算。每个步骤、文章请求、LLM、TTS 和 FFmpeg 都有更小的超时。Orchestrator 在领取 queued 任务、每个步骤开始前和每个步骤完成后检查 deadline；超过时写入 `timed_out/TASK_DEADLINE_EXCEEDED`，不把内容或配置问题伪装成可重试失败。非协作式外部调用仍受自身 timeout 约束；超时任务已成功的检查点保留，可创建续跑任务。
 
 ### 10.5 进程内提交、恢复、心跳与关闭
 
@@ -470,14 +473,15 @@ V1 使用一个进程内有界队列和一个重型任务执行槽，不引入 R
 4. commit 成功后使用 `put_nowait`/有界 enqueue 唤醒执行器。若进程恰在 commit 后、enqueue 前退出，TaskRun 仍安全地留在 queued；启动扫描会重新加入队列。
 5. worker 取到 ID 后用 compare-and-set 将 queued 改为 running。状态已改变或锁不属于该业务键时跳过该队列项；成功后才开始步骤。
 
-队列满不会回滚已经提交的 TaskRun；进程内 dispatcher 默认每 5 秒扫描未入队的 queued 行并补充唤醒。队列不是状态源，也不持久化业务 payload。
+队列满不会回滚已经提交的 TaskRun；Submission Service 不把未被队列接受的 ID 标成已投递。执行器会在启动、队列空闲轮询和每次任务结束后从 SQLite 扫描 queued 行并重新投递，因此 QueueFull 不会使持久任务滞留到下一次重启。队列不是状态源，也不持久化业务 payload。
 
 #### 启动恢复与心跳
 
 - 只有 Alembic revision 等于代码 head 时才启动恢复、Task Executor 和 APScheduler。
 - 启动时先扫描所有 queued TaskRun 并加入队列；再扫描 heartbeat 过期的 running TaskRun。
 - running worker 每 15 秒用独立短事务更新 `heartbeat_at`，即使正在等待 LLM/TTS HTTP 响应也由独立 heartbeat coroutine 更新。连续 60 秒没有心跳视为 stale。
-- stale running TaskRun 在事务中标记为 interrupted；若其失败类型允许恢复，则创建一个 parent 指向旧运行的 queued TaskRun。自动恢复 idempotency key 由旧 TaskRun ID 派生，重复启动不会创建多个恢复任务。
+- 单 worker 由进程内 supervisor 监督。单个 TaskRun 的未预期异常在 worker 边界记录并隔离；worker loop 自身异常会由 supervisor 重启。`/readyz` 同时检查 supervisor 与当前 worker 存活，不能在唯一执行槽失效时报告就绪。
+- stale running TaskRun 在事务中标记为 interrupted；若其 deadline 已经过期，则直接标记为 `timed_out/TASK_DEADLINE_EXCEEDED` 而不创建恢复子任务。仍在 deadline 内且允许恢复时，创建一个 parent 指向旧运行的 queued TaskRun。自动恢复 idempotency key 由旧 TaskRun ID 派生，重复启动不会创建多个恢复任务。
 - 发布恢复必须先执行 Publication reconcile；不能因为进程中断直接重复上传或重复写 Feed。
 
 #### SIGTERM 和优雅关闭
@@ -585,7 +589,7 @@ V1 Publication 状态严格只有 `pending`、`publishing`、`published`、`fail
 | EpisodeItem | `(episode_id, event_id)` 唯一 |
 | LLM 结果 | LLMArtifact 对 `(operation, provider, model, prompt_version, schema_version, generation_config_hash, input_hash)` 建唯一约束；仅 schema 校验成功后写入 |
 | AudioSegment | Episode 修订内 `(episode_id, script_revision, segment_index)` 唯一；跨修订只用包含 `provider_config_hash` 的完整 cache_key 复用 |
-| 草稿 MP3 | 由 `episode_id + audio_version + manifest_hash` 定位，原子替换当前 draft 引用 |
+| 草稿 MP3 | 保存于私有 `DATA_DIR/audio/drafts/{episode_id}/revision-{script_revision}.mp3`，原子替换当前 draft 引用，绝不写入 `PUBLIC_DIR` |
 | Publication | `(episode_id, publisher_type, target_key)` 唯一；重复调用先 reconcile |
 | Feed item | Episode `public_id` 作为稳定 GUID；按 GUID upsert，不 append 重复项 |
 
@@ -593,6 +597,7 @@ V1 Publication 状态严格只有 `pending`、`publishing`、`published`、`fail
 
 新 TaskRun 读取父运行的检查点并验证依赖指纹：
 
+- 子任务复制父运行的脱敏配置快照和 fingerprint，并按根到当前的 `parent_task_run_id` 链读取 TaskStep checkpoint。每个逻辑步骤只采用该谱系中**最新一次**成功/警告成功尝试；较新的 failed/running 尝试会使该步骤从最早失效点重跑。恢复时只恢复可验证的持久对象 ID；产生 `data/work/{task_run_id}` 私有 editorial 文件的步骤在子任务自己的根目录重跑（LLMArtifact/音频缓存仍可复用），绝不把新输出写入父任务目录。下游再次加载时继续执行结构/schema 与文件校验，不能仅凭步骤名称跳过。
 - 原来源配置快照未变且 Article 已保存，跳过成功采集；
 - 聚类算法/候选集合变化则从 clustering 重跑；
 - provider、模型、Prompt 版本、输出 schema 版本、generation config 或证据输入哈希变化时不能复用旧 LLMArtifact，并使对应 LLM 步骤及下游失效；
@@ -607,11 +612,9 @@ V1 Publication 状态严格只有 `pending`、`publishing`、`published`、`fail
 data/
 ├── dailycast.db
 ├── work/{task_run_id}/                     # 可清理临时文件
-├── artifacts/episodes/{episode_id}/
-│   ├── scripts/{script_revision}.json
-│   ├── segments/{script_revision}/{index}-{cache_prefix}.mp3
-│   └── drafts/{audio_version}-{manifest_hash}.mp3
-├── cache/tts/{cache_prefix}/{cache_key}.mp3
+├── audio/
+│   ├── drafts/{episode_id}/revision-{script_revision}.mp3
+│   └── cache/{cache_prefix}/{cache_key}.mp3
 └── logs/tasks/{task_run_id}.jsonl
 
 public/
@@ -625,7 +628,7 @@ SQLite 保存可查询、需要事务和关系约束的数据：Source、Article
 
 ### 14.2 文件系统保存
 
-文件系统保存体积大或需要流式访问的数据：TTS 片段、草稿/公开 MP3、Feed、任务 JSONL、可选调试快照。数据库只保存相对路径、大小、checksum 和 MIME。默认不保存原始 HTML，以减少版权、XSS 和磁盘风险；需要诊断时可开启短期、非公开、定时清理的快照。
+文件系统保存体积大或需要流式访问的数据：私有 `DATA_DIR` 中的 TTS 片段、草稿 MP3、任务 JSONL 和可选调试快照，以及 `PUBLIC_DIR` 中的 Feed 与已经发布的不可变 MP3。数据库只保存相对路径、大小、checksum 和 MIME。草稿路径不得被公开静态路由读取；只有 RSSPublisher 校验后复制到 `PUBLIC_DIR/media/...` 的资产可以公开。默认不保存原始 HTML，以减少版权、XSS 和磁盘风险；需要诊断时可开启短期、非公开、定时清理的快照。
 
 未来对象存储通过 `MediaStore` 替换公开/缓存文件实现；SQLite 中的业务关系和 Publisher 输入不变。V1 不把 MP3 BLOB 放入 SQLite，也不因未来对象存储提前引入 S3 依赖。
 
@@ -693,7 +696,7 @@ Cookie、账号和密码绝不写入代码、YAML、日志、截图文件名或�
 - `app`：时区、数据库 URL、数据/公开目录、日志和管理绑定地址；非 Docker 开发默认 `127.0.0.1:8000`，Compose 显式覆盖为容器内 `0.0.0.0:8000`；
 - `sources`：来源种子列表、类型、URL、选择器、优先级和过滤覆盖；种子启动时采用 `missing_only` 导入，首次导入后 SQLite Source 是运行时真相源，YAML 不覆盖通过 API 做的修改；
 - `llm`：provider、base URL、model、超时、各操作 temperature/top_p/max output tokens、response format、其他模型语义选项、输入/输出与调用预算；加载后分别计算脱敏 endpoint identity 和 `generation_config_hash`；
-- `tts`：provider、base URL、Provider 实现身份、model、voice、speed、格式、额外音频语义选项、分段上限和重试；加载后计算不含秘密/timeout/retry 的 `provider_config_hash`；
+- `tts`：provider、base URL、Provider 实现身份、model、voice、speed、开场/结尾速度、格式、`plain|enhanced_text` 模式、发音词典、额外音频语义选项、分段上限和重试；加载后分别计算不含秘密/timeout/retry 的 `provider_config_hash` 与 `tts_preprocess_hash`；
 - `schedule`：启用、Cron、misfire grace、总任务超时；
 - `publishing`：public base URL、Feed 元数据、公开路径、目标列表。
 
@@ -729,14 +732,14 @@ input_count, output_count, error_code, retryable
 
 ### 19.2 数据库审计与管理页
 
-TaskRun/TaskStep 保存查询友好的总览：步骤状态、起止时间、计数、错误摘要、模型 Token、TTS 字符数和产物引用。管理页展示：
+TaskRun/TaskStep 保存查询友好的总览：步骤状态、起止时间、计数、稳定错误码与 retryable、实际 LLM 调用数/输入输出 Token、实际 TTS 请求字符数和产物引用。缓存命中不重复计入本次 TaskRun 的 Provider 用量；Responses native-schema rejection 后的 JSON-object fallback 每次真实请求均计入预算和调用数。管理页展示：
 
 - 最近任务成功/警告/失败、当前步骤和心跳；
 - 每来源发现/提取/过滤数量和失败原因；
 - 每期 LLM 调用与 Token、TTS 片段命中/生成数、音频时长；
 - Publication 状态、公开 URL 和最后验证时间。
 
-V1 不引入 Prometheus/Grafana。`/healthz` 只判断进程，`/readyz` 检查配置、SQLite 读写、Alembic current revision 是否等于代码 head、目录权限和 FFmpeg；不调用计费外部服务。需要指标导出时可在后续从现有 TaskStep 数据增加，不改变核心模型。
+V1 不引入 Prometheus/Grafana。`/healthz` 只判断进程，`/readyz` 检查配置、SQLite 读写、Alembic current revision 是否等于代码 head、目录权限、FFmpeg 和受 supervisor 监管的唯一任务 worker；不调用计费外部服务。需要指标导出时可在后续从现有 TaskStep 数据增加，不改变核心模型。
 
 ## 20. 测试策略
 
@@ -750,13 +753,16 @@ V1 不引入 Prometheus/Grafana。`/healthz` 只判断进程，`/readyz` 检查�
 - TaskRun/Episode 状态转换表和非法转换，尤其验证“仅撤销批准 -> review_required”“稿件/TTS/有效音频变化 -> draft”以及 draft 只有三项产物重新有效后才能进入 review_required；
 - 稳定分段、编辑后片段复用、force 单段再生；逐项验证 Provider 实现/endpoint、voice、speed、model、format 或语义参数变化会 cache miss，密钥/timeout/retry 变化不会改变 `provider_config_hash`，且查询不接受旧的不完整 cache_key；
 - Feed GUID、enclosure、不可变路径和 publishing candidate 注入规则。
+- worker 单任务异常隔离、worker-loop supervisor 重启、QueueFull 后 SQLite queued 扫描重投、deadline `timed_out` 状态和精确 error_code/retryable 分类；
+- parent checkpoint 的恢复/跳过和依赖失效回退、同日普通 retry 复用 Episode 与显式 regenerate 仅允许替换未发布 Episode；
+- Responses 原生 JSON Schema 拒绝后的受预算 JSON-object fallback，以及 TaskRun/TaskStep LLM/TTS 用量一次性汇总。
 
 ### 20.2 集成测试
 
 - 使用 fixture HTTP server 测 RSS、HTML、重定向、超时、编码和正文提取，不访问公网；
 - 使用临时 SQLite 验证外键、唯一/部分索引、并发任务获取和恢复；
 - 验证 LLMArtifact JSON check、TaskRun/TaskStep 外键和包含 `generation_config_hash` 的 exact-key 查询只返回成功结构化结果；
-- 从空文件执行 `alembic upgrade head`，验证 `foreign_keys=ON`、活动 TaskRun partial unique index、非法 JSON 被 CHECK 拒绝、包含 `generation_config_hash` 的 LLMArtifact 七字段唯一键、Article/NewsEvent 循环外键插入流程以及 current revision 等于 head；
+- 从空文件执行 `alembic upgrade head`，验证 `foreign_keys=ON`、活动 TaskRun partial unique index、非法 JSON 被 CHECK 拒绝、包含 `generation_config_hash` 的 LLMArtifact 七字段唯一键、Article/NewsEvent 循环外键插入流程、TaskStep `tts_character_count >= 0` 和 current revision 等于 head；
 - 使用短静音 fixture 验证 FFmpeg/ffprobe、原子文件和损坏片段检测；
 - 使用 Fake OpenAI-compatible server 验证超时、429、5xx、schema repair 和用量记录；
 - 验证 Feed 从既有 published 集合加当前 publishing candidate 重建、历史保留、GUID 去重、不可变资产不覆盖；模拟 `os.replace(feed.xml)` 成功而数据库事务未提交，reconcile 必须补写 Publication/Episode=`published`。
@@ -800,7 +806,7 @@ Fake LLM/TTS 驱动整条流水线，至少覆盖：
 
 ### 21.3 Alembic schema 版本管理
 
-- 仓库根目录包含 `alembic.ini`，`migrations/` 包含 `env.py`、`script.py.mako` 和 `versions/0001_initial_schema.py`。初始 revision 创建全部 V1 表、外键、CHECK 和索引，包括 LLMArtifact。
+- 仓库根目录包含 `alembic.ini`，`migrations/` 包含 `env.py`、`script.py.mako`、初始 `versions/0001_initial_schema.py` 与后续的受测 revision（当前 head 为 `0003_reliability_hardening`）。初始 revision 创建全部 V1 表、外键、CHECK 和索引，包括 LLMArtifact；后续 revision 只做可审计 schema 演进。
 - 新数据库和已有数据库都只通过 `alembic upgrade head` 迁移。正常应用启动绝不调用 `Base.metadata.create_all()`，也不捕获 migration 错误后继续运行。
 - 应用启动读取 `alembic_version` 的 current revision 并与代码包含的 head 比较。数据库缺少 revision、落后或超前时，进程只保留 `/healthz`、`/readyz` 等不依赖业务 schema 的诊断端点，`/readyz` 返回 503；scheduler、Task Executor、管理页面、所有业务读写 API、Feed 和应用托管的 media 路由均不可用并返回 `DATABASE_REVISION_MISMATCH`，避免在旧 schema 上执行不安全读取。
 - Compose 不增加常驻 migration 服务：`dailycast` 容器 entrypoint 顺序执行 `alembic upgrade head`，成功后以 `exec` 启动 Uvicorn。这样 `docker compose up` 仍是一条命令，且 migration 结果在应用启动前可见。

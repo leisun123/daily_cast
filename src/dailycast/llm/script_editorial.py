@@ -25,6 +25,7 @@ class ScriptGenerationResult:
     artifact_id: int | None
     cache_hit: bool
     usage: LLMUsage
+    provider_call_count: int = 0
 
 
 async def generate_script(
@@ -64,6 +65,7 @@ async def generate_script(
         artifact_id=structured_result.artifact_id,
         cache_hit=structured_result.cache_hit,
         usage=structured_result.usage,
+        provider_call_count=structured_result.provider_call_count,
     )
 
 

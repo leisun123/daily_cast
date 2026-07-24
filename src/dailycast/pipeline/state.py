@@ -10,7 +10,7 @@ class TaskStateTransitionError(ValueError):
 
 
 _ALLOWED_TRANSITIONS: dict[TaskRunStatus, frozenset[TaskRunStatus]] = {
-    TaskRunStatus.QUEUED: frozenset({TaskRunStatus.RUNNING}),
+    TaskRunStatus.QUEUED: frozenset({TaskRunStatus.RUNNING, TaskRunStatus.TIMED_OUT}),
     TaskRunStatus.RUNNING: frozenset(
         {
             TaskRunStatus.SUCCEEDED,
@@ -19,6 +19,7 @@ _ALLOWED_TRANSITIONS: dict[TaskRunStatus, frozenset[TaskRunStatus]] = {
             TaskRunStatus.FAILED,
             TaskRunStatus.INTERRUPTED,
             TaskRunStatus.CANCELLED,
+            TaskRunStatus.TIMED_OUT,
         }
     ),
     TaskRunStatus.INTERRUPTED: frozenset({TaskRunStatus.QUEUED}),

@@ -21,6 +21,7 @@ from dailycast.episodes.service import EpisodeService
 from dailycast.pipeline.context import PipelineContext
 from dailycast.pipeline.steps.generate_audio import GenerateAudioStep
 from dailycast.tts.contracts import MergedAudio
+from dailycast.tts.preprocess import PronunciationDictionary, TTSPreprocessor
 from dailycast.tts.providers.edge import EdgeTTSProvider
 from dailycast.tts.providers.fake import FakeTTSProvider
 from dailycast.tts.segmenter import segment_episode_script
@@ -59,6 +60,10 @@ def audio_service(
     tmp_path: Path,
     *,
     voice: str = "zh-CN-XiaoxiaoNeural",
+    text_mode: str = "plain",
+    opening_summary_speed: float = 0.94,
+    closing_summary_speed: float = 0.94,
+    preprocessor: TTSPreprocessor | None = None,
 ) -> tuple[AudioGenerationService, AtomicFakeMerger]:
     """Build a local service whose output roots are supplied only by configuration."""
     merger = AtomicFakeMerger()
@@ -67,9 +72,15 @@ def audio_service(
             factory,
             provider,
             data_dir=tmp_path / "data",
-            public_dir=tmp_path / "public",
             merger=merger,
-            settings=TTSGenerationSettings(voice=voice, speed=1.0),
+            settings=TTSGenerationSettings(
+                voice=voice,
+                speed=1.0,
+                text_mode=text_mode,
+                opening_summary_speed=opening_summary_speed,
+                closing_summary_speed=closing_summary_speed,
+            ),
+            preprocessor=preprocessor,
         ),
         merger,
     )
@@ -126,9 +137,10 @@ def test_audio_generation_creates_succeeded_segments_merges_and_updates_episode(
         assert result.cache_hits == 0
         assert result.duration_ms == 3000
         assert len(merger.calls) == 1
-        output = tmp_path / "public" / "audio" / f"{episode.id}.mp3"
+        output = tmp_path / "data" / "audio" / "drafts" / str(episode.id) / "revision-1.mp3"
         assert output.is_file()
         assert not output.with_name(f".{output.name}.part").exists()
+        assert not (tmp_path / "public" / "audio" / f"{episode.id}.mp3").exists()
         with UnitOfWork(factory) as unit:
             assert unit.session is not None
             segments = AudioSegmentRepository(unit.session).list_by_episode_revision(
@@ -140,7 +152,38 @@ def test_audio_generation_creates_succeeded_segments_merges_and_updates_episode(
             assert persisted is not None
             assert persisted.audio_version == 1
             assert persisted.actual_duration_ms == 3000
-            assert persisted.draft_audio_path == f"audio/{episode.id}.mp3"
+            assert persisted.draft_audio_path == f"audio/drafts/{episode.id}/revision-1.mp3"
+        assert result.tts_character_count > 0
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_audio_service_sends_enhanced_plain_text_without_mutating_the_persisted_episode_script(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """Provider input gains pauses while the Episode's reviewable script remains plain text."""
+    factory: sessionmaker[Session] = __import__(
+        "editorial_test_support", fromlist=["upgraded_session_factory"]
+    ).upgraded_session_factory(app_config_path)
+    try:
+        episode = episode_for_audio(factory, key="spoken-enhanced-text", day=22)
+        provider = FakeTTSProvider()
+        service, _ = audio_service(factory, provider, tmp_path, text_mode="enhanced_text")
+
+        asyncio.run(service.generate_episode_draft(episode.id))
+
+        assert all(request[4] == "enhanced_text" for request in provider.requests)
+        assert all("<speak" not in request[0] for request in provider.requests)
+        assert [request[2] for request in provider.requests] == [0.94, 1.0, 0.94]
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            persisted = EpisodeService(factory).get_episode(episode.id)
+            assert persisted is not None
+            assert "<speak" not in persisted.script_text
+            segments = AudioSegmentRepository(unit.session).list_by_episode_revision(
+                episode.id, script_revision=1
+            )
+            assert all("<speak" not in segment.text for segment in segments)
     finally:
         factory.kw["bind"].dispose()
 
@@ -218,6 +261,127 @@ def test_changed_provider_config_hash_is_a_cache_miss(
         factory.kw["bind"].dispose()
 
 
+def test_changed_pronunciation_policy_is_a_cache_miss(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """Audio cached for one non-secret spoken policy cannot be reused for another policy."""
+    factory: sessionmaker[Session] = __import__(
+        "editorial_test_support", fromlist=["upgraded_session_factory"]
+    ).upgraded_session_factory(app_config_path)
+    try:
+        provider = FakeTTSProvider()
+        first_service, _ = audio_service(
+            factory,
+            provider,
+            tmp_path,
+            preprocessor=TTSPreprocessor(
+                dictionary=PronunciationDictionary.from_mapping(
+                    {"DailyCast": {"replacement": "每日播报"}}
+                )
+            ),
+        )
+        second_service, _ = audio_service(
+            factory,
+            provider,
+            tmp_path,
+            preprocessor=TTSPreprocessor(
+                dictionary=PronunciationDictionary.from_mapping(
+                    {"DailyCast": {"replacement": "每日新闻播报"}}
+                )
+            ),
+        )
+        first = episode_for_audio(factory, key="pronunciation-first", day=22)
+        second = episode_for_audio(factory, key="pronunciation-second", day=23)
+
+        asyncio.run(first_service.generate_episode_draft(first.id))
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            first_segments = AudioSegmentRepository(unit.session).list_by_episode_revision(
+                first.id, script_revision=1
+            )
+            first_preprocess_hashes = {segment.tts_preprocess_hash for segment in first_segments}
+        missed = asyncio.run(second_service.generate_episode_draft(second.id))
+
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            second_segments = AudioSegmentRepository(unit.session).list_by_episode_revision(
+                second.id, script_revision=1
+            )
+            second_preprocess_hashes = {segment.tts_preprocess_hash for segment in second_segments}
+
+        assert missed.cache_hits == 0
+        assert missed.provider_calls == 3
+        assert provider.calls == 6
+        assert len(first_preprocess_hashes) == 1
+        assert len(second_preprocess_hashes) == 1
+        assert first_preprocess_hashes != second_preprocess_hashes
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_transport_timeout_and_retry_policy_do_not_change_the_audio_cache_identity(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """Operational transport tuning reuses the same semantic audio cache entry."""
+
+    class TransportConfiguredFakeTTSProvider(FakeTTSProvider):
+        def __init__(self, *, timeout_seconds: float, max_retries: int) -> None:
+            super().__init__()
+            self.timeout_seconds = timeout_seconds
+            self.max_retries = max_retries
+
+    factory: sessionmaker[Session] = __import__(
+        "editorial_test_support", fromlist=["upgraded_session_factory"]
+    ).upgraded_session_factory(app_config_path)
+    try:
+        first_provider = TransportConfiguredFakeTTSProvider(timeout_seconds=1.0, max_retries=0)
+        second_provider = TransportConfiguredFakeTTSProvider(timeout_seconds=30.0, max_retries=3)
+        first_service, _ = audio_service(factory, first_provider, tmp_path)
+        second_service, _ = audio_service(factory, second_provider, tmp_path)
+        first = episode_for_audio(factory, key="transport-first", day=22)
+        second = episode_for_audio(factory, key="transport-second", day=23)
+
+        asyncio.run(first_service.generate_episode_draft(first.id))
+        reused = asyncio.run(second_service.generate_episode_draft(second.id))
+
+        assert reused.cache_hits == 3
+        assert reused.provider_calls == 0
+        assert second_provider.calls == 0
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_changed_opening_or_closing_speed_is_a_cache_miss(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """The slower opening and closing cadence are each part of semantic audio identity."""
+    factory: sessionmaker[Session] = __import__(
+        "editorial_test_support", fromlist=["upgraded_session_factory"]
+    ).upgraded_session_factory(app_config_path)
+    try:
+        provider = FakeTTSProvider()
+        first_service, _ = audio_service(factory, provider, tmp_path)
+        second_service, _ = audio_service(
+            factory,
+            provider,
+            tmp_path,
+            opening_summary_speed=0.88,
+            closing_summary_speed=0.82,
+        )
+        first = episode_for_audio(factory, key="speech-speed-first", day=22)
+        second = episode_for_audio(factory, key="speech-speed-second", day=23)
+
+        asyncio.run(first_service.generate_episode_draft(first.id))
+        missed = asyncio.run(second_service.generate_episode_draft(second.id))
+
+        assert provider.calls == 5
+        assert missed.cache_hits == 1
+        assert missed.provider_calls == 2
+        assert [request[2] for request in provider.requests[-2:]] == [0.88, 0.82]
+    finally:
+        factory.kw["bind"].dispose()
+
+
 def test_edge_provider_is_async_and_uses_configured_voice_speed_without_network() -> None:
     """The real provider adapter consumes a mocked async stream, not a live service."""
     calls: list[dict[str, object]] = []
@@ -248,6 +412,37 @@ def test_edge_provider_is_async_and_uses_configured_voice_speed_without_network(
             "rate": "+20%",
         }
     ]
+
+
+def test_edge_provider_rejects_misleading_ssml_mode() -> None:
+    """The public edge-tts API must not claim support for caller-provided SSML markup."""
+    calls: list[dict[str, object]] = []
+
+    class FakeCommunicate:
+        def __init__(self, text: str, **kwargs: object) -> None:
+            calls.append({"text": text, **kwargs})
+
+        async def stream(self):
+            yield {"type": "audio", "data": b"mp3"}
+
+    provider = EdgeTTSProvider(
+        timeout_seconds=1,
+        max_retries=0,
+        communicate_factory=FakeCommunicate,
+    )
+
+    with pytest.raises(ValueError, match="enhanced_text"):
+        asyncio.run(
+            provider.synthesize(
+                '<speak version="1.0" xml:lang="zh-CN">'
+                '第一段。<break time="500ms"/>第二段。</speak>',
+                "zh-CN-XiaoxiaoNeural",
+                1.0,
+                "mp3",
+                text_mode="ssml",  # type: ignore[arg-type]
+            )
+        )
+    assert calls == []
 
 
 def test_edge_provider_timeout_is_bounded_and_does_not_require_network() -> None:
@@ -363,5 +558,6 @@ def test_generate_audio_pipeline_step_reports_episode_audio_metrics(
         assert result.details["segment_count"] == 3
         assert result.details["provider_calls"] == 3
         assert result.details["duration_ms"] == 3000
+        assert result.tts_character_count > 0
     finally:
         factory.kw["bind"].dispose()

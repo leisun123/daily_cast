@@ -28,7 +28,7 @@ from dailycast.llm.outline_editorial import (
 from dailycast.llm.prompts import PromptTemplate
 from dailycast.llm.prompts.generate_metadata_v1 import GENERATE_METADATA_V1
 from dailycast.llm.prompts.generate_outline_v2 import GENERATE_OUTLINE_V2
-from dailycast.llm.prompts.generate_script_v2 import GENERATE_SCRIPT_V2
+from dailycast.llm.prompts.generate_script_v3 import GENERATE_SCRIPT_V3
 from dailycast.llm.prompts.review_script_v1 import REVIEW_SCRIPT_V1
 from dailycast.llm.prompts.revise_script_v1 import REVISE_SCRIPT_V1
 from dailycast.llm.prompts.score_events_v2 import SCORE_EVENTS_V2
@@ -75,6 +75,7 @@ class EventRankingResult:
     artifact_id: int | None
     cache_hit: bool
     usage: LLMUsage
+    provider_call_count: int = 0
 
 
 class AIEditorialService:
@@ -95,7 +96,7 @@ class AIEditorialService:
         duration_tolerance_seconds: int = 60,
         max_outline_sections: int = 12,
         outline_prompt: PromptTemplate = GENERATE_OUTLINE_V2,
-        script_prompt: PromptTemplate = GENERATE_SCRIPT_V2,
+        script_prompt: PromptTemplate = GENERATE_SCRIPT_V3,
         estimated_chars_per_second: float = 4.0,
         script_duration_tolerance_ratio: float = 0.20,
         max_script_chars: int = 12_000,
@@ -177,6 +178,7 @@ class AIEditorialService:
             artifact_id=structured_result.artifact_id,
             cache_hit=structured_result.cache_hit,
             usage=structured_result.usage,
+            provider_call_count=structured_result.provider_call_count,
         )
 
     def build_evidence_dossiers(self, event_ids: Sequence[int]) -> EvidenceDossierBuildResult:

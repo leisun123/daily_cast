@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -39,6 +39,7 @@ from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import ArticleService, SourceCollectionService
 from dailycast.tts.merge import FFmpegMerger
+from dailycast.tts.preprocess import PronunciationDictionary, TTSPreprocessor
 from dailycast.tts.providers.edge import EdgeTTSProvider
 from dailycast.tts.service import AudioGenerationService, TTSGenerationSettings
 
@@ -143,7 +144,6 @@ def build_lifespan(
                     max_retries=settings.tts.max_retries,
                 ),
                 data_dir=settings.data_dir,
-                public_dir=settings.public_dir,
                 merger=FFmpegMerger(
                     sample_rate=settings.ffmpeg.sample_rate,
                     bitrate=settings.ffmpeg.bitrate,
@@ -152,12 +152,22 @@ def build_lifespan(
                     voice=settings.tts.voice,
                     speed=settings.tts.speed,
                     format=settings.tts.format,
+                    text_mode=settings.tts.text_mode,
+                    opening_summary_speed=settings.tts.opening_summary_speed,
+                    closing_summary_speed=settings.tts.closing_summary_speed,
                     cache_enabled=settings.tts.cache_enabled,
+                ),
+                preprocessor=TTSPreprocessor(
+                    dictionary=PronunciationDictionary.from_yaml(
+                        settings.resolve_path(settings.tts.pronunciation_dictionary_path)
+                    ),
+                    text_mode=settings.tts.text_mode,
                 ),
             )
             publication_service = PublicationService(
                 session_factory,
                 RSSPublisher(
+                    data_dir=settings.data_dir,
                     public_dir=settings.public_dir,
                     settings=RSSSettings(
                         public_base_url=settings.publishing.public_base_url,
@@ -191,6 +201,7 @@ def build_lifespan(
                         settings.editorial.max_automatic_script_revisions
                     ),
                 ),
+                artifact_roots=(settings.data_dir, settings.public_dir),
             )
             executor = InProcessTaskExecutor(session_factory, orchestrator)
             publication_service.reconcile()
@@ -268,11 +279,12 @@ def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) ->
 
 def build_daily_generation_command(settings: Settings, *, trigger_type: TriggerType) -> TaskCommand:
     """Build the one documented daily command for scheduler and manual submission alike."""
+    now = datetime.now(ZoneInfo(settings.app.timezone))
     return TaskCommand(
         task_type=TaskType.DAILY_GENERATE,
         request={
             "edition": "daily",
-            "episode_date": datetime.now(ZoneInfo(settings.app.timezone)).date().isoformat(),
+            "episode_date": now.date().isoformat(),
         },
         config_snapshot={
             "pipeline": "rss-v1",
@@ -284,4 +296,5 @@ def build_daily_generation_command(settings: Settings, *, trigger_type: TriggerT
         },
         pipeline_version="rss-v1",
         trigger_type=trigger_type,
+        deadline_at=now + timedelta(seconds=settings.task_execution.deadline_seconds),
     )

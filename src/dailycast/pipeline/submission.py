@@ -21,8 +21,8 @@ from dailycast.pipeline.state import validate_task_run_transition
 class TaskEnqueuer(Protocol):
     """The only queue capability a submission service needs."""
 
-    def enqueue(self, task_run_id: str) -> None:
-        """Offer an already committed TaskRun identifier to the local executor."""
+    def enqueue(self, task_run_id: str) -> bool:
+        """Offer an already committed TaskRun identifier and report local acceptance."""
 
 
 class IdempotencyConflictError(ValueError):
@@ -82,8 +82,20 @@ class TaskSubmissionService:
             if parent is None or not self._is_stale_running(parent, stale_before):
                 return None
 
-            existing = repository.get_by_idempotency_key(recovery_key)
             now = self._clock.now()
+            if parent.deadline_at is not None and _as_utc(parent.deadline_at) <= _as_utc(now):
+                validate_task_run_transition(parent.status, TaskRunStatus.TIMED_OUT)
+                repository.update_status(
+                    parent,
+                    TaskRunStatus.TIMED_OUT,
+                    ended_at=now,
+                    error_code="TASK_DEADLINE_EXCEEDED",
+                    error_summary="task deadline elapsed before stale-worker recovery",
+                    retryable=False,
+                )
+                return None
+
+            existing = repository.get_by_idempotency_key(recovery_key)
             validate_task_run_transition(parent.status, TaskRunStatus.INTERRUPTED)
             repository.update_status(
                 parent,
@@ -123,8 +135,8 @@ class TaskSubmissionService:
         """Avoid duplicate in-process offers while SQLite remains the durable recovery source."""
         if task_run_id in self._offered_task_run_ids:
             return
-        self._offered_task_run_ids.add(task_run_id)
-        self._enqueuer.enqueue(task_run_id)
+        if self._enqueuer.enqueue(task_run_id):
+            self._offered_task_run_ids.add(task_run_id)
 
     def _find_idempotent_or_active(
         self, repository: TaskRunRepository, normalized: _NormalizedTaskCommand

@@ -59,7 +59,7 @@ V1 是单用户系统，不提供注册、登录、组织与权限模型。若�
 1. 在个人电脑或普通 Linux 服务器上长期运行，并能通过一条 Docker Compose 命令启动。
 2. 打通“采集—处理—生成—合成—审核—RSS 发布”完整闭环。
 3. 任何长任务都能看到步骤、数量、耗时、错误和可重试性。
-4. 任务重跑不会重复创建同一天同版本的节目，不会重复生成已命中的音频片段。
+4. 任务重跑不会重复创建同一天同版本的节目，不会重复生成已命中的音频片段；显式重生成只允许替换未发布的同日 Episode。
 5. 新闻源、LLM、TTS 和发布平台均有明确可替换接口。
 6. 默认每日模型调用和输入 Token 有硬预算，不能将所有全文直接交给模型。
 7. 仓库结构、示例配置、测试边界和文档适合作为公开 GitHub 项目展示。
@@ -87,12 +87,14 @@ V1 是单用户系统，不提供注册、登录、组织与权限模型。若�
 6. 用户批准节目，随后显式执行发布。
 7. RSS Publisher 发布不可变 MP3 并原子更新 Feed，节目进入 `published`。
 
+Alpha 示例可将 `editorial.enforce_quality_gate=false` 与 `publishing.auto_publish=true` 组合使用：仍保存 validation/review finding，但对结构有效的节目自动生成、批准并发布。严格模式保持上述人工审核流程；两种模式都不会绕过 JSON/schema、引用、数据库、TTS、FFmpeg 或文件系统错误。
+
 ### 5.3 失败恢复
 
 1. 用户从任务详情看到失败步骤、错误分类、已完成检查点和是否可重试。
 2. 对可重试失败，系统可在步骤内有限自动重试；仍失败时任务终止。
 3. 用户点击“从失败处重试”，系统创建有父子关系的新 TaskRun。
-4. 新任务验证输入版本和已有产物，只重做失败步骤及其失效的下游步骤。
+4. 新任务验证输入版本和已有产物，只重做失败步骤及其失效的下游步骤；需要写入私有 editorial artifact 的下游阶段始终写到子任务目录，模型与音频仅通过已验证缓存复用，绝不覆盖父任务产物。
 
 ## 6. 功能需求
 
@@ -153,7 +155,7 @@ V1 是单用户系统，不提供注册、登录、组织与权限模型。若�
 - 按自然段和句子边界确定性分段，每段不超过 Provider 限制。
 - 支持音色、语速、模型和输出格式配置。
 - 每段独立重试、保存、校验和缓存；支持只重生成一个片段。
-- 音频缓存身份必须包含 Provider 实现/endpoint 等非敏感语义配置的 `provider_config_hash`，并显式包含 provider、model、voice、speed、format、分段器版本和规范文本；密钥、timeout 与 retry 次数不参与缓存身份。
+- 音频缓存身份必须包含 Provider 实现/endpoint 等非敏感语义配置的 `provider_config_hash`，以及发音词典、金融数字规则和增强断句模式的 `tts_preprocess_hash`；并显式包含 provider、model、voice、speed、format、分段器版本和规范文本；密钥、timeout 与 retry 次数不参与缓存身份。
 - FFmpeg 将通过校验的片段按固定编码参数合并为最终 MP3，并使用临时文件加原子重命名。
 
 ### FR-8 节目审核
@@ -238,7 +240,7 @@ V1 是单用户系统，不提供注册、登录、组织与权限模型。若�
 - 默认每期最多 30 个事件进入 LLM 评分、最多 8 个事件入选。
 - 默认每期 LLM 调用硬上限 12 次，输入预算 60,000 tokens；具体值可配置但必须有上限。
 - 只有 `operation + provider + model + prompt_version + schema_version + generation_config_hash + input_hash` 全部相同，才能复用通过 schema 校验的成功结果；Provider endpoint 身份、模型生成参数或任一其他身份字段变化均视为 cache miss，重试不得重复消耗已命中的成功结果。
-- TTS 以包含 `provider_config_hash` 的完整片段缓存键复用；Provider 实现/endpoint、音色、语速、模型、格式或其他影响音频的参数变化均 cache miss，避免错误复用和不必要的整期重合成。
+- TTS 以包含 `provider_config_hash` 和 `tts_preprocess_hash` 的完整片段缓存键复用；Provider 实现/endpoint、音色、语速、模型、格式、发音词典或其他影响音频的参数变化均 cache miss，避免错误复用和不必要的整期重合成。
 
 ### 7.5 安全与隐私
 
@@ -280,6 +282,7 @@ V1 明确不做：
 
 - 使用至少一个 RSS 示例源和一个 HTML 示例源，能够产生文章记录、事件、待审节目、分段音频和最终 MP3。
 - 自动任务结束于 `review_required`，未经批准无法发布。
+- 在 Alpha 放宽质量门槛配置下，质量 finding 与 review verdict 必须保留在 artifact 中，但结构有效节目可以自动生成、批准并发布；严格模式仍必须在 review_required 等待人工批准。
 - 所有 LLM 输出均经结构化 schema 校验，所有最终稿段落可追溯到事件和文章。
 
 ### AC-3 去重与成本
@@ -294,12 +297,14 @@ V1 明确不做：
 - 一个来源或少量页面提取失败时，满足最低候选阈值仍可生成节目，并展示警告。
 - TTS 在中间片段失败后重试只请求失败/缺失片段。
 - 进程中断后能够从持久化检查点续跑，不重复创建 Episode。
+- QueueFull 后已提交的 queued TaskRun 会由 SQLite 扫描重新投递；单个任务或 worker loop 异常不应杀死唯一 worker，`/readyz` 必须在 supervisor/worker 不健康时返回未就绪。
+- deadline 到期任务写入 `timed_out/TASK_DEADLINE_EXCEEDED`，保留已完成 checkpoint；TaskRun/TaskStep 保存实际 LLM 调用/Token 与 TTS 请求字符，并保留稳定错误码和 retryable 分类。
 
 ### AC-5 审核与局部再生
 
 - 用户能查看来源、入选理由、稿件、音频和步骤日志，并修改标题/简介。
 - 修改稿件后 Episode 立即进入 `draft`，批准字段、旧检查和当前音频引用失效；只有重新检查、片段生成和最终合并完成后才进入 `review_required`。
-- 只有完整缓存键改变的片段重新生成；未变片段校验后复用。测试必须证明 `provider_config_hash` 参与身份，Provider 实现/endpoint、voice、speed、model、format 或其他音频语义参数变化时不能命中旧片段。
+- 只有完整缓存键改变的片段重新生成；未变片段校验后复用。测试必须证明 `provider_config_hash` 和 `tts_preprocess_hash` 参与身份，Provider 实现/endpoint、voice、开场/结尾速度、model、format、发音词典或其他音频语义参数变化时不能命中旧片段。
 - 仅撤销批准但不改变内容和音频时，Episode 从 `approved` 回到 `review_required`，不进入 `draft`。
 - 用户可单独重生成指定音频片段。
 
@@ -315,6 +320,7 @@ V1 明确不做：
 - API、结构化日志和配置快照中不存在真实密钥、Cookie 或 Authorization 值。
 - 自动化测试不依赖真实外部 API Key。
 - migration 集成测试覆盖 foreign keys、partial unique index、JSON check、Article/NewsEvent 循环外键以及包含 `generation_config_hash` 的 LLMArtifact 完整唯一约束。
+- migration 与运行时测试还覆盖 TaskStep 非负 TTS 用量、RSS 同一 external_id URL 变化冲突、Responses JSON-object fallback 的二次预算预留，以及草稿 MP3 不位于 `PUBLIC_DIR`。
 
 ## 10. 后续路线图
 

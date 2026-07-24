@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from alembic import command
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -28,7 +29,7 @@ from dailycast.db.models import (
     TaskRunStatus,
     TaskType,
 )
-from dailycast.db.repositories import SourceRepository, TaskRunRepository
+from dailycast.db.repositories import ArticleRepository, SourceRepository, TaskRunRepository
 from dailycast.db.revision import build_alembic_config
 from dailycast.db.session import create_session_factory, create_sqlite_engine
 from dailycast.db.transactions import UnitOfWork
@@ -46,7 +47,11 @@ from dailycast.pipeline.submission import TaskSubmissionService
 from dailycast.sources.contracts import ArticleCandidate, CollectionWindow
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy, SafeHttpFetcher
 from dailycast.sources.rss import RSSCollector
-from dailycast.sources.service import ArticleService, SourceCollectionService
+from dailycast.sources.service import (
+    ArticleService,
+    ArticleValidationError,
+    SourceCollectionService,
+)
 from dailycast.tts.service import AudioGenerationResult
 
 
@@ -214,6 +219,7 @@ class FakeAudioGenerationService:
             duration_ms=3000,
             audio_version=1,
             draft_audio_path=f"audio/{episode_id}.mp3",
+            tts_character_count=0,
         )
 
 
@@ -433,6 +439,47 @@ def test_article_service_upserts_duplicate_normalized_url(app_config_path: Path)
         engine.dispose()
 
 
+def test_rss_external_id_url_change_is_a_nonretryable_identity_conflict(
+    app_config_path: Path,
+) -> None:
+    """A reused RSS GUID cannot silently overwrite the original Article URL identity."""
+    engine, factory = upgraded_factory(app_config_path)
+    try:
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            SourceRepository(unit.session).create(**source_values())
+        service = ArticleService(factory)
+        first = service.upsert_candidate(
+            ArticleCandidate(
+                source_id="hacker-news-rss",
+                external_id="stable-guid",
+                url="https://article.example.test/original",
+                title="Original article",
+            )
+        )
+
+        with pytest.raises(ArticleValidationError) as raised:
+            service.upsert_candidate(
+                ArticleCandidate(
+                    source_id="hacker-news-rss",
+                    external_id="stable-guid",
+                    url="https://article.example.test/moved",
+                    title="Moved article",
+                )
+            )
+
+        assert raised.value.error.code == "RSS_EXTERNAL_ID_URL_CONFLICT"
+        assert raised.value.error.retryable is False
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            persisted = ArticleRepository(unit.session).get(first.id)
+            assert persisted is not None
+            assert persisted.url == "https://article.example.test/original"
+            assert len(ArticleRepository(unit.session).list()) == 1
+    finally:
+        engine.dispose()
+
+
 def test_collection_pipeline_persists_articles_and_continues_after_one_extraction_failure(
     app_config_path: Path,
 ) -> None:
@@ -505,7 +552,9 @@ def test_collection_pipeline_persists_articles_and_continues_after_one_extractio
                 assert unit.session is not None
                 current = TaskRunRepository(unit.session).get(task_run.id)
                 assert current is not None
-                assert current.status == TaskRunStatus.SUCCEEDED_WITH_WARNINGS
+                assert (
+                    current.status == TaskRunStatus.SUCCEEDED_WITH_WARNINGS
+                ), current.error_summary
                 assert [step.step_name for step in current.steps] == [
                     "collecting",
                     "extracting",

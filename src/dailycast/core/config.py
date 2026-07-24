@@ -3,7 +3,7 @@
 import os
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from dotenv import dotenv_values
@@ -71,6 +71,12 @@ class SchedulerSettings(BaseModel):
 
     enabled: bool = False
     cron_expression: str = "0 8 * * *"
+
+
+class TaskExecutionSettings(BaseModel):
+    """Bound the lifetime of one local pipeline request without adding a worker service."""
+
+    deadline_seconds: int = Field(default=1800, ge=1, le=86_400)
 
 
 class LLMBudgetSettings(BaseModel):
@@ -142,6 +148,10 @@ class TTSSettings(BaseModel):
     voice: str = "zh-CN-XiaoxiaoNeural"
     speed: float = Field(default=1.0, gt=0.0, le=2.0)
     format: str = "mp3"
+    text_mode: Literal["plain", "enhanced_text"] = "enhanced_text"
+    pronunciation_dictionary_path: Path = Path("config/pronunciation.yaml")
+    opening_summary_speed: float = Field(default=0.94, gt=0.0, le=2.0)
+    closing_summary_speed: float = Field(default=0.94, gt=0.0, le=2.0)
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=10)
     cache_enabled: bool = True
@@ -257,6 +267,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     sources: SourcesSettings = Field(default_factory=SourcesSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
+    task_execution: TaskExecutionSettings = Field(default_factory=TaskExecutionSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     editorial: EditorialSettings = Field(default_factory=EditorialSettings)
     processing: ProcessingSettings = Field(default_factory=ProcessingSettings)

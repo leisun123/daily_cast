@@ -62,7 +62,6 @@ def _ready_episode(factory: sessionmaker[Session], tmp_path: Path, *, key: str, 
         factory,
         FakeTTSProvider(),
         data_dir=tmp_path / "data",
-        public_dir=tmp_path / "public",
         merger=AtomicFakeMerger(),
         settings=TTSGenerationSettings(voice="zh-CN-XiaoxiaoNeural"),
     )
@@ -77,6 +76,7 @@ def _ready_episode(factory: sessionmaker[Session], tmp_path: Path, *, key: str, 
 def _publisher(tmp_path: Path) -> RSSPublisher:
     """Create a public RSS writer with an explicit HTTPS enclosure origin."""
     return RSSPublisher(
+        data_dir=tmp_path / "data",
         public_dir=tmp_path / "public",
         settings=RSSSettings(
             public_base_url="https://podcast.example.test",
@@ -154,7 +154,7 @@ def test_publish_rejects_a_draft_audio_file_whose_checksum_no_longer_matches(
     try:
         episode = _ready_episode(factory, tmp_path, key="publication-checksum", day=22)
         assert episode.draft_audio_path is not None
-        (tmp_path / "public" / episode.draft_audio_path).write_bytes(b"corrupted draft audio")
+        (tmp_path / "data" / episode.draft_audio_path).write_bytes(b"corrupted draft audio")
 
         with pytest.raises(PublicationOperationError):
             _service(factory, tmp_path).publish(episode.id)

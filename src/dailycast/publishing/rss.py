@@ -38,7 +38,8 @@ class RSSPublisher:
 
     target_key = "local-rss"
 
-    def __init__(self, *, public_dir: Path, settings: RSSSettings) -> None:
+    def __init__(self, *, data_dir: Path, public_dir: Path, settings: RSSSettings) -> None:
+        self._data_dir = data_dir.resolve()
         self._public_dir = public_dir.resolve()
         self._settings = settings
 
@@ -51,7 +52,7 @@ class RSSPublisher:
         """Copy a verified mutable draft to a content-addressed immutable public media path once."""
         if episode.draft_audio_path is None or episode.draft_audio_sha256 is None:
             raise RSSPublicationError("Episode has no verified draft audio")
-        source = self._safe_public_path(episode.draft_audio_path)
+        source = self._safe_data_path(episode.draft_audio_path)
         if not source.is_file():
             raise RSSPublicationError("Episode draft audio file does not exist")
         source_bytes = source.read_bytes()
@@ -263,6 +264,18 @@ class RSSPublisher:
             candidate.relative_to(self._public_dir)
         except ValueError as error:
             raise RSSPublicationError("public asset path escapes configured PUBLIC_DIR") from error
+        return candidate
+
+    def _safe_data_path(self, relative_path: str) -> Path:
+        """Reject private draft traversal before immutable public-asset promotion."""
+        candidate_relative = Path(relative_path)
+        if candidate_relative.is_absolute() or not candidate_relative.parts:
+            raise RSSPublicationError("draft audio path must be relative")
+        candidate = (self._data_dir / candidate_relative).resolve()
+        try:
+            candidate.relative_to(self._data_dir)
+        except ValueError as error:
+            raise RSSPublicationError("draft audio path escapes configured DATA_DIR") from error
         return candidate
 
     @staticmethod

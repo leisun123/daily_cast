@@ -52,6 +52,7 @@ class OutlineGenerationResult:
     artifact_id: int | None
     cache_hit: bool
     usage: LLMUsage
+    provider_call_count: int = 0
 
 
 def build_evidence_dossiers(
@@ -161,6 +162,7 @@ async def generate_outline(
         artifact_id=structured_result.artifact_id,
         cache_hit=structured_result.cache_hit,
         usage=structured_result.usage,
+        provider_call_count=structured_result.provider_call_count,
     )
 
 

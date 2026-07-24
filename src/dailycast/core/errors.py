@@ -4,11 +4,19 @@
 class DailyCastError(Exception):
     """Base error with a stable public error code."""
 
-    def __init__(self, *, code: str, message: str, status_code: int = 500) -> None:
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        status_code: int = 500,
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.retryable = retryable
 
 
 class ConfigurationError(DailyCastError):
@@ -48,6 +56,7 @@ class LLMProviderError(AIError):
             code="AI_PROVIDER_ERROR",
             message="LLM provider request failed",
             status_code=502,
+            retryable=True,
         )
 
 
@@ -60,6 +69,7 @@ class LLMProviderTimeoutError(LLMProviderError):
             code="AI_PROVIDER_TIMEOUT",
             message="LLM provider request timed out",
             status_code=504,
+            retryable=True,
         )
 
 
@@ -84,4 +94,17 @@ class LLMProviderResponseError(LLMProviderError):
             code="AI_PROVIDER_RESPONSE_INVALID",
             message="LLM provider returned an invalid structured response",
             status_code=502,
+        )
+
+
+class LLMStructuredOutputUnsupportedError(LLMProviderError):
+    """Raised when a gateway rejects native JSON Schema output but may accept JSON mode."""
+
+    def __init__(self) -> None:
+        DailyCastError.__init__(
+            self,
+            code="AI_PROVIDER_STRUCTURED_OUTPUT_UNSUPPORTED",
+            message="LLM provider rejected native structured output",
+            status_code=502,
+            retryable=False,
         )

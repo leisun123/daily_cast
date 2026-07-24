@@ -101,7 +101,7 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             database_url=database_url,
         )
         assert revision.is_current is True
-        assert revision.current == ("0002_task_run_waiting_action",)
+        assert revision.current == ("0004_tts_preprocess_identity",)
     finally:
         engine.dispose()
 
@@ -280,6 +280,7 @@ def test_foreign_keys_json_checks_and_tts_hash_checks_are_enforced(app_config_pa
                 model="tts-1",
                 voice="alloy",
                 provider_config_hash="b" * 64,
+                tts_preprocess_hash="c" * 64,
                 status="pending",
                 created_at=timestamp,
                 updated_at=timestamp,
@@ -326,4 +327,56 @@ def test_article_event_cycle_can_be_created_in_documented_order(app_config_path:
     finally:
         session.rollback()
         session.close()
+        engine.dispose()
+
+
+def test_reliability_migration_adds_nonnegative_task_step_tts_usage(
+    app_config_path: Path,
+) -> None:
+    """Alembic 0003 supplies the task-step accounting column and its SQLite CHECK."""
+    engine, _, _ = upgrade_empty_database(app_config_path)
+    try:
+        with engine.begin() as connection:
+            columns = {row[1] for row in connection.execute(text("PRAGMA table_info(task_steps)"))}
+            assert "tts_character_count" in columns
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO task_runs (
+                            id, task_type, business_key, idempotency_key, trigger_type, status,
+                            pipeline_version, config_fingerprint, config_snapshot_json,
+                            request_json, created_at, updated_at
+                        ) VALUES (
+                            'tts-check-task', 'daily_generate', 'tts-check', 'tts-check-key',
+                            'manual', 'queued', 'test', :fingerprint, '{}', '{}', :created, :updated
+                        )
+                        """
+                    ),
+                    {"fingerprint": "a" * 64, "created": now(), "updated": now()},
+                )
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO task_steps (
+                            task_run_id, step_name, step_order, attempt, status, details_json,
+                            tts_character_count
+                        ) VALUES ('tts-check-task', 'tts', 1, 1, 'succeeded', '{}', -1)
+                        """
+                    )
+                )
+    finally:
+        engine.dispose()
+
+
+def test_tts_preprocess_identity_is_persisted_on_audio_segments(app_config_path: Path) -> None:
+    """Audio cache rows record the explicit preprocessing policy that shaped the spoken input."""
+    engine, _, _ = upgrade_empty_database(app_config_path)
+    try:
+        with engine.connect() as connection:
+            columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(audio_segments)"))
+            }
+        assert "tts_preprocess_hash" in columns
+    finally:
         engine.dispose()

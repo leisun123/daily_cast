@@ -40,7 +40,7 @@ class OutliningStep:
             budget=budget,
         )
         artifact_path = _write_outline(
-            self.data_dir, context.task_run_id, result.outline.model_dump()
+            self.data_dir, context.artifact_run_id, result.outline.model_dump()
         )
         context.values["outlined_news_event_ids"] = built.event_ids
         context.values["episode_outline"] = result.outline
@@ -64,6 +64,9 @@ class OutliningStep:
                 "llm_output_tokens": result.usage.output_tokens,
             },
             artifact_path=artifact_path,
+            llm_call_count=result.provider_call_count,
+            llm_input_tokens=result.usage.input_tokens if not result.cache_hit else 0,
+            llm_output_tokens=result.usage.output_tokens if not result.cache_hit else 0,
         )
 
 

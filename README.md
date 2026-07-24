@@ -42,7 +42,11 @@ Completed:
 - [x] RSS publishing
 - [x] Docker deployment
 
-Generated episodes remain review-gated. Automatic publishing is disabled by default and only an approved episode with valid audio can become public.
+The Alpha example configuration records every validation/review finding while setting
+`editorial.enforce_quality_gate=false` and `publishing.auto_publish=true`, so a
+structurally valid local run can produce a playable RSS episode. Set the quality gate to
+`true` for the strict review-required workflow; draft audio always remains private under
+`DATA_DIR` until RSS publication promotes an immutable public asset.
 
 ## Quick Start
 
@@ -81,9 +85,16 @@ DailyCast uses two configuration layers:
 
 - `.env` holds environment-specific values and secrets. Start with `.env.example`; its LLM API-key value is intentionally blank.
 - `config/app.example.yaml` contains non-secret application, database, processing, LLM, TTS, FFmpeg, scheduler, and RSS defaults.
+- `config/pronunciation.yaml` is a non-secret, versioned pronunciation dictionary used only
+  while preparing provider input. It supports natural number and abbreviation speech without
+  altering the reviewable stored script; changing it invalidates the affected audio cache.
 - `config/sources.example.yaml` declares first-run source seeds. At startup, DailyCast creates only missing source IDs and never overwrites existing SQLite source edits; do not store credentials in source configuration.
 
 Environment variables override YAML. `DATA_DIR` and `PUBLIC_DIR` select the runtime roots for local development; Compose also provides `DAILYCAST_DATA_DIR` and `DAILYCAST_PUBLIC_DIR` for the host-side volume paths.
+
+`task_execution.deadline_seconds` is a durable overall deadline checked at pipeline
+checkpoint boundaries. A timed-out run preserves its completed checkpoints for a later
+recovery child; it does not require a broker or another worker process.
 
 For a non-loopback public Feed, configure an explicit HTTPS `DAILYCAST_PUBLISHING__PUBLIC_BASE_URL` and expose only the intended Feed/media paths through your reverse proxy or static hosting setup.
 

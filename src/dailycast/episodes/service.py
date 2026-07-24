@@ -52,6 +52,17 @@ class EpisodeStateTransitionError(DailyCastError):
         )
 
 
+class EpisodeRegenerationPreconditionError(DailyCastError):
+    """Raised when an explicit regenerate would mutate a published public record."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            code="EPISODE_REGENERATION_NOT_ALLOWED",
+            message="only an unpublished Episode can be regenerated",
+            status_code=409,
+        )
+
+
 _ALLOWED_TRANSITIONS: dict[EpisodeStatus, frozenset[EpisodeStatus]] = {
     EpisodeStatus.DRAFT: frozenset({EpisodeStatus.REVIEW_REQUIRED}),
     EpisodeStatus.REVIEW_REQUIRED: frozenset({EpisodeStatus.DRAFT, EpisodeStatus.APPROVED}),
@@ -170,6 +181,101 @@ class EpisodeService:
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             return EpisodeRepository(unit.session).get(episode_id)
+
+    def regenerate_from_editorial_artifacts(
+        self,
+        *,
+        episode_date: date,
+        edition: str,
+        outline: object,
+        script: object,
+        validation: object,
+        review: object,
+        metadata: object,
+        selected_event_ids: Sequence[int],
+        evidence_dossiers: Sequence[object],
+        task_run_id: str | None = None,
+        enforce_quality_gate: bool = True,
+    ) -> Episode:
+        """Replace one unpublished same-day draft only for an explicit regenerate command."""
+        artifacts = _validated_artifacts(
+            outline=outline,
+            script=script,
+            validation=validation,
+            review=review,
+            metadata=metadata,
+            selected_event_ids=selected_event_ids,
+            evidence_dossiers=evidence_dossiers,
+            enforce_quality_gate=enforce_quality_gate,
+        )
+        with UnitOfWork(self._session_factory) as unit:
+            assert unit.session is not None
+            episodes = EpisodeRepository(unit.session)
+            episode = episodes.get_by_date_and_edition(episode_date, edition)
+            if episode is None or episode.status in {
+                EpisodeStatus.PUBLISHED,
+                EpisodeStatus.PUBLISHING,
+            }:
+                raise EpisodeRegenerationPreconditionError()
+            events = NewsEventRepository(unit.session)
+            selected_events = []
+            for event_id in artifacts.selected_event_ids:
+                event = events.get(event_id)
+                if event is None or event.status is not NewsEventStatus.SELECTED:
+                    raise EpisodeCreationPreconditionError()
+                selected_events.append(event)
+            episode.title = artifacts.metadata.title
+            episode.description = artifacts.metadata.description
+            episode.outline_json = _canonical_json(artifacts.outline.model_dump(mode="json"))
+            episode.script_json = _canonical_json(artifacts.script.model_dump(mode="json"))
+            episode.script_text = artifacts.script_text
+            episode.script_revision += 1
+            episode.script_hash = sha256_text(artifacts.script_text)
+            episode.script_origin = ScriptOrigin.GENERATED
+            episode.review_json = _canonical_json(
+                {
+                    "validation": artifacts.validation.model_dump(mode="json"),
+                    "review": artifacts.review.model_dump(mode="json"),
+                }
+            )
+            episode.target_duration_seconds = artifacts.outline.target_seconds
+            episode.actual_duration_ms = None
+            episode.audio_version = 0
+            episode.audio_manifest_hash = None
+            episode.draft_audio_path = None
+            episode.draft_audio_sha256 = None
+            episode.approved_script_revision = None
+            episode.approved_audio_version = None
+            episode.approved_at = None
+            episode.status = EpisodeStatus.DRAFT
+            episode.error_code = None
+            episode.error_summary = None
+            EpisodeItemRepository(unit.session).delete_by_episode(episode.id)
+            items = EpisodeItemRepository(unit.session)
+            for position, event in enumerate(selected_events, start=1):
+                dossier = artifacts.dossiers_by_event_id[event.id]
+                items.create(
+                    episode_id=episode.id,
+                    news_event_id=event.id,
+                    position=position,
+                    event_title_snapshot=event.title,
+                    selection_reason_snapshot=dossier.selection_reason,
+                    score_snapshot_json=_canonical_json(
+                        {
+                            "confidence_score": dossier.confidence_score,
+                            "deterministic_score": event.deterministic_score,
+                            "importance_score": dossier.importance_score,
+                            "relevance_score": dossier.relevance_score,
+                        }
+                    ),
+                    source_article_ids_json=_canonical_json(
+                        [source.article_id for source in dossier.evidence_sources]
+                    ),
+                    section_id=artifacts.section_ids_by_event_id.get(event.id),
+                )
+            EpisodeRepository(unit.session).increment_lock_version(episode)
+            self._attach_task_run(unit.session, task_run_id, episode.id)
+            return episode
 
     def transition_status(self, episode_id: int, target: EpisodeStatus) -> Episode:
         """Validate and persist one documented Episode lifecycle transition."""

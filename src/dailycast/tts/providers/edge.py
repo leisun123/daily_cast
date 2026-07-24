@@ -10,7 +10,7 @@ from typing import Any
 import edge_tts
 
 from dailycast.core.hashes import sha256_text
-from dailycast.tts.contracts import AudioResult
+from dailycast.tts.contracts import AudioResult, TextMode
 
 
 class EdgeTTSProvider:
@@ -35,7 +35,7 @@ class EdgeTTSProvider:
         return sha256_text(
             json.dumps(
                 {
-                    "implementation": "edge-tts-python-v7-default-mp3",
+                    "implementation": "edge-tts-python-v7-enhanced-text-mp3",
                     "endpoint_identity": "edge-tts-service",
                     "semantic_options": {"output_format": "edge-tts-default-mp3"},
                 },
@@ -44,14 +44,25 @@ class EdgeTTSProvider:
             )
         )
 
-    async def synthesize(self, text: str, voice: str, speed: float, format: str) -> AudioResult:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str,
+        speed: float,
+        format: str,
+        *,
+        text_mode: TextMode = "plain",
+    ) -> AudioResult:
         """Stream audio bytes with bounded retry while propagating cancellation."""
         if format != "mp3":
             raise ValueError("EdgeTTSProvider supports only mp3")
+        if text_mode not in {"plain", "enhanced_text"}:
+            raise ValueError("EdgeTTSProvider text_mode must be plain or enhanced_text")
         for attempt in range(self._max_retries + 1):
             try:
                 return await asyncio.wait_for(
-                    self._synthesize_once(text, voice, speed), timeout=self._timeout_seconds
+                    self._synthesize_once(text, voice, speed, text_mode),
+                    timeout=self._timeout_seconds,
                 )
             except asyncio.CancelledError:
                 raise
@@ -61,7 +72,9 @@ class EdgeTTSProvider:
                 await asyncio.sleep(0.1 * (2**attempt))
         raise RuntimeError("unreachable Edge TTS retry state")
 
-    async def _synthesize_once(self, text: str, voice: str, speed: float) -> AudioResult:
+    async def _synthesize_once(
+        self, text: str, voice: str, speed: float, text_mode: TextMode
+    ) -> AudioResult:
         """Collect the provider audio stream without executing a shell command or creating files."""
         communicate_factory: Any = self._communicate_factory
         communication = communicate_factory(
