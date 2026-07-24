@@ -154,6 +154,7 @@ def build_lifespan(
                     format=settings.tts.format,
                     text_mode=settings.tts.text_mode,
                     opening_summary_speed=settings.tts.opening_summary_speed,
+                    closing_summary_speed=settings.tts.closing_summary_speed,
                     cache_enabled=settings.tts.cache_enabled,
                 ),
                 preprocessor=TTSPreprocessor(

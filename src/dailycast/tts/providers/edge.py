@@ -11,7 +11,6 @@ import edge_tts
 
 from dailycast.core.hashes import sha256_text
 from dailycast.tts.contracts import AudioResult, TextMode
-from dailycast.tts.preprocess import ssml_to_edge_text
 
 
 class EdgeTTSProvider:
@@ -36,7 +35,7 @@ class EdgeTTSProvider:
         return sha256_text(
             json.dumps(
                 {
-                    "implementation": "edge-tts-python-v7-default-mp3",
+                    "implementation": "edge-tts-python-v7-enhanced-text-mp3",
                     "endpoint_identity": "edge-tts-service",
                     "semantic_options": {"output_format": "edge-tts-default-mp3"},
                 },
@@ -57,6 +56,8 @@ class EdgeTTSProvider:
         """Stream audio bytes with bounded retry while propagating cancellation."""
         if format != "mp3":
             raise ValueError("EdgeTTSProvider supports only mp3")
+        if text_mode not in {"plain", "enhanced_text"}:
+            raise ValueError("EdgeTTSProvider text_mode must be plain or enhanced_text")
         for attempt in range(self._max_retries + 1):
             try:
                 return await asyncio.wait_for(
@@ -76,9 +77,8 @@ class EdgeTTSProvider:
     ) -> AudioResult:
         """Collect the provider audio stream without executing a shell command or creating files."""
         communicate_factory: Any = self._communicate_factory
-        spoken_text = ssml_to_edge_text(text) if text_mode == "ssml" else text
         communication = communicate_factory(
-            spoken_text,
+            text,
             voice=voice,
             rate=_edge_rate(speed),
         )

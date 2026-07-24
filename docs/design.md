@@ -380,8 +380,9 @@ V1 实现 `OpenAICompatibleTTSProvider`。理由是配置与 LLM 类似、请求
 1. 稿件保存 `script_revision` 和 `script_hash`。
 2. 分段器优先保持段落边界，再按中文句号、问号、感叹号和安全长度切分；同样输入与算法版本得到同样片段。
 3. `provider_config_hash` 的唯一规范是对 `{provider_implementation_identity, endpoint_identity_hash, semantic_provider_options_sorted}` 做 canonical JSON SHA-256。endpoint 采用与 LLM 相同的脱敏规范化身份 hash；语义选项包括 Provider 特有且影响音频结果的参数。API Key、Authorization、timeout 和 retry 次数均排除。
-4. 缓存键的唯一公式为 `SHA-256(provider + provider_config_hash + model + voice + canonical_speed + format + segmenter_version + normalized_text)`。provider、model、voice、speed 和 format 即使也被 Provider 请求使用，仍显式保留在公式中；`provider_config_hash` 只承载实现/endpoint 和额外语义选项，避免双重定义。
-5. 每段只按上述完整 `cache_key` 和匹配的 `provider_config_hash` 查询 `succeeded` 缓存，并再次验证文件 checksum/解码；不得使用缺少 Provider 配置语义的旧 cache_key。未命中才调用 TTS。
+4. `tts_preprocess_hash` 是发音词典、金融数字规则、增强断句模式及其他影响口播输入的 non-secret canonical hash；timeout 和 retry 不参与。公开 `edge-tts` SDK 会转义调用者文本、不能接收自定义 SSML，因此模式名称为 `enhanced_text`：仅传递经过断句增强的纯文本，不声称发送 SSML。
+5. 缓存键的唯一公式为 `SHA-256(provider + provider_config_hash + model + voice + canonical_speed + format + segmenter_version + tts_preprocess_hash + normalized_text)`。provider、model、voice、speed 和 format 即使也被 Provider 请求使用，仍显式保留在公式中；`provider_config_hash` 只承载实现/endpoint 和额外语义选项，避免双重定义。
+6. 每段只按上述完整 `cache_key` 和匹配的 `provider_config_hash + tts_preprocess_hash` 查询 `succeeded` 缓存，并再次验证文件 checksum/解码；不得使用缺少 Provider 或预处理配置语义的旧 cache_key。未命中才调用 TTS。
 6. 片段先写 `.part`，完成后校验 MIME、解码、时长和 checksum，再原子改名并置为 `succeeded`。
 7. 重试只处理 `pending/failed/stale` 或文件校验失败片段。
 
@@ -695,7 +696,7 @@ Cookie、账号和密码绝不写入代码、YAML、日志、截图文件名或�
 - `app`：时区、数据库 URL、数据/公开目录、日志和管理绑定地址；非 Docker 开发默认 `127.0.0.1:8000`，Compose 显式覆盖为容器内 `0.0.0.0:8000`；
 - `sources`：来源种子列表、类型、URL、选择器、优先级和过滤覆盖；种子启动时采用 `missing_only` 导入，首次导入后 SQLite Source 是运行时真相源，YAML 不覆盖通过 API 做的修改；
 - `llm`：provider、base URL、model、超时、各操作 temperature/top_p/max output tokens、response format、其他模型语义选项、输入/输出与调用预算；加载后分别计算脱敏 endpoint identity 和 `generation_config_hash`；
-- `tts`：provider、base URL、Provider 实现身份、model、voice、speed、格式、额外音频语义选项、分段上限和重试；加载后计算不含秘密/timeout/retry 的 `provider_config_hash`；
+- `tts`：provider、base URL、Provider 实现身份、model、voice、speed、开场/结尾速度、格式、`plain|enhanced_text` 模式、发音词典、额外音频语义选项、分段上限和重试；加载后分别计算不含秘密/timeout/retry 的 `provider_config_hash` 与 `tts_preprocess_hash`；
 - `schedule`：启用、Cron、misfire grace、总任务超时；
 - `publishing`：public base URL、Feed 元数据、公开路径、目标列表。
 

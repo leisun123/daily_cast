@@ -46,9 +46,11 @@ def test_tts_and_ffmpeg_defaults_are_explicit_configuration(app_config_path: Pat
 
     assert settings.tts.provider == "edge_tts"
     assert settings.tts.voice == "zh-CN-XiaoxiaoNeural"
-    assert settings.tts.text_mode == "ssml"
+    assert settings.tts.text_mode == "enhanced_text"
     assert settings.tts.pronunciation_dictionary_path == Path("config/pronunciation.yaml")
     assert settings.tts.cache_enabled is True
+    assert settings.tts.opening_summary_speed == 0.94
+    assert settings.tts.closing_summary_speed == 0.94
     assert settings.ffmpeg.sample_rate == 24_000
     assert settings.ffmpeg.bitrate == "64k"
 
@@ -64,7 +66,7 @@ def test_alpha_example_unblocks_quality_gated_output_and_auto_publish(tmp_path: 
     assert settings.publishing.auto_publish is True
     assert settings.publishing.public_base_url == "http://127.0.0.1:8000"
     assert settings.publishing.feed_title == "DailyCast"
-    assert settings.tts.text_mode == "ssml"
+    assert settings.tts.text_mode == "enhanced_text"
     assert settings.resolve_path(settings.tts.pronunciation_dictionary_path).is_file()
 
 

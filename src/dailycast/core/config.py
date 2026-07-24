@@ -148,9 +148,10 @@ class TTSSettings(BaseModel):
     voice: str = "zh-CN-XiaoxiaoNeural"
     speed: float = Field(default=1.0, gt=0.0, le=2.0)
     format: str = "mp3"
-    text_mode: Literal["plain", "ssml"] = "ssml"
+    text_mode: Literal["plain", "enhanced_text"] = "enhanced_text"
     pronunciation_dictionary_path: Path = Path("config/pronunciation.yaml")
     opening_summary_speed: float = Field(default=0.94, gt=0.0, le=2.0)
+    closing_summary_speed: float = Field(default=0.94, gt=0.0, le=2.0)
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=10)
     cache_enabled: bool = True

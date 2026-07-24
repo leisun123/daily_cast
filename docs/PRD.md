@@ -155,7 +155,7 @@ Alpha 示例可将 `editorial.enforce_quality_gate=false` 与 `publishing.auto_p
 - 按自然段和句子边界确定性分段，每段不超过 Provider 限制。
 - 支持音色、语速、模型和输出格式配置。
 - 每段独立重试、保存、校验和缓存；支持只重生成一个片段。
-- 音频缓存身份必须包含 Provider 实现/endpoint 等非敏感语义配置的 `provider_config_hash`，并显式包含 provider、model、voice、speed、format、分段器版本和规范文本；密钥、timeout 与 retry 次数不参与缓存身份。
+- 音频缓存身份必须包含 Provider 实现/endpoint 等非敏感语义配置的 `provider_config_hash`，以及发音词典、金融数字规则和增强断句模式的 `tts_preprocess_hash`；并显式包含 provider、model、voice、speed、format、分段器版本和规范文本；密钥、timeout 与 retry 次数不参与缓存身份。
 - FFmpeg 将通过校验的片段按固定编码参数合并为最终 MP3，并使用临时文件加原子重命名。
 
 ### FR-8 节目审核
@@ -240,7 +240,7 @@ Alpha 示例可将 `editorial.enforce_quality_gate=false` 与 `publishing.auto_p
 - 默认每期最多 30 个事件进入 LLM 评分、最多 8 个事件入选。
 - 默认每期 LLM 调用硬上限 12 次，输入预算 60,000 tokens；具体值可配置但必须有上限。
 - 只有 `operation + provider + model + prompt_version + schema_version + generation_config_hash + input_hash` 全部相同，才能复用通过 schema 校验的成功结果；Provider endpoint 身份、模型生成参数或任一其他身份字段变化均视为 cache miss，重试不得重复消耗已命中的成功结果。
-- TTS 以包含 `provider_config_hash` 的完整片段缓存键复用；Provider 实现/endpoint、音色、语速、模型、格式或其他影响音频的参数变化均 cache miss，避免错误复用和不必要的整期重合成。
+- TTS 以包含 `provider_config_hash` 和 `tts_preprocess_hash` 的完整片段缓存键复用；Provider 实现/endpoint、音色、语速、模型、格式、发音词典或其他影响音频的参数变化均 cache miss，避免错误复用和不必要的整期重合成。
 
 ### 7.5 安全与隐私
 
@@ -304,7 +304,7 @@ V1 明确不做：
 
 - 用户能查看来源、入选理由、稿件、音频和步骤日志，并修改标题/简介。
 - 修改稿件后 Episode 立即进入 `draft`，批准字段、旧检查和当前音频引用失效；只有重新检查、片段生成和最终合并完成后才进入 `review_required`。
-- 只有完整缓存键改变的片段重新生成；未变片段校验后复用。测试必须证明 `provider_config_hash` 参与身份，Provider 实现/endpoint、voice、speed、model、format 或其他音频语义参数变化时不能命中旧片段。
+- 只有完整缓存键改变的片段重新生成；未变片段校验后复用。测试必须证明 `provider_config_hash` 和 `tts_preprocess_hash` 参与身份，Provider 实现/endpoint、voice、开场/结尾速度、model、format、发音词典或其他音频语义参数变化时不能命中旧片段。
 - 仅撤销批准但不改变内容和音频时，Episode 从 `approved` 回到 `review_required`，不进入 `draft`。
 - 用户可单独重生成指定音频片段。
 

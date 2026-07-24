@@ -69,6 +69,7 @@ erDiagram
     AUDIO_SEGMENT {
         int id PK
         string provider_config_hash
+        string tts_preprocess_hash
         string cache_key
     }
     PUBLICATION {
@@ -460,6 +461,7 @@ erDiagram
 | `speed` | REAL | 是 | 默认 1.0 |  |
 | `format` | TEXT | 是 | 默认 `mp3` |  |
 | `provider_config_hash` | TEXT(64) | 是 | SHA-256 | Provider 实现/endpoint/额外音频语义选项的非秘密 canonical hash |
+| `tts_preprocess_hash` | TEXT(64) | 是 | SHA-256 | 发音词典、金融数字规则、增强断句模式及其他影响口播输入的非秘密 canonical hash |
 | `status` | TEXT | 是 | 状态枚举 | 见下方 |
 | `audio_path` | TEXT | 否 | 相对私有目录 | 校验后文件 |
 | `mime_type` | TEXT | 否 |  | 如 `audio/mpeg` |
@@ -478,10 +480,10 @@ erDiagram
 ### 11.3 约束、索引与生命周期
 
 - 唯一：`(episode_id, script_revision, segment_index)`。
-- 索引：`(cache_key, provider_config_hash, status)`、`(episode_id, script_revision, status)`、`sha256`。
+- 索引：`(cache_key, provider_config_hash, tts_preprocess_hash, status)`、`(episode_id, script_revision, status)`、`sha256`。
 - `provider_config_hash = SHA-256(canonical JSON({provider_implementation_identity, endpoint_identity_hash, semantic_provider_options_sorted}))`。endpoint 只保存规范化、脱敏后的身份 hash；API Key、Authorization、timeout 和 retry 次数不参与。model、voice、speed、format 在 cache_key 中显式出现，不放入该 hash 的唯一规范，避免双重定义。
-- `cache_key = SHA-256(provider + provider_config_hash + model + voice + canonical_speed + format + segmenter_version + normalized_text)`。base_url/Provider 实现、额外音频语义参数、voice、speed、model 或 format 任一变化都 cache miss；密钥、timeout/retry 变化不会使缓存失效。
-- 新修订创建新行；仅可按完整 `cache_key + provider_config_hash` 查找历史 `succeeded` 行，并在 checksum/解码校验后复用文件。AudioCache 不得使用缺少 Provider 配置语义的旧 cache_key。
+- `cache_key = SHA-256(provider + provider_config_hash + model + voice + canonical_speed + format + segmenter_version + tts_preprocess_hash + normalized_text)`。base_url/Provider 实现、额外音频语义参数、voice、speed、model、format、开场/结尾有效语速、发音词典或预处理规则任一变化都 cache miss；密钥、timeout/retry 变化不会使缓存失效。
+- 新修订创建新行；仅可按完整 `cache_key + provider_config_hash + tts_preprocess_hash` 查找历史 `succeeded` 行，并在 checksum/解码校验后复用文件。AudioCache 不得使用缺少 Provider 或预处理语义的旧 cache_key。
 - 稿件/TTS 配置变化后旧行保留为历史；当前修订不再引用时可标 stale。
 - 重生成当前有效片段或修改 voice/speed/TTS model 时，Episode 清空批准绑定和当前草稿音频引用并进入 draft；只有所有当前片段校验和最终合并成功后才进入 review_required。
 - 清理缓存前必须确认没有任一非 stale AudioSegment 引用相同 checksum/path。
@@ -802,6 +804,7 @@ CREATE TABLE audio_segments (
   speed REAL NOT NULL DEFAULT 1.0,
   format TEXT NOT NULL DEFAULT 'mp3',
   provider_config_hash TEXT NOT NULL CHECK (length(provider_config_hash) = 64),
+  tts_preprocess_hash TEXT NOT NULL CHECK (length(tts_preprocess_hash) = 64),
   status TEXT NOT NULL CHECK (status IN ('pending','synthesizing','succeeded','failed','stale')),
   audio_path TEXT,
   mime_type TEXT,
@@ -816,7 +819,7 @@ CREATE TABLE audio_segments (
   updated_at DATETIME NOT NULL,
   UNIQUE (episode_id, script_revision, segment_index)
 );
-CREATE INDEX ix_audio_segments_cache ON audio_segments(cache_key, provider_config_hash, status);
+CREATE INDEX ix_audio_segments_cache ON audio_segments(cache_key, provider_config_hash, tts_preprocess_hash, status);
 CREATE INDEX ix_audio_segments_episode_revision_status ON audio_segments(episode_id, script_revision, status);
 CREATE INDEX ix_audio_segments_sha ON audio_segments(sha256);
 

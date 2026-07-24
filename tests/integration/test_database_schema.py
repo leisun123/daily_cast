@@ -101,7 +101,7 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             database_url=database_url,
         )
         assert revision.is_current is True
-        assert revision.current == ("0003_reliability_hardening",)
+        assert revision.current == ("0004_tts_preprocess_identity",)
     finally:
         engine.dispose()
 
@@ -280,6 +280,7 @@ def test_foreign_keys_json_checks_and_tts_hash_checks_are_enforced(app_config_pa
                 model="tts-1",
                 voice="alloy",
                 provider_config_hash="b" * 64,
+                tts_preprocess_hash="c" * 64,
                 status="pending",
                 created_at=timestamp,
                 updated_at=timestamp,
@@ -364,5 +365,18 @@ def test_reliability_migration_adds_nonnegative_task_step_tts_usage(
                         """
                     )
                 )
+    finally:
+        engine.dispose()
+
+
+def test_tts_preprocess_identity_is_persisted_on_audio_segments(app_config_path: Path) -> None:
+    """Audio cache rows record the explicit preprocessing policy that shaped the spoken input."""
+    engine, _, _ = upgrade_empty_database(app_config_path)
+    try:
+        with engine.connect() as connection:
+            columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(audio_segments)"))
+            }
+        assert "tts_preprocess_hash" in columns
     finally:
         engine.dispose()

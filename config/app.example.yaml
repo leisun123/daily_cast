@@ -86,9 +86,11 @@ tts:
   voice: zh-CN-XiaoxiaoNeural
   speed: 1.0
   format: mp3
-  text_mode: ssml
+  # edge-tts accepts escaped plain text only; this mode adds conservative paragraph pauses.
+  text_mode: enhanced_text
   pronunciation_dictionary_path: config/pronunciation.yaml
   opening_summary_speed: 0.94
+  closing_summary_speed: 0.94
   timeout_seconds: 30
   max_retries: 2
   cache_enabled: true

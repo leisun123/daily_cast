@@ -171,9 +171,10 @@ def test_repositories_create_and_query_v1_records(app_config_path: Path) -> None
                 model="tts-1",
                 voice="alloy",
                 provider_config_hash="3" * 64,
+                tts_preprocess_hash="4" * 64,
                 status="succeeded",
             )
-            assert segments.get_by_cache_key("2" * 64, "3" * 64) is segment
+            assert segments.get_by_cache_key("2" * 64, "3" * 64, "4" * 64) is segment
 
             publications = PublicationRepository(uow.session)
             publication = publications.create(
@@ -189,7 +190,7 @@ def test_repositories_create_and_query_v1_records(app_config_path: Path) -> None
         with UnitOfWork(factory) as uow:
             assert uow.session is not None
             segments = AudioSegmentRepository(uow.session)
-            assert segments.get_by_cache_key("2" * 64, "3" * 64) is not None
+            assert segments.get_by_cache_key("2" * 64, "3" * 64, "4" * 64) is not None
     finally:
         engine.dispose()
 

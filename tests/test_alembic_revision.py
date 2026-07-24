@@ -28,7 +28,7 @@ def test_initial_schema_revision_reaches_head(app_config_path: Path) -> None:
         engine.dispose()
 
     assert revision.is_current is True
-    assert revision.current == ("0003_reliability_hardening",)
+    assert revision.current == ("0004_tts_preprocess_identity",)
 
 
 def test_waiting_action_migration_upgrades_existing_task_run_schema(app_config_path: Path) -> None:
@@ -71,5 +71,219 @@ def test_waiting_action_migration_upgrades_existing_task_run_schema(app_config_p
             connection.execute(
                 text("UPDATE task_runs SET status = 'waiting_action' WHERE id = 'legacy-task'")
             )
+    finally:
+        engine.dispose()
+
+
+def test_reliability_migration_preserves_task_steps_referenced_by_llm_artifacts(
+    app_config_path: Path,
+) -> None:
+    """SQLite batch migration must not drop a referenced TaskStep while foreign keys are enabled."""
+    settings = load_settings(config_path=app_config_path)
+    ini_path = Path(__file__).resolve().parents[1] / "alembic.ini"
+    config = build_alembic_config(ini_path=ini_path, database_url=settings.database.url)
+    command.upgrade(config, "0002_task_run_waiting_action")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO task_runs (
+                        id, task_type, business_key, idempotency_key, trigger_type, status,
+                        pipeline_version, config_fingerprint, config_snapshot_json, request_json,
+                        created_at, updated_at
+                    ) VALUES (
+                        'referenced-task', 'daily_generate', 'daily:referenced', 'referenced-key',
+                        'manual', 'succeeded', 'test-v1', :hash, '{}', '{}', :now, :now
+                    )
+                    """
+                ),
+                {"hash": "a" * 64, "now": "2026-07-24 00:00:00"},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO task_steps (
+                        task_run_id, step_name, step_order, attempt, status, details_json,
+                        created_at, updated_at
+                    ) VALUES (
+                        'referenced-task', 'ranking', 1, 1, 'succeeded', '{}', :now, :now
+                    )
+                    """
+                ),
+                {"now": "2026-07-24 00:00:00"},
+            )
+            step_id = connection.execute(
+                text("SELECT id FROM task_steps WHERE task_run_id = 'referenced-task'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO llm_artifacts (
+                        operation, provider, model, prompt_version, schema_version,
+                        generation_config_hash, input_hash, output_json, output_hash,
+                        created_by_task_run_id, created_by_task_step_id, created_at
+                    ) VALUES (
+                        'score_events', 'fake', 'fake-model', 'v1', 'v1', :config_hash,
+                        :input_hash, '{}', :output_hash, 'referenced-task', :step_id, :now
+                    )
+                    """
+                ),
+                {
+                    "config_hash": "b" * 64,
+                    "input_hash": "c" * 64,
+                    "output_hash": "d" * 64,
+                    "step_id": step_id,
+                    "now": "2026-07-24 00:00:00",
+                },
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT COUNT(*) FROM llm_artifacts")).scalar_one() == 1
+            assert (
+                connection.execute(text("SELECT tts_character_count FROM task_steps")).scalar_one()
+                == 0
+            )
+    finally:
+        engine.dispose()
+
+
+def test_reliability_migration_recovers_from_its_own_interrupted_sqlite_batch_table(
+    app_config_path: Path,
+) -> None:
+    """A prior failed 0003 attempt leaves a removable temp table beside the canonical source."""
+    settings = load_settings(config_path=app_config_path)
+    ini_path = Path(__file__).resolve().parents[1] / "alembic.ini"
+    config = build_alembic_config(ini_path=ini_path, database_url=settings.database.url)
+    command.upgrade(config, "0002_task_run_waiting_action")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("CREATE TABLE _alembic_tmp_task_steps AS SELECT * FROM task_steps")
+            )
+    finally:
+        engine.dispose()
+
+
+def test_tts_preprocess_migration_backfills_existing_audio_segments(app_config_path: Path) -> None:
+    """The additive cache-identity column upgrades historical audio rows safely."""
+    settings = load_settings(config_path=app_config_path)
+    ini_path = Path(__file__).resolve().parents[1] / "alembic.ini"
+    config = build_alembic_config(ini_path=ini_path, database_url=settings.database.url)
+    command.upgrade(config, "0003_reliability_hardening")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO episodes (public_id, episode_date, status, created_at, updated_at)
+                    VALUES ('legacy-audio-episode', '2026-07-24', 'draft', :now, :now)
+                    """
+                ),
+                {"now": "2026-07-24 00:00:00"},
+            )
+            episode_id = connection.execute(
+                text("SELECT id FROM episodes WHERE public_id = 'legacy-audio-episode'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO audio_segments (
+                        episode_id, script_revision, segment_index, segmenter_version, text,
+                        text_hash, cache_key, provider, model, voice, provider_config_hash,
+                        status, created_at, updated_at
+                    ) VALUES (
+                        :episode_id, 1, 0, 'v1', '历史片段', :text_hash, :cache_key,
+                        'edge_tts', 'edge-tts', 'zh-CN-XiaoxiaoNeural', :provider_hash,
+                        'succeeded', :now, :now
+                    )
+                    """
+                ),
+                {
+                    "episode_id": episode_id,
+                    "text_hash": "a" * 64,
+                    "cache_key": "b" * 64,
+                    "provider_hash": "c" * 64,
+                    "now": "2026-07-24 00:00:00",
+                },
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT tts_preprocess_hash FROM audio_segments")
+                ).scalar_one()
+                == "0" * 64
+            )
+    finally:
+        engine.dispose()
+
+
+def test_tts_preprocess_migration_recovers_from_its_own_interrupted_batch_table(
+    app_config_path: Path,
+) -> None:
+    """A stale Alembic audio temp table does not block retrying the additive 0004 migration."""
+    settings = load_settings(config_path=app_config_path)
+    ini_path = Path(__file__).resolve().parents[1] / "alembic.ini"
+    config = build_alembic_config(ini_path=ini_path, database_url=settings.database.url)
+    command.upgrade(config, "0003_reliability_hardening")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("CREATE TABLE _alembic_tmp_audio_segments AS SELECT * FROM audio_segments")
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT COUNT(*) FROM sqlite_master "
+                        "WHERE type = 'table' AND name = '_alembic_tmp_audio_segments'"
+                    )
+                ).scalar_one()
+                == 0
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.connect() as connection:
+            temporary_table_count = connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type = 'table' AND name = '_alembic_tmp_task_steps'"
+                )
+            ).scalar_one()
+            assert temporary_table_count == 0
+            assert connection.execute(text("SELECT COUNT(*) FROM task_steps")).scalar_one() == 0
     finally:
         engine.dispose()

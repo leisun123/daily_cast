@@ -488,11 +488,14 @@ class AudioSegmentRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def get_by_cache_key(self, cache_key: str, provider_config_hash: str) -> AudioSegment | None:
+    def get_by_cache_key(
+        self, cache_key: str, provider_config_hash: str, tts_preprocess_hash: str
+    ) -> AudioSegment | None:
         """Return a reusable succeeded segment only for the complete cache identity."""
         statement = select(AudioSegment).where(
             AudioSegment.cache_key == cache_key,
             AudioSegment.provider_config_hash == provider_config_hash,
+            AudioSegment.tts_preprocess_hash == tts_preprocess_hash,
             AudioSegment.status == AudioSegmentStatus.SUCCEEDED,
         )
         return self._session.scalar(statement)

@@ -86,7 +86,9 @@ def test_script_request_exposes_exact_reference_allowlists_for_json_only_provide
     constraints = payload["output_constraints"]
 
     assert GENERATE_SCRIPT_V3.version == "generate_script_v3"
-    assert "大家好，欢迎收听DailyCast" in messages[0].content
+    assert "DailyCast" in messages[0].content
+    assert "varies wording from episode to episode" in messages[0].content
+    assert "大家好，欢迎收听DailyCast。" not in messages[0].content
     assert "为什么值得关注" in messages[0].content
     assert constraints["required_section_ids"] == [
         section.section_id for section in outline.sections

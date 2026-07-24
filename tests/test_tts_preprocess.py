@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from dailycast.tts.preprocess import PronunciationDictionary, TTSPreprocessor, ssml_to_edge_text
+import pytest
+
+from dailycast.tts import preprocess
+from dailycast.tts.preprocess import PronunciationDictionary, TTSPreprocessor
 
 
-def test_preprocessor_normalizes_spoken_numbers_and_configured_terms() -> None:
-    """Large Chinese quantities and common AI abbreviations become natural speech input."""
+def test_preprocessor_normalizes_financial_numbers_without_damaging_technical_identifiers() -> None:
+    """TTS only rewrites bounded financial readings, never model or product identifiers."""
     dictionary = PronunciationDictionary.from_mapping(
         {
             "GPT": {"replacement": "GPT 五"},
@@ -14,34 +17,54 @@ def test_preprocessor_normalizes_spoken_numbers_and_configured_terms() -> None:
             "LLM": {"replacement": "大语言模型"},
         }
     )
-    original = "GPT-5 支持 5G，规模达到1.65万亿；AI 和 LLM 都受影响。"
+    original = (
+        "GPT-5 支持 5G，iPhone16 搭配 RTX4090，Python 3.12 可用；"
+        "规模达到1.65万亿；AI 和 LLM 都受影响。"
+    )
 
     prepared = TTSPreprocessor(dictionary=dictionary, text_mode="plain").prepare(
         original, section_role="body"
     )
 
-    assert original == "GPT-5 支持 5G，规模达到1.65万亿；AI 和 LLM 都受影响。"
     assert (
-        prepared.text
-        == "GPT 五 支持 五G，规模达到一万六千五百亿；人工智能 和 大语言模型 都受影响。"
+        original == "GPT-5 支持 5G，iPhone16 搭配 RTX4090，Python 3.12 可用；"
+        "规模达到1.65万亿；AI 和 LLM 都受影响。"
+    )
+    assert (
+        prepared.text == "GPT-5 支持 5G，iPhone16 搭配 RTX4090，Python 3.12 可用；"
+        "规模达到一万六千五百亿；人工智能 和 大语言模型 都受影响。"
     )
     assert prepared.text_mode == "plain"
 
 
-def test_ssml_preparation_uses_escaped_paragraph_pauses_without_modifying_script() -> None:
-    """SSML is generated only for the provider input and adds pauses at natural boundaries."""
+def test_financial_number_normalizer_converts_only_supported_money_and_percent_forms() -> None:
+    """Financial quantities receive a natural spoken form without globally rewriting digits."""
+    normalizer = preprocess.FinancialNumberNormalizer()
+
+    assert (
+        normalizer.normalize(
+            "OpenAI发布GPT-5，融资1.65万亿美元，成本下降30%，另获5亿美元和2万人民币。"
+        )
+        == "OpenAI发布GPT-5，融资一万六千五百亿美元，成本下降百分之三十，另获五亿美元和二万人民币。"
+    )
+
+
+def test_enhanced_text_preparation_adds_plain_pause_boundaries_without_modifying_script() -> None:
+    """The public Edge SDK receives enhanced plain text, never misleading custom SSML."""
     original = "大家好，欢迎收听DailyCast。\n\n今天有三个重要消息。"
 
-    prepared = TTSPreprocessor(text_mode="ssml").prepare(original, section_role="opening")
+    prepared = TTSPreprocessor(text_mode="enhanced_text").prepare(original, section_role="opening")
 
     assert original == "大家好，欢迎收听DailyCast。\n\n今天有三个重要消息。"
-    assert prepared.text_mode == "ssml"
-    assert prepared.text.startswith('<speak version="1.0" xml:lang="zh-CN">')
-    assert '<break time="500ms"/>' in prepared.text
-    assert (
-        ssml_to_edge_text(prepared.text)
-        == "大家好，欢迎收听DailyCast。\n\n今天有三个重要消息。\n\n"
-    )
+    assert prepared.text_mode == "enhanced_text"
+    assert prepared.text == "大家好，欢迎收听DailyCast。\n\n今天有三个重要消息。\n\n"
+    assert "<speak" not in prepared.text
+
+
+def test_preprocessor_rejects_misleading_ssml_text_mode() -> None:
+    """A mode name must not promise native SSML when the chosen SDK cannot accept it."""
+    with pytest.raises(ValueError, match="enhanced_text"):
+        TTSPreprocessor(text_mode="ssml")  # type: ignore[arg-type]
 
 
 def test_pronunciation_dictionary_identity_changes_when_replacements_change() -> None:

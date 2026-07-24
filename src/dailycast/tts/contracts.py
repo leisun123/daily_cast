@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-TextMode = Literal["plain", "ssml"]
+TextMode = Literal["plain", "enhanced_text"]
 
 
 @dataclass(frozen=True, slots=True)

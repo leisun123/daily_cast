@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import html
 import json
 import re
-import xml.etree.ElementTree as element_tree
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -16,16 +14,15 @@ import yaml
 
 from dailycast.core.hashes import sha256_text
 
-TextMode = Literal["plain", "ssml"]
+TextMode = Literal["plain", "enhanced_text"]
 SectionRole = Literal["opening", "body", "closing"]
 
 _HAN_DIGITS = "零一二三四五六七八九"
 _HAN_NUMBERS = set(_HAN_DIGITS[1:])
-_COMPOUND_WANYI = re.compile(r"(?<![A-Za-z0-9])(?P<number>\d+(?:\.\d+)?)万亿(?![A-Za-z0-9])")
+_FINANCIAL_QUANTITY = re.compile(
+    r"(?<![A-Za-z0-9])(?P<number>\d+(?:\.\d+)?)(?P<unit>万亿|亿|万)(?P<currency>美元|人民币)?(?![A-Za-z0-9])"
+)
 _PERCENT = re.compile(r"(?<![A-Za-z0-9])(?P<number>\d+(?:\.\d+)?)%(?![A-Za-z0-9])")
-_G_NETWORK = re.compile(r"(?<![A-Za-z0-9])(?P<number>\d+)G(?![A-Za-z0-9])")
-_GPT_VERSION = re.compile(r"(?<![A-Za-z0-9])GPT-(?P<number>\d+)(?![A-Za-z0-9])")
-_NUMBER = re.compile(r"(?<![A-Za-z0-9])(?P<number>\d+(?:\.\d+)?)(?![A-Za-z0-9])")
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n+")
 
 
@@ -84,14 +81,25 @@ class PreparedSpeech:
     spoken_character_count: int
 
 
+class FinancialNumberNormalizer:
+    """Render only bounded money and percentage expressions for spoken Chinese delivery."""
+
+    def normalize(self, text: str) -> str:
+        """Leave technical identifiers untouched: global bare-number replacement is forbidden."""
+        normalized = _FINANCIAL_QUANTITY.sub(_replace_financial_quantity, text)
+        return _PERCENT.sub(
+            lambda match: f"百分之{_spoken_decimal(match.group('number'))}", normalized
+        )
+
+
 class TTSPreprocessor:
-    """Normalize a bounded spoken form and optionally add conservative SSML pause markers."""
+    """Normalize a bounded spoken form and optionally add conservative plain-text pauses."""
 
     def __init__(
         self, *, dictionary: PronunciationDictionary | None = None, text_mode: TextMode = "plain"
     ) -> None:
-        if text_mode not in {"plain", "ssml"}:
-            raise ValueError("text_mode must be plain or ssml")
+        if text_mode not in {"plain", "enhanced_text"}:
+            raise ValueError("text_mode must be plain or enhanced_text")
         self._dictionary = dictionary or PronunciationDictionary.from_mapping({})
         self._text_mode = text_mode
 
@@ -102,7 +110,7 @@ class TTSPreprocessor:
             json.dumps(
                 {
                     "dictionary": self._dictionary.semantic_hash,
-                    "implementation": "tts-preprocess-v1",
+                    "implementation": "tts-preprocess-v2-financial-enhanced-text",
                     "text_mode": self._text_mode,
                 },
                 separators=(",", ":"),
@@ -118,11 +126,13 @@ class TTSPreprocessor:
         pronunciation_hints: Sequence[tuple[str, str]] = (),
     ) -> PreparedSpeech:
         """Return provider input while preserving the persisted Episode script text verbatim."""
-        spoken = _normalize_spoken_text(text)
+        spoken = FinancialNumberNormalizer().normalize(text.strip())
         spoken = _apply_replacements(spoken, pronunciation_hints)
         spoken = _apply_replacements(spoken, self._dictionary.entries)
         provider_text = (
-            _to_ssml(spoken, section_role=section_role) if self._text_mode == "ssml" else spoken
+            _to_enhanced_text(spoken, section_role=section_role)
+            if self._text_mode == "enhanced_text"
+            else spoken
         )
         return PreparedSpeech(
             text=provider_text,
@@ -132,107 +142,33 @@ class TTSPreprocessor:
         )
 
 
-def ssml_to_edge_text(text: str) -> str:
-    """Lower DailyCast's small SSML subset before the public edge-tts SDK escapes raw text."""
-    try:
-        root = element_tree.fromstring(text)
-    except element_tree.ParseError as error:
-        raise ValueError("invalid TTS SSML") from error
-    if _local_tag(root.tag) != "speak":
-        raise ValueError("TTS SSML must use a speak root")
-    parts: list[str] = []
-    _append_node_text(root, parts)
-    return "".join(parts).lstrip()
-
-
-def _append_node_text(node: element_tree.Element, parts: list[str]) -> None:
-    """Append permitted XML text recursively and turn explicit breaks into natural punctuation."""
-    if node.text:
-        parts.append(node.text)
-    for child in node:
-        tag = _local_tag(child.tag)
-        if tag == "break":
-            _append_pause(parts, _break_milliseconds(child.attrib.get("time")))
-        elif tag in {"p", "prosody", "s"}:
-            _append_node_text(child, parts)
-        else:
-            raise ValueError(f"unsupported TTS SSML tag: {tag}")
-        if child.tail:
-            parts.append(child.tail)
-
-
-def _append_pause(parts: list[str], milliseconds: int) -> None:
-    """Use punctuation/newlines because edge-tts.Communicate accepts text, not caller SSML."""
-    if milliseconds < 250:
-        parts.append("，")
-        return
-    current = "".join(parts).rstrip()
-    if current.endswith(("。", "！", "？", "!", "?")):
-        parts.append("\n\n")
-    else:
-        parts.append("。\n\n")
-
-
-def _break_milliseconds(value: str | None) -> int:
-    """Parse only fixed millisecond pauses emitted by this module."""
-    if value is None or not value.endswith("ms"):
-        raise ValueError("TTS SSML break time must use milliseconds")
-    try:
-        milliseconds = int(value[:-2])
-    except ValueError as error:
-        raise ValueError("TTS SSML break time is invalid") from error
-    if milliseconds < 0 or milliseconds > 2_000:
-        raise ValueError("TTS SSML break time is outside the allowed range")
-    return milliseconds
-
-
-def _local_tag(tag: str) -> str:
-    """Strip a parser namespace marker without accepting a different tag vocabulary."""
-    return tag.rsplit("}", 1)[-1]
-
-
-def _to_ssml(text: str, *, section_role: SectionRole) -> str:
-    """Add one pause per paragraph and section boundary without over-marking every sentence."""
+def _to_enhanced_text(text: str, *, section_role: SectionRole) -> str:
+    """Add one conservative paragraph pause without pretending the public SDK accepts SSML."""
     paragraphs = tuple(
         paragraph.strip() for paragraph in _PARAGRAPH_BREAK.split(text) if paragraph.strip()
     )
     pause_ms = 500 if section_role in {"opening", "closing"} else 350
-    fragments = ['<speak version="1.0" xml:lang="zh-CN">']
+    fragments: list[str] = []
     for index, paragraph in enumerate(paragraphs):
-        fragments.append("<p>")
-        fragments.append(html.escape(re.sub(r"\s*\n\s*", " ", paragraph)))
+        fragments.append(re.sub(r"\s*\n\s*", " ", paragraph))
         if index < len(paragraphs) - 1 or section_role != "closing":
-            fragments.append(f'<break time="{pause_ms}ms"/>')
-        fragments.append("</p>")
-    fragments.append("</speak>")
+            fragments.append("\n\n" if pause_ms >= 250 else "，")
     return "".join(fragments)
 
 
-def _normalize_spoken_text(text: str) -> str:
-    """Convert only bounded common numerical forms; source script storage is never changed."""
-    normalized = text.strip()
-    normalized = _COMPOUND_WANYI.sub(_replace_wanyi, normalized)
-    normalized = _PERCENT.sub(
-        lambda match: f"百分之{_spoken_decimal(match.group('number'))}", normalized
-    )
-    normalized = _GPT_VERSION.sub(
-        lambda match: f"GPT {_spoken_decimal(match.group('number'))}", normalized
-    )
-    normalized = _G_NETWORK.sub(
-        lambda match: f"{_spoken_decimal(match.group('number'))}G", normalized
-    )
-    return _NUMBER.sub(lambda match: _spoken_decimal(match.group("number")), normalized)
-
-
-def _replace_wanyi(match: re.Match[str]) -> str:
-    """Render 1.65万亿 as 一万六千五百亿 instead of making a model spell punctuation."""
+def _replace_financial_quantity(match: re.Match[str]) -> str:
+    """Render supported monetary units while preserving the explicit currency suffix."""
+    unit = match.group("unit")
+    currency = match.group("currency") or ""
+    if unit != "万亿":
+        return f"{_spoken_decimal(match.group('number'))}{unit}{currency}"
     try:
         scaled = Decimal(match.group("number")) * Decimal(10_000)
     except InvalidOperation:
         return match.group(0)
     if scaled != scaled.to_integral_value():
-        return f"{_spoken_decimal(match.group('number'))}万亿"
-    return f"{_spoken_integer(int(scaled))}亿"
+        return f"{_spoken_decimal(match.group('number'))}万亿{currency}"
+    return f"{_spoken_integer(int(scaled))}亿{currency}"
 
 
 def _spoken_decimal(value: str) -> str:
@@ -277,7 +213,7 @@ def _apply_replacements(text: str, replacements: Sequence[tuple[str, str]]) -> s
         if re.fullmatch(r"[A-Za-z0-9]+", term):
             suffix = r"(?![A-Za-z0-9])"
             if term == "GPT":
-                suffix = rf"(?![A-Za-z0-9]|\s*[{''.join(_HAN_NUMBERS)}])"
+                suffix = rf"(?![A-Za-z0-9]|-\d|\s*[{''.join(_HAN_NUMBERS)}])"
             rendered = re.sub(rf"(?<![A-Za-z0-9]){re.escape(term)}{suffix}", replacement, rendered)
         else:
             rendered = rendered.replace(term, replacement)

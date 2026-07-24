@@ -749,13 +749,20 @@ class AudioSegment(Base):
         CheckConstraint("segment_index >= 0", name="segment_index_nonnegative"),
         CheckConstraint("length(cache_key) = 64", name="cache_key_length"),
         CheckConstraint("length(provider_config_hash) = 64", name="provider_config_hash_length"),
+        CheckConstraint("length(tts_preprocess_hash) = 64", name="tts_preprocess_hash_length"),
         UniqueConstraint(
             "episode_id",
             "script_revision",
             "segment_index",
             name="uq_audio_segments_episode_revision_index",
         ),
-        Index("ix_audio_segments_cache", "cache_key", "provider_config_hash", "status"),
+        Index(
+            "ix_audio_segments_cache",
+            "cache_key",
+            "provider_config_hash",
+            "tts_preprocess_hash",
+            "status",
+        ),
         Index(
             "ix_audio_segments_episode_revision_status", "episode_id", "script_revision", "status"
         ),
@@ -783,6 +790,7 @@ class AudioSegment(Base):
         Text, nullable=False, default="mp3", server_default=sql_text("'mp3'")
     )
     provider_config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    tts_preprocess_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[AudioSegmentStatus] = mapped_column(
         enum_column(AudioSegmentStatus), nullable=False
     )

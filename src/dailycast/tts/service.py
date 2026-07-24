@@ -48,6 +48,7 @@ class TTSGenerationSettings:
     format: str = "mp3"
     text_mode: TextMode = "plain"
     opening_summary_speed: float = 0.94
+    closing_summary_speed: float = 0.94
     cache_enabled: bool = True
     segmenter_version: str = SECTION_SEGMENTER_VERSION
 
@@ -194,9 +195,8 @@ class AudioGenerationService:
             pronunciation_hints=pronunciation_hints,
         )
         speed = _segment_speed(self._settings, section_role)
-        provider_config_hash = _prepared_provider_config_hash(
-            self._provider.provider_config_hash(), prepared.semantic_hash
-        )
+        provider_config_hash = self._provider.provider_config_hash()
+        tts_preprocess_hash = prepared.semantic_hash
         cache_key = _audio_cache_key(
             provider=self._provider.provider_name,
             provider_config_hash=provider_config_hash,
@@ -205,6 +205,7 @@ class AudioGenerationService:
             speed=speed,
             format=self._settings.format,
             segmenter_version=self._settings.segmenter_version,
+            tts_preprocess_hash=tts_preprocess_hash,
             text=prepared.text,
         )
         current = self._prepare_current_segment(
@@ -213,6 +214,7 @@ class AudioGenerationService:
             prepared=prepared,
             speed=speed,
             provider_config_hash=provider_config_hash,
+            tts_preprocess_hash=tts_preprocess_hash,
             cache_key=cache_key,
         )
         if self._is_valid_succeeded_segment(current):
@@ -220,7 +222,9 @@ class AudioGenerationService:
                 segment=current, cache_hit=False, provider_call=False, tts_character_count=0
             )
         if self._settings.cache_enabled:
-            cached = self._lookup_valid_cache(cache_key, provider_config_hash, current.id)
+            cached = self._lookup_valid_cache(
+                cache_key, provider_config_hash, tts_preprocess_hash, current.id
+            )
             if cached is not None:
                 return _SegmentOutcome(
                     segment=cached, cache_hit=True, provider_call=False, tts_character_count=0
@@ -256,6 +260,7 @@ class AudioGenerationService:
         prepared: PreparedSpeech,
         speed: float,
         provider_config_hash: str,
+        tts_preprocess_hash: str,
         cache_key: str,
     ) -> AudioSegment:
         """Create/reset the durable row for a revision position before cache/provider work."""
@@ -270,6 +275,7 @@ class AudioGenerationService:
             "speed": speed,
             "format": self._settings.format,
             "provider_config_hash": provider_config_hash,
+            "tts_preprocess_hash": tts_preprocess_hash,
         }
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
@@ -305,13 +311,19 @@ class AudioGenerationService:
             )
 
     def _lookup_valid_cache(
-        self, cache_key: str, provider_config_hash: str, current_id: int
+        self,
+        cache_key: str,
+        provider_config_hash: str,
+        tts_preprocess_hash: str,
+        current_id: int,
     ) -> AudioSegment | None:
         """Promote a verified cache file into the current segment without another provider call."""
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             repository = AudioSegmentRepository(unit.session)
-            cached = repository.get_by_cache_key(cache_key, provider_config_hash)
+            cached = repository.get_by_cache_key(
+                cache_key, provider_config_hash, tts_preprocess_hash
+            )
             current = unit.session.get(AudioSegment, current_id)
             if cached is None or current is None or cached.id == current.id:
                 return None
@@ -510,6 +522,7 @@ def _audio_cache_key(
     speed: float,
     format: str,
     segmenter_version: str,
+    tts_preprocess_hash: str,
     text: str,
 ) -> str:
     """Hash semantic audio inputs; secrets, timeouts, and retry policy do not enter."""
@@ -522,6 +535,7 @@ def _audio_cache_key(
             "provider_config_hash": provider_config_hash,
             "segmenter_version": segmenter_version,
             "speed": f"{speed:.6f}",
+            "tts_preprocess_hash": tts_preprocess_hash,
             "voice": voice,
         },
         ensure_ascii=False,
@@ -536,17 +550,6 @@ def _normalized_text(text: str) -> str:
     return unicodedata.normalize("NFKC", text).strip()
 
 
-def _prepared_provider_config_hash(provider_hash: str, preprocess_hash: str) -> str:
-    """Bind the provider cache identity to the non-secret speech-preparation policy."""
-    return sha256_text(
-        json.dumps(
-            {"preprocess_hash": preprocess_hash, "provider_hash": provider_hash},
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    )
-
-
 def _section_role(index: int, total: int) -> SectionRole:
     """Use gentler delivery for the opening and summary without changing stored script text."""
     if index == 0:
@@ -558,8 +561,10 @@ def _section_role(index: int, total: int) -> SectionRole:
 
 def _segment_speed(settings: TTSGenerationSettings, section_role: SectionRole) -> float:
     """Keep news body cadence normal while slowing the opening and final summary slightly."""
-    if section_role in {"opening", "closing"}:
+    if section_role == "opening":
         return settings.opening_summary_speed
+    if section_role == "closing":
+        return settings.closing_summary_speed
     return settings.speed
 
 
