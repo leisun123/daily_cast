@@ -79,12 +79,16 @@ processing:
   similarity_threshold: 0.58
 
 # Edge TTS is the default draft-audio provider; its voice configuration is not
-# a credential. Timeouts and retries are deliberately operational settings.
+# a credential. TTS input is prepared after the reviewable script is stored,
+# so pauses and pronunciation changes never rewrite editorial text.
 tts:
   provider: edge_tts
   voice: zh-CN-XiaoxiaoNeural
   speed: 1.0
   format: mp3
+  text_mode: ssml
+  pronunciation_dictionary_path: config/pronunciation.yaml
+  opening_summary_speed: 0.94
   timeout_seconds: 30
   max_retries: 2
   cache_enabled: true

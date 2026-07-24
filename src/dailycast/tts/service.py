@@ -16,7 +16,9 @@ from dailycast.core.hashes import sha256_bytes, sha256_text
 from dailycast.db.models import AudioSegment, AudioSegmentStatus, Episode, EpisodeStatus
 from dailycast.db.repositories import AudioSegmentRepository, EpisodeRepository
 from dailycast.db.transactions import UnitOfWork
-from dailycast.tts.contracts import AudioMerger, AudioResult, TTSProvider
+from dailycast.llm.script_schemas import EpisodeScript
+from dailycast.tts.contracts import AudioMerger, AudioResult, TextMode, TTSProvider
+from dailycast.tts.preprocess import PreparedSpeech, SectionRole, TTSPreprocessor
 from dailycast.tts.segmenter import SECTION_SEGMENTER_VERSION, ScriptSegment, segment_episode_script
 
 
@@ -44,6 +46,8 @@ class TTSGenerationSettings:
     voice: str
     speed: float = 1.0
     format: str = "mp3"
+    text_mode: TextMode = "plain"
+    opening_summary_speed: float = 0.94
     cache_enabled: bool = True
     segmenter_version: str = SECTION_SEGMENTER_VERSION
 
@@ -69,6 +73,7 @@ class _SegmentOutcome:
     segment: AudioSegment
     cache_hit: bool
     provider_call: bool
+    tts_character_count: int
 
 
 class AudioGenerationService:
@@ -82,20 +87,29 @@ class AudioGenerationService:
         data_dir: Path,
         merger: AudioMerger,
         settings: TTSGenerationSettings,
+        preprocessor: TTSPreprocessor | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._provider = provider
         self._data_dir = data_dir.resolve()
         self._merger = merger
         self._settings = settings
+        self._preprocessor = preprocessor or TTSPreprocessor(text_mode=settings.text_mode)
 
     async def generate_episode_draft(self, episode_id: int) -> AudioGenerationResult:
         """Create/resume revision segments and atomically promote the merged public draft."""
-        episode, script_segments = self._load_episode_segments(episode_id)
+        episode, script_segments, pronunciation_hints = self._load_episode_segments(episode_id)
         self._invalidate_approval_for_audio_change(episode_id)
         outcomes: list[_SegmentOutcome] = []
-        for script_segment in script_segments:
-            outcomes.append(await self._ensure_segment(episode_id, script_segment))
+        for index, script_segment in enumerate(script_segments):
+            outcomes.append(
+                await self._ensure_segment(
+                    episode_id,
+                    script_segment,
+                    section_role=_section_role(index, len(script_segments)),
+                    pronunciation_hints=pronunciation_hints,
+                )
+            )
 
         durable_segments = self._load_ready_segments(episode_id, episode.script_revision)
         if len(durable_segments) != len(script_segments) or any(
@@ -109,11 +123,13 @@ class AudioGenerationService:
             cache_hits=sum(outcome.cache_hit for outcome in outcomes),
             provider_calls=sum(outcome.provider_call for outcome in outcomes),
             tts_character_count=sum(
-                len(outcome.segment.text) for outcome in outcomes if outcome.provider_call
+                outcome.tts_character_count for outcome in outcomes if outcome.provider_call
             ),
         )
 
-    def _load_episode_segments(self, episode_id: int) -> tuple[Episode, tuple[ScriptSegment, ...]]:
+    def _load_episode_segments(
+        self, episode_id: int
+    ) -> tuple[Episode, tuple[ScriptSegment, ...], tuple[tuple[str, str], ...]]:
         """Validate the persisted structured script before doing any provider I/O."""
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
@@ -133,6 +149,10 @@ class AudioGenerationService:
                 script_segments = segment_episode_script(
                     script, script_revision=episode.script_revision
                 )
+                hints = tuple(
+                    (hint.term, hint.pronunciation)
+                    for hint in EpisodeScript.model_validate(script).pronunciation_hints
+                )
             except (ValueError, TypeError, json.JSONDecodeError) as error:
                 raise AudioGenerationError(
                     "Episode script is not valid for TTS segmentation", retryable=False
@@ -141,7 +161,7 @@ class AudioGenerationService:
                 raise AudioGenerationError(
                     "Episode script contains no synthesizable sections", retryable=False
                 )
-            return episode, script_segments
+            return episode, script_segments, hints
 
     def _invalidate_approval_for_audio_change(self, episode_id: int) -> None:
         """Move an approved/reviewable draft to draft while audio validity is being rebuilt."""
@@ -160,39 +180,59 @@ class AudioGenerationService:
             unit.session.flush()
 
     async def _ensure_segment(
-        self, episode_id: int, script_segment: ScriptSegment
+        self,
+        episode_id: int,
+        script_segment: ScriptSegment,
+        *,
+        section_role: SectionRole,
+        pronunciation_hints: tuple[tuple[str, str], ...],
     ) -> _SegmentOutcome:
         """Reuse a validated cache file or durably synthesize exactly one needed segment."""
-        provider_config_hash = self._provider.provider_config_hash()
+        prepared = self._preprocessor.prepare(
+            script_segment.text,
+            section_role=section_role,
+            pronunciation_hints=pronunciation_hints,
+        )
+        speed = _segment_speed(self._settings, section_role)
+        provider_config_hash = _prepared_provider_config_hash(
+            self._provider.provider_config_hash(), prepared.semantic_hash
+        )
         cache_key = _audio_cache_key(
             provider=self._provider.provider_name,
             provider_config_hash=provider_config_hash,
             model=self._provider.model,
             voice=self._settings.voice,
-            speed=self._settings.speed,
+            speed=speed,
             format=self._settings.format,
             segmenter_version=self._settings.segmenter_version,
-            text=script_segment.text,
+            text=prepared.text,
         )
         current = self._prepare_current_segment(
             episode_id=episode_id,
             script_segment=script_segment,
+            prepared=prepared,
+            speed=speed,
             provider_config_hash=provider_config_hash,
             cache_key=cache_key,
         )
         if self._is_valid_succeeded_segment(current):
-            return _SegmentOutcome(segment=current, cache_hit=False, provider_call=False)
+            return _SegmentOutcome(
+                segment=current, cache_hit=False, provider_call=False, tts_character_count=0
+            )
         if self._settings.cache_enabled:
             cached = self._lookup_valid_cache(cache_key, provider_config_hash, current.id)
             if cached is not None:
-                return _SegmentOutcome(segment=cached, cache_hit=True, provider_call=False)
+                return _SegmentOutcome(
+                    segment=cached, cache_hit=True, provider_call=False, tts_character_count=0
+                )
         self._mark_synthesizing(current.id)
         try:
             result = await self._provider.synthesize(
-                script_segment.text,
+                prepared.text,
                 self._settings.voice,
-                self._settings.speed,
+                speed,
                 self._settings.format,
+                text_mode=prepared.text_mode,
             )
         except asyncio.CancelledError:
             raise
@@ -205,6 +245,7 @@ class AudioGenerationService:
             segment=self._persist_succeeded_result(current.id, result),
             cache_hit=False,
             provider_call=True,
+            tts_character_count=prepared.spoken_character_count,
         )
 
     def _prepare_current_segment(
@@ -212,19 +253,21 @@ class AudioGenerationService:
         *,
         episode_id: int,
         script_segment: ScriptSegment,
+        prepared: PreparedSpeech,
+        speed: float,
         provider_config_hash: str,
         cache_key: str,
     ) -> AudioSegment:
         """Create/reset the durable row for a revision position before cache/provider work."""
         values = {
             "segmenter_version": self._settings.segmenter_version,
-            "text": script_segment.text,
-            "text_hash": script_segment.text_hash,
+            "text": prepared.text,
+            "text_hash": sha256_text(prepared.text),
             "cache_key": cache_key,
             "provider": self._provider.provider_name,
             "model": self._provider.model,
             "voice": self._settings.voice,
-            "speed": self._settings.speed,
+            "speed": speed,
             "format": self._settings.format,
             "provider_config_hash": provider_config_hash,
         }
@@ -491,6 +534,33 @@ def _audio_cache_key(
 def _normalized_text(text: str) -> str:
     """Normalize Unicode representation and outer whitespace without changing spoken content."""
     return unicodedata.normalize("NFKC", text).strip()
+
+
+def _prepared_provider_config_hash(provider_hash: str, preprocess_hash: str) -> str:
+    """Bind the provider cache identity to the non-secret speech-preparation policy."""
+    return sha256_text(
+        json.dumps(
+            {"preprocess_hash": preprocess_hash, "provider_hash": provider_hash},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+
+def _section_role(index: int, total: int) -> SectionRole:
+    """Use gentler delivery for the opening and summary without changing stored script text."""
+    if index == 0:
+        return "opening"
+    if index == total - 1:
+        return "closing"
+    return "body"
+
+
+def _segment_speed(settings: TTSGenerationSettings, section_role: SectionRole) -> float:
+    """Keep news body cadence normal while slowing the opening and final summary slightly."""
+    if section_role in {"opening", "closing"}:
+        return settings.opening_summary_speed
+    return settings.speed
 
 
 def _fallback_duration_ms(text: str) -> int:

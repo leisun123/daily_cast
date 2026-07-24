@@ -85,6 +85,9 @@ DailyCast uses two configuration layers:
 
 - `.env` holds environment-specific values and secrets. Start with `.env.example`; its LLM API-key value is intentionally blank.
 - `config/app.example.yaml` contains non-secret application, database, processing, LLM, TTS, FFmpeg, scheduler, and RSS defaults.
+- `config/pronunciation.yaml` is a non-secret, versioned pronunciation dictionary used only
+  while preparing provider input. It supports natural number and abbreviation speech without
+  altering the reviewable stored script; changing it invalidates the affected audio cache.
 - `config/sources.example.yaml` declares first-run source seeds. At startup, DailyCast creates only missing source IDs and never overwrites existing SQLite source edits; do not store credentials in source configuration.
 
 Environment variables override YAML. `DATA_DIR` and `PUBLIC_DIR` select the runtime roots for local development; Compose also provides `DAILYCAST_DATA_DIR` and `DAILYCAST_PUBLIC_DIR` for the host-side volume paths.

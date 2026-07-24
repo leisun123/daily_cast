@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from dailycast.db.models import LLMOperation
 from dailycast.llm.budget import BudgetController
 from dailycast.llm.editorial_service import AIEditorialService
-from dailycast.llm.prompts.generate_script_v2 import GENERATE_SCRIPT_V2
+from dailycast.llm.prompts.generate_script_v3 import GENERATE_SCRIPT_V3
 from dailycast.llm.script_editorial import _script_messages
 
 
@@ -81,11 +81,13 @@ def test_script_request_exposes_exact_reference_allowlists_for_json_only_provide
     outline = build_outline(fixture.event_id)
     dossiers = build_dossiers(migrated_session_factory, fixture)
 
-    messages = _script_messages(outline, dossiers, GENERATE_SCRIPT_V2)
+    messages = _script_messages(outline, dossiers, GENERATE_SCRIPT_V3)
     payload = json.loads(messages[1].content)
     constraints = payload["output_constraints"]
 
-    assert GENERATE_SCRIPT_V2.version == "generate_script_v2"
+    assert GENERATE_SCRIPT_V3.version == "generate_script_v3"
+    assert "大家好，欢迎收听DailyCast" in messages[0].content
+    assert "为什么值得关注" in messages[0].content
     assert constraints["required_section_ids"] == [
         section.section_id for section in outline.sections
     ]

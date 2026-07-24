@@ -39,6 +39,7 @@ from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import ArticleService, SourceCollectionService
 from dailycast.tts.merge import FFmpegMerger
+from dailycast.tts.preprocess import PronunciationDictionary, TTSPreprocessor
 from dailycast.tts.providers.edge import EdgeTTSProvider
 from dailycast.tts.service import AudioGenerationService, TTSGenerationSettings
 
@@ -151,7 +152,15 @@ def build_lifespan(
                     voice=settings.tts.voice,
                     speed=settings.tts.speed,
                     format=settings.tts.format,
+                    text_mode=settings.tts.text_mode,
+                    opening_summary_speed=settings.tts.opening_summary_speed,
                     cache_enabled=settings.tts.cache_enabled,
+                ),
+                preprocessor=TTSPreprocessor(
+                    dictionary=PronunciationDictionary.from_yaml(
+                        settings.resolve_path(settings.tts.pronunciation_dictionary_path)
+                    ),
+                    text_mode=settings.tts.text_mode,
                 ),
             )
             publication_service = PublicationService(

@@ -8,7 +8,7 @@ import json
 from collections.abc import Collection
 
 from dailycast.core.hashes import sha256_text
-from dailycast.tts.contracts import AudioResult
+from dailycast.tts.contracts import AudioResult, TextMode
 
 # Generated with FFmpeg's anullsrc and validated through the same FFmpeg merger used in production.
 _SILENT_MP3 = base64.b64decode(
@@ -25,6 +25,7 @@ class FakeTTSProvider:
     def __init__(self, *, fail_on_calls: Collection[int] = ()) -> None:
         self._fail_on_calls = frozenset(fail_on_calls)
         self.calls = 0
+        self.requests: list[tuple[str, str, float, str, TextMode]] = []
 
     def provider_config_hash(self) -> str:
         """Describe the fixed fake implementation without a credential or retry policy."""
@@ -36,11 +37,19 @@ class FakeTTSProvider:
             )
         )
 
-    async def synthesize(self, text: str, voice: str, speed: float, format: str) -> AudioResult:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str,
+        speed: float,
+        format: str,
+        *,
+        text_mode: TextMode = "plain",
+    ) -> AudioResult:
         """Produce deterministic silent MP3 bytes while exposing controlled test failures."""
-        del text, voice, speed
         if format != "mp3":
             raise ValueError("FakeTTSProvider supports only mp3")
+        self.requests.append((text, voice, speed, format, text_mode))
         self.calls += 1
         await asyncio.sleep(0)
         if self.calls in self._fail_on_calls:

@@ -1,0 +1,9 @@
+# Provider-only pronunciations. These values never alter the stored Episode script.
+GPT:
+  replacement: GPT 五
+OpenAI:
+  replacement: OpenAI
+AI:
+  replacement: 人工智能
+LLM:
+  replacement: 大语言模型

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
+
+TextMode = Literal["plain", "ssml"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +40,15 @@ class TTSProvider(Protocol):
     def provider_config_hash(self) -> str:
         """Return the non-secret semantic identity used with the complete cache key."""
 
-    async def synthesize(self, text: str, voice: str, speed: float, format: str) -> AudioResult:
+    async def synthesize(
+        self,
+        text: str,
+        voice: str,
+        speed: float,
+        format: str,
+        *,
+        text_mode: TextMode = "plain",
+    ) -> AudioResult:
         """Return synthesized audio bytes without writing a cache or changing database state."""
 
 
