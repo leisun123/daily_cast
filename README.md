@@ -103,6 +103,25 @@ key, so repeated ticks and restarts do not create a duplicate daily TaskRun or E
 
 For a non-loopback public Feed, configure an explicit HTTPS `DAILYCAST_PUBLISHING__PUBLIC_BASE_URL` and expose only the intended Feed/media paths through your reverse proxy or static hosting setup.
 
+### Zeabur
+
+`zeabur.yaml` is a one-service deployment resource whose source is the public GitHub repository's
+`main` branch. It does not upload local source code. The resource mounts `/app/data` and
+`/app/public` as persistent volumes, enables the Asia/Shanghai 06:00 daily schedule, runs
+Alembic before Uvicorn, and binds a Zeabur HTTPS domain to the RSS service.
+
+During deployment, supply the public domain and LLM provider settings. The API key is a Zeabur
+password variable and must never be committed. The template enables `app.public_only`, so the
+public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
+`/media/episodes/...` assets. Management pages and `POST /generate` return `404`; production
+generation is driven by the durable scheduler.
+
+Deploy into a selected Zeabur project with:
+
+```bash
+npx --yes zeabur@latest template deploy -f zeabur.yaml
+```
+
 ## Development
 
 Requirements: Python 3.12 and Poetry.

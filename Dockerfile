@@ -27,4 +27,4 @@ RUN chmod +x /app/docker-entrypoint.sh \
     && mkdir -p /app/data /app/public
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn dailycast.main:app --host 0.0.0.0 --port 8000 --workers 1"]
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn dailycast.main:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1"]

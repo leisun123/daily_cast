@@ -1,0 +1,106 @@
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: DailyCast
+spec:
+  description: Daily AI news podcast with immutable RSS publication.
+  variables:
+    - key: PUBLIC_DOMAIN
+      type: DOMAIN
+      name: Public podcast domain
+      description: Public HTTPS domain used by the RSS Feed and immutable MP3 URLs.
+    - key: LLM_PROVIDER
+      type: STRING
+      name: LLM provider
+      description: DailyCast provider name, such as openai_responses or openai_compatible.
+    - key: LLM_BASE_URL
+      type: STRING
+      name: LLM base URL
+      description: OpenAI-compatible API endpoint without embedded credentials.
+    - key: LLM_MODEL
+      type: STRING
+      name: LLM model
+      description: Model identifier supported by the configured endpoint.
+    - key: LLM_API_KEY
+      type: PASSWORD
+      name: LLM API key
+      description: Secret API key stored only in Zeabur environment configuration.
+  tags:
+    - AI
+    - Tool
+  readme: |-
+    # DailyCast
+
+    The service builds the `main` branch directly from the connected GitHub repository.
+    SQLite, task artifacts, generated audio, and published RSS media are stored in persistent
+    Zeabur volumes. The public domain exposes diagnostics, `feed.xml`, and immutable MP3 files;
+    unauthenticated management and generation routes remain hidden.
+  services:
+    - name: DailyCast
+      template: GIT
+      domainKey: PUBLIC_DOMAIN
+      spec:
+        source:
+          source: GITHUB
+          repo: 1309505877
+          branch: main
+        ports:
+          - id: web
+            port: 8000
+            type: HTTP
+        volumes:
+          - id: data
+            dir: /app/data
+          - id: public
+            dir: /app/public
+        healthCheck:
+          type: HTTP
+          port: web
+          http:
+            path: /healthz
+        env:
+          DAILYCAST_CONFIG_PATH:
+            default: /app/config/app.example.yaml
+          DAILYCAST_APP__ENVIRONMENT:
+            default: production
+          DAILYCAST_APP__PUBLIC_ONLY:
+            default: "true"
+          DAILYCAST_APP__SERVER__HOST:
+            default: 0.0.0.0
+          DAILYCAST_APP__SERVER__PORT:
+            default: "8000"
+          DAILYCAST_DATABASE__URL:
+            default: sqlite:////app/data/dailycast.db
+          DATA_DIR:
+            default: /app/data
+          PUBLIC_DIR:
+            default: /app/public
+          DAILYCAST_SCHEDULER__ENABLED:
+            default: "true"
+          DAILYCAST_SCHEDULER__CRON_EXPRESSION:
+            default: 0 6 * * *
+          DAILYCAST_EDITORIAL__ENFORCE_QUALITY_GATE:
+            default: "false"
+          DAILYCAST_LLM__PROVIDER:
+            default: ${LLM_PROVIDER}
+          DAILYCAST_LLM__BASE_URL:
+            default: ${LLM_BASE_URL}
+          DAILYCAST_LLM__MODEL:
+            default: ${LLM_MODEL}
+          DAILYCAST_LLM__API_KEY:
+            default: ${LLM_API_KEY}
+          DAILYCAST_TTS__PROVIDER:
+            default: edge_tts
+          DAILYCAST_PUBLISHING__AUTO_PUBLISH:
+            default: "true"
+          DAILYCAST_PUBLISHING__PUBLIC_BASE_URL:
+            default: https://${PUBLIC_DOMAIN}
+          DAILYCAST_UID:
+            default: "1000"
+          DAILYCAST_GID:
+            default: "1000"
+        instructions:
+          - title: RSS Feed
+            content: https://${PUBLIC_DOMAIN}/feed.xml
+          - title: Readiness
+            content: https://${PUBLIC_DOMAIN}/readyz

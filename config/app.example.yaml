@@ -4,6 +4,7 @@ app:
   name: DailyCast
   environment: development
   timezone: Asia/Shanghai
+  public_only: false
   server:
     host: 127.0.0.1
     port: 8000

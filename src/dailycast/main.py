@@ -70,7 +70,16 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         request_id = requested_id if requested_id else str(UUIDGenerator().new())
         token = set_request_id(request_id)
         try:
-            response = await call_next(request)
+            runtime = getattr(request.app.state, "runtime", None)
+            response: Response
+            if (
+                isinstance(runtime, AppRuntime)
+                and runtime.settings.app.public_only
+                and not _is_public_deployment_path(request.url.path)
+            ):
+                response = JSONResponse(status_code=404, content={"detail": "Not Found"})
+            else:
+                response = await call_next(request)
         finally:
             reset_request_id(token)
         response.headers["X-Request-ID"] = request_id
@@ -250,6 +259,11 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
 
 
 app = create_app()
+
+
+def _is_public_deployment_path(path: str) -> bool:
+    """Allow only diagnostics and immutable podcast resources on an unauthenticated domain."""
+    return path in {"/healthz", "/readyz", "/feed.xml"} or path.startswith("/media/episodes/")
 
 
 def _require_ready(runtime: AppRuntime) -> None:

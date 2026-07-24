@@ -35,6 +35,7 @@ class AppSettings(BaseModel):
     name: str = "DailyCast"
     environment: str = "development"
     timezone: str = "Asia/Shanghai"
+    public_only: bool = False
     server: ServerSettings = Field(default_factory=ServerSettings)
 
     @field_validator("timezone")
