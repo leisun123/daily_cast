@@ -12,7 +12,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.core.errors import DailyCastError
+from dailycast.core.errors import DailyCastError, LLMStructuredOutputUnsupportedError
 from dailycast.core.hashes import sha256_text
 from dailycast.db.models import LLMArtifact, LLMOperation
 from dailycast.db.repositories import LLMArtifactRepository
@@ -102,6 +102,29 @@ def _schema_repair_messages(messages: Sequence[LLMMessage]) -> tuple[LLMMessage,
     )
 
 
+def _json_object_fallback_messages(
+    messages: Sequence[LLMMessage], response_schema: type[BaseModel]
+) -> tuple[LLMMessage, ...]:
+    """Mirror the Responses JSON-object contract so fallback budget reservation is conservative."""
+    schema_json = _canonical_json(response_schema.model_json_schema())
+    contract = (
+        "Structured output contract: return exactly one JSON object that conforms to this JSON "
+        "Schema. Do not use Markdown, explanations, or additional top-level keys. JSON Schema: "
+        f"{schema_json}"
+    )
+    enriched: list[LLMMessage] = []
+    attached = False
+    for message in messages:
+        if message.role == "system" and not attached:
+            enriched.append(LLMMessage(role="system", content=f"{message.content}\n\n{contract}"))
+            attached = True
+        else:
+            enriched.append(message)
+    if not attached:
+        enriched.insert(0, LLMMessage(role="system", content=contract))
+    return tuple(enriched)
+
+
 def _is_repairable_schema_error(error: ValidationError) -> bool:
     """Allow one retry only for JSON-shape errors, never for local semantic safeguards."""
     semantic_error_types = {"assertion_error", "value_error"}
@@ -167,9 +190,12 @@ class LLMArtifactService:
                 cached, response_schema, validation_context=validation_context
             )
 
-        self._reserve_for_call(messages, model_options)
-        generated = await self._provider.generate_structured(
-            operation, messages, response_schema, model_options
+        effective_options = dict(model_options)
+        generated, usage, provider_call_count = await self._generate_with_fallback(
+            operation=operation,
+            messages=messages,
+            response_schema=response_schema,
+            model_options=effective_options,
         )
         try:
             content = _validated_content(
@@ -179,10 +205,14 @@ class LLMArtifactService:
             if not error.repairable:
                 raise
             repair_messages = _schema_repair_messages(messages)
-            self._reserve_for_call(repair_messages, model_options)
-            generated = await self._provider.generate_structured(
-                operation, repair_messages, response_schema, model_options
+            generated, repair_usage, repair_calls = await self._generate_with_fallback(
+                operation=operation,
+                messages=repair_messages,
+                response_schema=response_schema,
+                model_options=effective_options,
             )
+            usage = _add_usage(usage, repair_usage)
+            provider_call_count += repair_calls
             content = _validated_content(
                 response_schema, generated.content, validation_context=validation_context
             )
@@ -191,7 +221,7 @@ class LLMArtifactService:
             identity=identity,
             output_json=output_json,
             output_hash=sha256_text(output_json),
-            usage=generated.usage,
+            usage=usage,
             provider_request_id=generated.request_id,
             created_by_task_run_id=created_by_task_run_id,
             created_by_task_step_id=created_by_task_step_id,
@@ -199,11 +229,42 @@ class LLMArtifactService:
         return StructuredResult(
             content=content,
             model=artifact.model,
-            usage=generated.usage,
+            usage=usage,
             request_id=generated.request_id,
             cache_hit=concurrent_cache_hit,
             artifact_id=artifact.id,
+            provider_call_count=provider_call_count if not concurrent_cache_hit else 0,
         )
+
+    async def _generate_with_fallback(
+        self,
+        *,
+        operation: LLMOperation,
+        messages: Sequence[LLMMessage],
+        response_schema: type[BaseModel],
+        model_options: Mapping[str, JSONValue],
+    ) -> tuple[StructuredResult, LLMUsage, int]:
+        """Make every provider invocation visible to the budget before a Responses fallback."""
+        self._reserve_for_call(messages, model_options)
+        try:
+            generated = await self._provider.generate_structured(
+                operation, messages, response_schema, model_options
+            )
+            return generated, generated.usage, generated.provider_call_count
+        except LLMStructuredOutputUnsupportedError:
+            requested_format = model_options.get("response_format", "json_schema")
+            if requested_format != "json_schema" or not getattr(
+                self._provider, "supports_json_object_fallback", False
+            ):
+                raise
+            fallback_options = {**model_options, "response_format": "json_object"}
+            self._reserve_for_call(
+                _json_object_fallback_messages(messages, response_schema), fallback_options
+            )
+            generated = await self._provider.generate_structured(
+                operation, messages, response_schema, fallback_options
+            )
+            return generated, generated.usage, generated.provider_call_count + 1
 
     def _reserve_for_call(
         self,
@@ -260,6 +321,7 @@ class LLMArtifactService:
             request_id=artifact.provider_request_id,
             cache_hit=True,
             artifact_id=artifact.id,
+            provider_call_count=0,
         )
 
     def _insert_or_reuse(
@@ -310,3 +372,11 @@ def _requested_output_tokens(provider: LLMProvider, model_options: Mapping[str, 
         msg = "max_output_tokens must be a non-negative integer"
         raise ValueError(msg)
     return configured
+
+
+def _add_usage(first: LLMUsage, second: LLMUsage) -> LLMUsage:
+    """Aggregate actual provider-reported usage from bounded repair/fallback calls."""
+    return LLMUsage(
+        input_tokens=first.input_tokens + second.input_tokens,
+        output_tokens=first.output_tokens + second.output_tokens,
+    )

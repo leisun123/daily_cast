@@ -20,6 +20,7 @@ from dailycast.core.errors import (
     AIBudgetExceededError,
     LLMProviderAuthenticationError,
     LLMProviderResponseError,
+    LLMStructuredOutputUnsupportedError,
 )
 from dailycast.core.hashes import sha256_text
 from dailycast.core.lifespan import build_llm_provider
@@ -562,8 +563,8 @@ def test_openai_responses_json_object_embeds_schema_contract_and_changes_cache_i
     assert result.content == {"score": 7}
 
 
-def test_openai_responses_falls_back_to_json_object_when_native_schema_fails() -> None:
-    """A flaky gateway cannot prevent a compatible JSON-object request from completing."""
+def test_openai_responses_reports_native_schema_rejection_without_hidden_fallback() -> None:
+    """Provider adapters make one request; the artifact layer owns budgeted fallback policy."""
     formats: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -571,7 +572,7 @@ def test_openai_responses_falls_back_to_json_object_when_native_schema_fails() -
         response_format = payload["text"]["format"]["type"]
         formats.append(response_format)
         if response_format == "json_schema":
-            return httpx.Response(502)
+            return httpx.Response(400)
         contract = payload["input"][0]["content"][0]["text"]
         assert "Structured output contract" in contract
         return httpx.Response(
@@ -586,7 +587,7 @@ def test_openai_responses_falls_back_to_json_object_when_native_schema_fails() -
             },
         )
 
-    async def scenario() -> StructuredResult:
+    async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             provider = OpenAIResponsesLLMProvider(
                 base_url="https://models.example",
@@ -598,17 +599,109 @@ def test_openai_responses_falls_back_to_json_object_when_native_schema_fails() -
                 max_retries=0,
                 http_client=client,
             )
-            return await provider.generate_structured(
-                LLMOperation.SCORE_EVENTS,
-                (LLMMessage(role="system", content="Return JSON."),),
-                ScoreOutput,
-                {},
+            with pytest.raises(LLMStructuredOutputUnsupportedError):
+                await provider.generate_structured(
+                    LLMOperation.SCORE_EVENTS,
+                    (LLMMessage(role="system", content="Return JSON."),),
+                    ScoreOutput,
+                    {},
+                )
+
+    asyncio.run(scenario())
+
+    assert formats == ["json_schema"]
+
+
+def test_responses_fallback_reserves_a_second_call_in_the_shared_budget(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """The JSON-object fallback is explicit and cannot bypass per-task max_calls."""
+    formats: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        response_format = payload["text"]["format"]["type"]
+        formats.append(response_format)
+        if response_format == "json_schema":
+            return httpx.Response(400)
+        return httpx.Response(
+            200,
+            json={
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"score":7}'}],
+                    }
+                ]
+            },
+        )
+
+    async def scenario(max_calls: int) -> StructuredResult:
+        task_run_id, task_step_id = create_task_provenance(migrated_session_factory)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAIResponsesLLMProvider(
+                base_url="https://models.example",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=30,
+                max_retries=0,
+                http_client=client,
             )
+            return await LLMArtifactService(
+                migrated_session_factory,
+                provider,
+                BudgetController(
+                    max_calls=max_calls, max_input_tokens=1_000, max_output_tokens=100
+                ),
+            ).generate_structured(**request_kwargs(task_run_id, task_step_id))
 
-    result = asyncio.run(scenario())
-
+    with pytest.raises(AIBudgetExceededError):
+        asyncio.run(scenario(1))
+    assert formats == ["json_schema"]
+    formats.clear()
+    result = asyncio.run(scenario(2))
     assert formats == ["json_schema", "json_object"]
     assert result.content == {"score": 7}
+    assert result.provider_call_count == 2
+
+
+def test_responses_fallback_reserves_its_json_object_schema_contract_tokens(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """Fallback must reserve its larger prompt before sending a JSON-object request."""
+    formats: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        response_format = payload["text"]["format"]["type"]
+        formats.append(response_format)
+        return httpx.Response(400) if response_format == "json_schema" else httpx.Response(200)
+
+    async def scenario() -> None:
+        task_run_id, task_step_id = create_task_provenance(migrated_session_factory)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAIResponsesLLMProvider(
+                base_url="https://models.example",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=1,
+                max_retries=0,
+                http_client=client,
+            )
+            service = LLMArtifactService(
+                migrated_session_factory,
+                provider,
+                BudgetController(max_calls=2, max_input_tokens=50, max_output_tokens=10),
+            )
+            with pytest.raises(AIBudgetExceededError):
+                await service.generate_structured(**request_kwargs(task_run_id, task_step_id))
+
+    asyncio.run(scenario())
+    assert formats == ["json_schema"]
 
 
 def test_openai_provider_timeout_and_authentication_error_are_mapped() -> None:

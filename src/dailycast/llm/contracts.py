@@ -46,6 +46,7 @@ class StructuredResult:
     request_id: str | None
     cache_hit: bool = False
     artifact_id: int | None = None
+    provider_call_count: int = 1
 
 
 class LLMProvider(Protocol):

@@ -75,6 +75,7 @@ class EventRankingResult:
     artifact_id: int | None
     cache_hit: bool
     usage: LLMUsage
+    provider_call_count: int = 0
 
 
 class AIEditorialService:
@@ -177,6 +178,7 @@ class AIEditorialService:
             artifact_id=structured_result.artifact_id,
             cache_hit=structured_result.cache_hit,
             usage=structured_result.usage,
+            provider_call_count=structured_result.provider_call_count,
         )
 
     def build_evidence_dossiers(self, event_ids: Sequence[int]) -> EvidenceDossierBuildResult:

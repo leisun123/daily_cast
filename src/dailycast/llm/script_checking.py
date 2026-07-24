@@ -50,6 +50,7 @@ class ScriptCheckingResult:
     artifact_ids: tuple[int, ...]
     cache_hit_count: int
     usage: LLMUsage
+    provider_call_count: int
 
 
 class ScriptCheckingService:
@@ -162,9 +163,18 @@ class ScriptCheckingService:
             ),
             cache_hit_count=sum(bool(result.cache_hit) for result in operation_results),
             usage=LLMUsage(
-                input_tokens=sum(result.usage.input_tokens for result in operation_results),
-                output_tokens=sum(result.usage.output_tokens for result in operation_results),
+                input_tokens=sum(
+                    result.usage.input_tokens
+                    for result in operation_results
+                    if not result.cache_hit
+                ),
+                output_tokens=sum(
+                    result.usage.output_tokens
+                    for result in operation_results
+                    if not result.cache_hit
+                ),
             ),
+            provider_call_count=sum(result.provider_call_count for result in operation_results),
         )
 
     @staticmethod

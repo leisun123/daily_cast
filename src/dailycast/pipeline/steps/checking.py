@@ -34,10 +34,12 @@ class CheckingStep:
         store = EditorialArtifactStore(self.data_dir)
         event_ids = _event_ids(context.values.get("outlined_news_event_ids"))
         outline = EpisodeOutline.model_validate(
-            store.read_json(context.task_run_id, "outline.json")
+            store.read_json(context.artifact_run_id, "outline.json")
         )
         built = self.editorial_service.build_evidence_dossiers(event_ids)
-        script = EpisodeScript.model_validate(store.read_json(context.task_run_id, "script.json"))
+        script = EpisodeScript.model_validate(
+            store.read_json(context.artifact_run_id, "script.json")
+        )
         result = await ScriptCheckingService(
             self.editorial_service,
             max_automatic_script_revisions=self.max_automatic_script_revisions,
@@ -51,19 +53,21 @@ class CheckingStep:
             task_step_id=task_step_id,
             budget=_task_budget(context, self.budget_factory),
         )
-        store.write_json(context.task_run_id, "script.json", result.script.model_dump(mode="json"))
-        store.write_script_text(context.task_run_id, result.script)
         store.write_json(
-            context.task_run_id, "validation.json", result.validation.model_dump(mode="json")
+            context.artifact_run_id, "script.json", result.script.model_dump(mode="json")
+        )
+        store.write_script_text(context.artifact_run_id, result.script)
+        store.write_json(
+            context.artifact_run_id, "validation.json", result.validation.model_dump(mode="json")
         )
         review_path = store.write_json(
-            context.task_run_id,
+            context.artifact_run_id,
             "review.json",
             result.review.model_dump(mode="json"),
         )
         if result.metadata is not None:
             store.write_json(
-                context.task_run_id,
+                context.artifact_run_id,
                 "metadata.json",
                 result.metadata.model_dump(mode="json"),
             )
@@ -103,7 +107,48 @@ class CheckingStep:
                 "llm_output_tokens": result.usage.output_tokens,
             },
             artifact_path=review_path,
+            llm_call_count=result.provider_call_count,
+            llm_input_tokens=result.usage.input_tokens,
+            llm_output_tokens=result.usage.output_tokens,
         )
+
+    def restore_checkpoint(self, context: PipelineContext, checkpoint: dict[str, object]) -> None:
+        """Rehydrate the durable checked-artifact boundary for a recovery child."""
+        del checkpoint
+        store = EditorialArtifactStore(self.data_dir)
+        event_ids = _event_ids(context.values.get("outlined_news_event_ids"))
+        outline = EpisodeOutline.model_validate(
+            store.read_json(context.artifact_run_id, "outline.json")
+        )
+        script = EpisodeScript.model_validate(
+            store.read_json(context.artifact_run_id, "script.json")
+        )
+        validation = ScriptCheckingService._validated_script(
+            script,
+            outline,
+            self.editorial_service.build_evidence_dossiers(event_ids).dossiers,
+        )
+        # The helper above structurally validates the script; reports stay immutable artifacts.
+        from dailycast.llm.script_schemas import EpisodeMetadata, ScriptReview, ValidationReport
+
+        built = self.editorial_service.build_evidence_dossiers(event_ids)
+        context.values["episode_script"] = validation
+        context.values["script_validation"] = ValidationReport.model_validate(
+            store.read_json(context.artifact_run_id, "validation.json")
+        )
+        context.values["script_review"] = ScriptReview.model_validate(
+            store.read_json(context.artifact_run_id, "review.json"),
+            context={"script": validation, "evidence_dossiers": built.dossiers},
+        )
+        context.values["episode_metadata"] = EpisodeMetadata.model_validate(
+            store.read_json(context.artifact_run_id, "metadata.json"),
+            context={
+                "script": validation,
+                "selected_event_titles": tuple(d.title for d in built.dossiers),
+            },
+        )
+        context.values["episode_outline"] = outline
+        context.values["evidence_dossiers"] = built.dossiers
 
 
 def _active_task_step_id(context: PipelineContext) -> int:

@@ -15,6 +15,7 @@ from dailycast.core.errors import (
     LLMProviderError,
     LLMProviderResponseError,
     LLMProviderTimeoutError,
+    LLMStructuredOutputUnsupportedError,
 )
 from dailycast.core.hashes import sha256_text
 from dailycast.db.models import LLMOperation
@@ -44,6 +45,7 @@ class OpenAIResponsesLLMProvider:
     """Call an OpenAI Responses-compatible endpoint and extract one JSON object output."""
 
     provider_name = "openai_responses"
+    supports_json_object_fallback = True
 
     def __init__(
         self,
@@ -108,14 +110,7 @@ class OpenAIResponsesLLMProvider:
         options = self._semantic_options(model_options)
         response_mode = options.pop("response_format", self._response_format)
         payload = self._request_payload(messages, response_schema, options, response_mode)
-        try:
-            response = await self._post(payload)
-        except LLMProviderError:
-            if response_mode != "json_schema":
-                raise
-            response = await self._post(
-                self._request_payload(messages, response_schema, options, "json_object")
-            )
+        response = await self._post(payload, structured_output=response_mode == "json_schema")
         return self._parse_response(response)
 
     def _request_payload(
@@ -170,7 +165,9 @@ class OpenAIResponsesLLMProvider:
             "strict": True,
         }
 
-    async def _post(self, payload: Mapping[str, object]) -> httpx.Response:
+    async def _post(
+        self, payload: Mapping[str, object], *, structured_output: bool = False
+    ) -> httpx.Response:
         """Perform bounded retry for transient transport and server failures."""
         headers = {"Authorization": f"Bearer {self._api_key}"}
         for attempt in range(self._max_retries + 1):
@@ -196,6 +193,8 @@ class OpenAIResponsesLLMProvider:
                 continue
             if response.status_code in {401, 403}:
                 raise LLMProviderAuthenticationError()
+            if structured_output and response.status_code in {400, 422}:
+                raise LLMStructuredOutputUnsupportedError()
             if response.is_error:
                 raise LLMProviderError()
             return response

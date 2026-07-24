@@ -30,7 +30,7 @@ class ScriptingStep:
         event_ids = _event_ids(context.values.get("outlined_news_event_ids"))
         store = EditorialArtifactStore(self.data_dir)
         outline = EpisodeOutline.model_validate(
-            store.read_json(context.task_run_id, "outline.json")
+            store.read_json(context.artifact_run_id, "outline.json")
         )
         built = self.editorial_service.build_evidence_dossiers(event_ids)
         budget = _task_budget(context, self.budget_factory)
@@ -45,11 +45,11 @@ class ScriptingStep:
             generated.script, outline, built.dossiers
         )
         script_path = store.write_json(
-            context.task_run_id,
+            context.artifact_run_id,
             "script.json",
             generated.script.model_dump(mode="json"),
         )
-        store.write_script_text(context.task_run_id, generated.script)
+        store.write_script_text(context.artifact_run_id, generated.script)
         context.values["episode_outline"] = outline
         context.values["episode_script"] = generated.script
         context.values["outlined_news_event_ids"] = built.event_ids
@@ -73,6 +73,9 @@ class ScriptingStep:
                 "llm_output_tokens": generated.usage.output_tokens,
             },
             artifact_path=script_path,
+            llm_call_count=generated.provider_call_count,
+            llm_input_tokens=generated.usage.input_tokens if not generated.cache_hit else 0,
+            llm_output_tokens=generated.usage.output_tokens if not generated.cache_hit else 0,
         )
 
 
