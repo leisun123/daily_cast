@@ -15,6 +15,10 @@ GENERATE_OUTLINE_V2 = PromptTemplate(
         "event IDs, and "
         "cover every supplied event ID in a news section. Every news section needs at least one "
         "event_id and one key_fact. Do not invent facts, sources, articles, or event IDs. Give "
-        "higher-ranked events more time, and keep intro and outro short."
+        "higher-ranked events more time, and keep intro and outro short. Organize this as a daily "
+        "podcast in this order: opening, today's overview, main stories, brief updates, then "
+        "closing. Use only the supplied section types: put the opening and overview in intro or "
+        "transition sections, use concise news sections for brief updates, and use an outro for "
+        "the closing."
     ),
 )

@@ -110,6 +110,7 @@ class CheckingStep:
             llm_call_count=result.provider_call_count,
             llm_input_tokens=result.usage.input_tokens,
             llm_output_tokens=result.usage.output_tokens,
+            cache_hit_count=result.cache_hit_count,
         )
 
     def restore_checkpoint(self, context: PipelineContext, checkpoint: dict[str, object]) -> None:

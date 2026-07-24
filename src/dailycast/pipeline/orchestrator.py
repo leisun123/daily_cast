@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.core.errors import DailyCastError
 from dailycast.core.time import Clock
-from dailycast.db.models import TaskRun, TaskRunStatus, TaskStep, TaskStepStatus
-from dailycast.db.repositories import TaskRunRepository, TaskStepRepository
+from dailycast.db.models import TaskRun, TaskRunStatus, TaskStep, TaskStepStatus, TaskType
+from dailycast.db.repositories import EpisodeRepository, TaskRunRepository, TaskStepRepository
 from dailycast.db.transactions import UnitOfWork
 from dailycast.episodes.service import EpisodeService
 from dailycast.llm.budget import BudgetController
@@ -193,6 +193,7 @@ class PipelineOrchestrator:
                 llm_input_tokens=result.llm_input_tokens,
                 llm_output_tokens=result.llm_output_tokens,
                 tts_character_count=result.tts_character_count,
+                cache_hit_count=result.cache_hit_count,
             )
             task_run = TaskRunRepository(unit.session).get(task_step.task_run_id)
             if task_run is None:
@@ -204,6 +205,7 @@ class PipelineOrchestrator:
                 llm_input_tokens=result.llm_input_tokens,
                 llm_output_tokens=result.llm_output_tokens,
                 tts_character_count=result.tts_character_count,
+                cache_hit_count=result.cache_hit_count,
             )
 
     def _fail_step_and_run(self, task_run_id: str, task_step_id: int, error: Exception) -> TaskRun:
@@ -382,7 +384,7 @@ class PipelineOrchestrator:
                 TaskRunStatus.SUCCEEDED_WITH_WARNINGS if warning_count else TaskRunStatus.SUCCEEDED
             )
             validate_task_run_transition(task_run.status, status)
-            return task_runs.update_status(
+            completed = task_runs.update_status(
                 task_run,
                 status,
                 ended_at=self._clock.now(),
@@ -390,6 +392,26 @@ class PipelineOrchestrator:
                 error_code=completion_code,
                 error_summary=completion_summary,
             )
+            if (
+                completed.task_type is TaskType.DAILY_GENERATE
+                and completed.episode_id is not None
+                and completed.started_at is not None
+                and completed.ended_at is not None
+            ):
+                generation_seconds = max(
+                    0,
+                    round(
+                        (
+                            _as_utc(completed.ended_at) - _as_utc(completed.started_at)
+                        ).total_seconds()
+                    ),
+                )
+                episode = EpisodeRepository(unit.session).get(completed.episode_id)
+                if episode is not None:
+                    EpisodeRepository(unit.session).update_generation_metrics(
+                        episode, generation_time_seconds=generation_seconds
+                    )
+            return completed
 
     def _wait_for_action(
         self,
@@ -430,6 +452,11 @@ def _is_expired(deadline_at: datetime | None, now: datetime) -> bool:
     deadline = deadline_at.replace(tzinfo=UTC) if deadline_at.tzinfo is None else deadline_at
     current = now.replace(tzinfo=UTC) if now.tzinfo is None else now
     return deadline <= current
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize SQLite's naive datetimes before calculating persisted wall-clock metrics."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _validated_recovery_checkpoint(

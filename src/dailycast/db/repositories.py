@@ -216,6 +216,18 @@ class EpisodeRepository:
         self._session.flush()
         return episode
 
+    def update_generation_metrics(
+        self,
+        episode: Episode,
+        *,
+        generation_time_seconds: int,
+    ) -> Episode:
+        """Persist the completed daily-run duration without duplicating mutable audio state."""
+        episode.generation_time_seconds = generation_time_seconds
+        episode.updated_at = utc_now()
+        self._session.flush()
+        return episode
+
 
 class EpisodeItemRepository:
     """Persistence operations for immutable Episode-to-NewsEvent editorial snapshots."""
@@ -328,12 +340,14 @@ class TaskRunRepository:
         llm_input_tokens: int = 0,
         llm_output_tokens: int = 0,
         tts_character_count: int = 0,
+        cache_hit_count: int = 0,
     ) -> TaskRun:
         """Accumulate committed per-step provider usage into the TaskRun audit totals."""
         task_run.llm_call_count += llm_call_count
         task_run.llm_input_tokens += llm_input_tokens
         task_run.llm_output_tokens += llm_output_tokens
         task_run.tts_character_count += tts_character_count
+        task_run.cache_hit_count += cache_hit_count
         task_run.updated_at = utc_now()
         self._session.flush()
         return task_run

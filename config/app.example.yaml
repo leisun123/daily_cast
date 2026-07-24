@@ -25,7 +25,9 @@ storage:
 sources:
   config_path: ./config/sources.example.yaml
 
-# The in-process scheduler is opt-in to prevent surprise local daily runs.
+# The in-process scheduler is opt-in to prevent surprise local daily runs. When
+# enabled, this cron runs in app.timezone and reuses one stable TaskRun identity
+# for each daily edition, even if the process restarts or the scheduler fires twice.
 scheduler:
   enabled: false
   cron_expression: "0 8 * * *"

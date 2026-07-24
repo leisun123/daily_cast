@@ -76,6 +76,7 @@ class ScriptingStep:
             llm_call_count=generated.provider_call_count,
             llm_input_tokens=generated.usage.input_tokens if not generated.cache_hit else 0,
             llm_output_tokens=generated.usage.output_tokens if not generated.cache_hit else 0,
+            cache_hit_count=int(generated.cache_hit),
         )
 
 

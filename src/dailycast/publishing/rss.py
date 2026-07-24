@@ -113,7 +113,7 @@ class RSSPublisher:
         return RSSFeedItem(
             guid=episode.public_id,
             title=episode.title,
-            description=episode.description,
+            description=_episode_summary(episode),
             published_at=publication.created_at,
             duration_ms=episode.actual_duration_ms,
             asset=asset,
@@ -293,6 +293,16 @@ def _duration(duration_ms: int) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+
+
+def _episode_summary(episode: Episode) -> str:
+    """Keep the generated description as the RSS summary and append durable listening context."""
+    if episode.description is None or episode.actual_duration_ms is None:
+        raise RSSPublicationError("Episode is incomplete for RSS summary construction")
+    return (
+        f"{episode.description}\n\n"
+        f"时长：{_duration(episode.actual_duration_ms)} · 话题数：{episode.news_count}"
+    )
 
 
 def _rfc822_datetime(value: datetime) -> str:

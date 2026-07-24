@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.core.config import load_settings
 from dailycast.core.errors import AIBudgetExceededError, LLMProviderTimeoutError
+from dailycast.core.time import Clock
 from dailycast.db.models import (
     AudioSegment,
     Episode,
@@ -24,7 +25,7 @@ from dailycast.db.models import (
     TaskType,
     TriggerType,
 )
-from dailycast.db.repositories import TaskRunRepository, TaskStepRepository
+from dailycast.db.repositories import EpisodeRepository, TaskRunRepository, TaskStepRepository
 from dailycast.db.revision import build_alembic_config
 from dailycast.db.session import create_session_factory, create_sqlite_engine
 from dailycast.db.transactions import UnitOfWork
@@ -122,6 +123,29 @@ def test_submission_returns_active_run_for_duplicate_business_key(
     duplicate = service.submit(task_command(idempotency_key="daily-second"))
 
     assert duplicate.id == first.id
+    assert executor.task_run_ids == [first.id]
+
+
+def test_scheduled_submission_reuses_the_same_daily_edition_after_a_terminal_run(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A duplicate cron tick must not create a second TaskRun or Episode for one daily edition."""
+    executor = RecordingExecutor(migrated_session_factory)
+    service = TaskSubmissionService(migrated_session_factory, executor)
+    command = task_command(
+        trigger_type=TriggerType.SCHEDULED,
+        idempotency_key="scheduled:daily:2026-07-22:test-v1",
+    )
+    first = service.submit(command)
+    with UnitOfWork(migrated_session_factory) as unit:
+        assert unit.session is not None
+        task_run = TaskRunRepository(unit.session).get(first.id)
+        assert task_run is not None
+        TaskRunRepository(unit.session).update_status(task_run, TaskRunStatus.SUCCEEDED)
+
+    second = service.submit(command)
+
+    assert second.id == first.id
     assert executor.task_run_ids == [first.id]
 
 
@@ -1213,6 +1237,7 @@ def test_orchestrator_persists_step_and_task_provider_usage(
                 llm_input_tokens=31,
                 llm_output_tokens=11,
                 tts_character_count=17,
+                cache_hit_count=3,
             )
 
     submitted = TaskSubmissionService(
@@ -1235,6 +1260,64 @@ def test_orchestrator_persists_step_and_task_provider_usage(
             11,
         )
         assert task_run.tts_character_count == 17
+        assert task_run.cache_hit_count == 3
+
+
+def test_completed_daily_task_persists_episode_generation_time(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A successful daily run stores wall-clock generation time on its Episode snapshot."""
+
+    class AdvancingClock(Clock):
+        def __init__(self) -> None:
+            self._value = datetime(2026, 7, 22, tzinfo=UTC)
+
+        def now(self) -> datetime:
+            value = self._value
+            self._value += timedelta(seconds=10)
+            return value
+
+    class CompleteStep:
+        name = "complete"
+
+        async def run(self, context: PipelineContext) -> StepResult:
+            del context
+            return StepResult()
+
+    with UnitOfWork(migrated_session_factory) as unit:
+        assert unit.session is not None
+        episode = EpisodeRepository(unit.session).create(
+            public_id="production-metric-episode",
+            episode_date=date(2026, 7, 22),
+            edition="daily",
+            status="review_required",
+        )
+    command = TaskCommand(
+        task_type=TaskType.DAILY_GENERATE,
+        request={"edition": "daily", "episode_date": "2026-07-22"},
+        config_snapshot={"pipeline": "test"},
+        pipeline_version="test-v1",
+        idempotency_key="episode-generation-metrics",
+        episode_id=episode.id,
+    )
+    submitted = TaskSubmissionService(
+        migrated_session_factory,
+        RecordingExecutor(migrated_session_factory),
+        clock=AdvancingClock(),
+    ).submit(command)
+
+    completed = asyncio.run(
+        PipelineOrchestrator(
+            migrated_session_factory, (CompleteStep(),), clock=AdvancingClock()
+        ).execute(submitted.id)
+    )
+
+    assert completed is not None
+    with UnitOfWork(migrated_session_factory) as unit:
+        assert unit.session is not None
+        persisted = EpisodeRepository(unit.session).get(episode.id)
+        assert persisted is not None
+        assert persisted.generation_time_seconds == 50
 
 
 @pytest.mark.parametrize(

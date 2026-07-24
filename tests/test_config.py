@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from dailycast.core.config import EditorialSettings, PublishingSettings, load_settings
+from dailycast.core.config import AppSettings, EditorialSettings, PublishingSettings, load_settings
 from dailycast.core.errors import ConfigurationError
 
 
@@ -74,6 +74,12 @@ def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:
     """Deployments must opt in to Alpha relaxation rather than inherit it silently."""
     assert EditorialSettings().enforce_quality_gate is True
     assert PublishingSettings().auto_publish is False
+
+
+def test_application_timezone_must_be_an_iana_timezone() -> None:
+    """A misspelled timezone must fail configuration rather than silently schedule at host time."""
+    with pytest.raises(ValueError, match="app.timezone must be a valid IANA timezone"):
+        AppSettings(timezone="Mars/Olympus")
 
 
 def test_missing_yaml_fails_fast(tmp_path: Path) -> None:

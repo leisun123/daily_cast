@@ -44,6 +44,7 @@ from dailycast.llm.budget import BudgetController
 from dailycast.llm.contracts import LLMMessage, LLMUsage, StructuredResult
 from dailycast.llm.editorial_service import AIEditorialService
 from dailycast.llm.prompts import PromptTemplate
+from dailycast.llm.prompts.generate_outline_v2 import GENERATE_OUTLINE_V2
 from dailycast.pipeline.context import PipelineContext
 from dailycast.pipeline.steps.outlining import OutliningStep
 
@@ -413,6 +414,17 @@ def test_generate_outline_returns_a_schema_valid_outline(
     assert result.outline.sections[1].event_ids == (event.event_id,)
     assert result.cache_hit is False
     assert artifact_count(migrated_session_factory) == 1
+
+
+def test_outline_prompt_organizes_a_daily_show_without_changing_the_schema() -> None:
+    """The prompt gives a podcast order while retaining only supported section types."""
+    instruction = GENERATE_OUTLINE_V2.system_instruction
+
+    assert "opening" in instruction
+    assert "today's overview" in instruction
+    assert "main stories" in instruction
+    assert "brief updates" in instruction
+    assert "closing" in instruction
 
 
 @pytest.mark.parametrize(

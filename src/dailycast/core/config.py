@@ -4,6 +4,7 @@ import os
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import dotenv_values
@@ -35,6 +36,17 @@ class AppSettings(BaseModel):
     environment: str = "development"
     timezone: str = "Asia/Shanghai"
     server: ServerSettings = Field(default_factory=ServerSettings)
+
+    @field_validator("timezone")
+    @classmethod
+    def require_iana_timezone(cls, value: str) -> str:
+        """Reject an invalid timezone before it can change the daily-edition business date."""
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            msg = "app.timezone must be a valid IANA timezone"
+            raise ValueError(msg) from error
+        return value
 
 
 class DatabaseSettings(BaseModel):

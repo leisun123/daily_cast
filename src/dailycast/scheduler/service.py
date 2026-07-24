@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from collections.abc import Callable
@@ -11,6 +12,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from dailycast.pipeline.contracts import TaskCommand
+
+logger = logging.getLogger(__name__)
 
 
 class SubmissionPort(Protocol):
@@ -48,7 +51,7 @@ class SchedulerService:
         scheduler = AsyncIOScheduler(timezone=self._timezone)
         scheduler.add_job(
             self.trigger_submission,
-            trigger=CronTrigger.from_crontab(self._cron_expression, timezone=self._timezone),
+            trigger=self.build_trigger(),
             id="dailycast-task-submission",
             replace_existing=True,
             max_instances=1,
@@ -57,14 +60,21 @@ class SchedulerService:
         scheduler.start()
         self._scheduler = scheduler
 
+    def build_trigger(self) -> CronTrigger:
+        """Build the timezone-aware daily trigger once for runtime and focused verification."""
+        return CronTrigger.from_crontab(self._cron_expression, timezone=self._timezone)
+
     def shutdown(self) -> None:
         """Stop scheduler ticks before the in-process executor begins graceful shutdown."""
         if self._scheduler is not None and self._scheduler.running:
             self._scheduler.shutdown(wait=False)
 
     def trigger_submission(self) -> None:
-        """Submit one command; the shared service owns all persistence and queue semantics."""
-        self._submission_service.submit(self._command_factory())
+        """Submit one command while keeping a failed tick isolated from the application process."""
+        try:
+            self._submission_service.submit(self._command_factory())
+        except Exception:
+            logger.exception("scheduled task submission failed")
 
     @staticmethod
     def _is_uvicorn_reload() -> bool:

@@ -96,6 +96,11 @@ Environment variables override YAML. `DATA_DIR` and `PUBLIC_DIR` select the runt
 checkpoint boundaries. A timed-out run preserves its completed checkpoints for a later
 recovery child; it does not require a broker or another worker process.
 
+To generate the daily episode automatically, set `scheduler.enabled: true` and configure
+`scheduler.cron_expression` in standard five-field cron syntax. The schedule is evaluated in
+`app.timezone` (the example uses `Asia/Shanghai`); each scheduled date uses a stable idempotency
+key, so repeated ticks and restarts do not create a duplicate daily TaskRun or Episode.
+
 For a non-loopback public Feed, configure an explicit HTTPS `DAILYCAST_PUBLISHING__PUBLIC_BASE_URL` and expose only the intended Feed/media paths through your reverse proxy or static hosting setup.
 
 ## Development

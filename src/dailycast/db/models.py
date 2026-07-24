@@ -397,6 +397,11 @@ class Episode(Base):
         ),
         CheckConstraint("script_json IS NULL OR json_valid(script_json)", name="script_json_valid"),
         CheckConstraint("review_json IS NULL OR json_valid(review_json)", name="review_json_valid"),
+        CheckConstraint("news_count >= 0", name="news_count_nonnegative"),
+        CheckConstraint(
+            "generation_time_seconds IS NULL OR generation_time_seconds >= 0",
+            name="generation_time_seconds_nonnegative",
+        ),
         UniqueConstraint("episode_date", "edition", name="uq_episodes_date_edition"),
         Index("ix_episodes_status", "status"),
         Index("ix_episodes_date", desc("episode_date")),
@@ -431,6 +436,10 @@ class Episode(Base):
     review_json: Mapped[str | None] = mapped_column(Text)
     target_duration_seconds: Mapped[int | None] = mapped_column(Integer)
     actual_duration_ms: Mapped[int | None] = mapped_column(Integer)
+    news_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sql_text("0")
+    )
+    generation_time_seconds: Mapped[int | None] = mapped_column(Integer)
     audio_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=sql_text("0")
     )
@@ -508,6 +517,7 @@ class TaskRun(Base):
         CheckConstraint("json_valid(config_snapshot_json)", name="config_snapshot_json_valid"),
         CheckConstraint("json_valid(request_json)", name="request_json_valid"),
         CheckConstraint("retryable IN (0, 1)", name="retryable_boolean"),
+        CheckConstraint("cache_hit_count >= 0", name="cache_hit_count_nonnegative"),
         Index(
             "uq_task_runs_active_business",
             "business_key",
@@ -554,6 +564,9 @@ class TaskRun(Base):
         Integer, nullable=False, default=0, server_default=sql_text("0")
     )
     tts_character_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sql_text("0")
+    )
+    cache_hit_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=sql_text("0")
     )
     retryable: Mapped[bool] = mapped_column(
