@@ -32,6 +32,7 @@ class GenerateAudioStep:
             "episode_id": result.episode_id,
             "provider_calls": result.provider_calls,
             "segment_count": result.segment_count,
+            "tts_character_count": result.tts_character_count,
         }
         return StepResult(
             input_count=result.segment_count,
@@ -39,7 +40,14 @@ class GenerateAudioStep:
             checkpoint_json=json.dumps(details, separators=(",", ":"), sort_keys=True),
             details=details,
             artifact_path=result.draft_audio_path,
+            tts_character_count=result.tts_character_count,
         )
+
+    def restore_checkpoint(self, context: PipelineContext, checkpoint: dict[str, object]) -> None:
+        """Keep the Episode identity available when a successful audio checkpoint is inherited."""
+        episode_id = checkpoint.get("episode_id")
+        if isinstance(episode_id, int) and episode_id > 0:
+            context.values["episode_id"] = episode_id
 
 
 def _active_task_step_id(context: PipelineContext) -> int:

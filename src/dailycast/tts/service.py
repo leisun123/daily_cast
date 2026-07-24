@@ -23,8 +23,18 @@ from dailycast.tts.segmenter import SECTION_SEGMENTER_VERSION, ScriptSegment, se
 class AudioGenerationError(DailyCastError):
     """Raised after durable segment state records make an audio generation failure resumable."""
 
-    def __init__(self, message: str = "Episode draft audio generation failed") -> None:
-        super().__init__(code="AUDIO_GENERATION_FAILED", message=message, status_code=502)
+    def __init__(
+        self,
+        message: str = "Episode draft audio generation failed",
+        *,
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(
+            code="AUDIO_GENERATION_FAILED",
+            message=message,
+            status_code=502,
+            retryable=retryable,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +56,7 @@ class AudioGenerationResult:
     segment_count: int
     cache_hits: int
     provider_calls: int
+    tts_character_count: int
     duration_ms: int
     audio_version: int
     draft_audio_path: str
@@ -69,14 +80,12 @@ class AudioGenerationService:
         provider: TTSProvider,
         *,
         data_dir: Path,
-        public_dir: Path,
         merger: AudioMerger,
         settings: TTSGenerationSettings,
     ) -> None:
         self._session_factory = session_factory
         self._provider = provider
         self._data_dir = data_dir.resolve()
-        self._public_dir = public_dir.resolve()
         self._merger = merger
         self._settings = settings
 
@@ -99,6 +108,9 @@ class AudioGenerationService:
             segments=durable_segments,
             cache_hits=sum(outcome.cache_hit for outcome in outcomes),
             provider_calls=sum(outcome.provider_call for outcome in outcomes),
+            tts_character_count=sum(
+                len(outcome.segment.text) for outcome in outcomes if outcome.provider_call
+            ),
         )
 
     def _load_episode_segments(self, episode_id: int) -> tuple[Episode, tuple[ScriptSegment, ...]]:
@@ -107,13 +119,15 @@ class AudioGenerationService:
             assert unit.session is not None
             episode = EpisodeRepository(unit.session).get(episode_id)
             if episode is None:
-                raise AudioGenerationError(f"Episode {episode_id} does not exist")
+                raise AudioGenerationError(f"Episode {episode_id} does not exist", retryable=False)
             if episode.status in {EpisodeStatus.PUBLISHED, EpisodeStatus.PUBLISHING}:
                 raise AudioGenerationError(
-                    "Published or publishing Episode draft audio cannot be changed"
+                    "Published or publishing Episode draft audio cannot be changed", retryable=False
                 )
             if episode.script_json is None or episode.script_revision < 1:
-                raise AudioGenerationError("Episode has no valid persisted script revision")
+                raise AudioGenerationError(
+                    "Episode has no valid persisted script revision", retryable=False
+                )
             try:
                 script = json.loads(episode.script_json)
                 script_segments = segment_episode_script(
@@ -121,10 +135,12 @@ class AudioGenerationService:
                 )
             except (ValueError, TypeError, json.JSONDecodeError) as error:
                 raise AudioGenerationError(
-                    "Episode script is not valid for TTS segmentation"
+                    "Episode script is not valid for TTS segmentation", retryable=False
                 ) from error
             if not script_segments:
-                raise AudioGenerationError("Episode script contains no synthesizable sections")
+                raise AudioGenerationError(
+                    "Episode script contains no synthesizable sections", retryable=False
+                )
             return episode, script_segments
 
     def _invalidate_approval_for_audio_change(self, episode_id: int) -> None:
@@ -341,11 +357,14 @@ class AudioGenerationService:
         segments: list[AudioSegment],
         cache_hits: int,
         provider_calls: int,
+        tts_character_count: int,
     ) -> AudioGenerationResult:
-        """Merge ready private files and make the reviewed draft available through PUBLIC_DIR."""
+        """Merge ready private files into a private mutable draft before publication promotion."""
         manifest_hash = _manifest_hash(segments)
-        public_relative = Path("audio") / f"{episode_id}.mp3"
-        public_output = self._safe_public_path(public_relative)
+        draft_relative = (
+            Path("audio") / "drafts" / str(episode_id) / f"revision-{script_revision}.mp3"
+        )
+        draft_output = self._safe_data_path(draft_relative)
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             episode = EpisodeRepository(unit.session).get(episode_id)
@@ -354,9 +373,9 @@ class AudioGenerationService:
             if (
                 episode.script_revision == script_revision
                 and episode.audio_manifest_hash == manifest_hash
-                and episode.draft_audio_path == public_relative.as_posix()
+                and episode.draft_audio_path == draft_relative.as_posix()
                 and episode.draft_audio_sha256 is not None
-                and self._is_valid_public_audio(public_relative, episode.draft_audio_sha256)
+                and self._is_valid_data_audio(draft_relative, episode.draft_audio_sha256)
             ):
                 episode.status = EpisodeStatus.REVIEW_REQUIRED
                 unit.session.flush()
@@ -367,13 +386,14 @@ class AudioGenerationService:
                     provider_calls=provider_calls,
                     duration_ms=episode.actual_duration_ms or 0,
                     audio_version=episode.audio_version,
-                    draft_audio_path=public_relative.as_posix(),
+                    draft_audio_path=draft_relative.as_posix(),
+                    tts_character_count=tts_character_count,
                 )
         input_paths = tuple(
             self._safe_data_path(Path(segment.audio_path or "")) for segment in segments
         )
         try:
-            merged = await asyncio.to_thread(self._merger.merge, input_paths, public_output)
+            merged = await asyncio.to_thread(self._merger.merge, input_paths, draft_output)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -387,7 +407,7 @@ class AudioGenerationService:
                 raise AudioGenerationError("Episode script changed while audio was being generated")
             episode.audio_version += 1
             episode.audio_manifest_hash = manifest_hash
-            episode.draft_audio_path = public_relative.as_posix()
+            episode.draft_audio_path = draft_relative.as_posix()
             episode.draft_audio_sha256 = merged.sha256
             episode.actual_duration_ms = merged.duration_ms
             episode.error_code = None
@@ -402,7 +422,8 @@ class AudioGenerationService:
                 provider_calls=provider_calls,
                 duration_ms=merged.duration_ms,
                 audio_version=episode.audio_version,
-                draft_audio_path=public_relative.as_posix(),
+                draft_audio_path=draft_relative.as_posix(),
+                tts_character_count=tts_character_count,
             )
 
     def _is_valid_succeeded_segment(self, segment: AudioSegment) -> bool:
@@ -422,21 +443,9 @@ class AudioGenerationService:
             return False
         return path.is_file() and sha256_bytes(path.read_bytes()) == expected_hash
 
-    def _is_valid_public_audio(self, relative_path: Path, expected_hash: str) -> bool:
-        """Verify an existing final draft before treating a retry as already merged."""
-        try:
-            path = self._safe_public_path(relative_path)
-        except AudioGenerationError:
-            return False
-        return path.is_file() and sha256_bytes(path.read_bytes()) == expected_hash
-
     def _safe_data_path(self, relative_path: Path) -> Path:
         """Resolve only a relative cache path below configured DATA_DIR."""
         return _safe_child_path(self._data_dir, relative_path)
-
-    def _safe_public_path(self, relative_path: Path) -> Path:
-        """Resolve only a relative draft path below configured PUBLIC_DIR."""
-        return _safe_child_path(self._public_dir, relative_path)
 
     @staticmethod
     def _matches_semantics(segment: AudioSegment, values: dict[str, object]) -> bool:

@@ -67,7 +67,6 @@ def audio_service(
             factory,
             provider,
             data_dir=tmp_path / "data",
-            public_dir=tmp_path / "public",
             merger=merger,
             settings=TTSGenerationSettings(voice=voice, speed=1.0),
         ),
@@ -126,9 +125,10 @@ def test_audio_generation_creates_succeeded_segments_merges_and_updates_episode(
         assert result.cache_hits == 0
         assert result.duration_ms == 3000
         assert len(merger.calls) == 1
-        output = tmp_path / "public" / "audio" / f"{episode.id}.mp3"
+        output = tmp_path / "data" / "audio" / "drafts" / str(episode.id) / "revision-1.mp3"
         assert output.is_file()
         assert not output.with_name(f".{output.name}.part").exists()
+        assert not (tmp_path / "public" / "audio" / f"{episode.id}.mp3").exists()
         with UnitOfWork(factory) as unit:
             assert unit.session is not None
             segments = AudioSegmentRepository(unit.session).list_by_episode_revision(
@@ -140,7 +140,8 @@ def test_audio_generation_creates_succeeded_segments_merges_and_updates_episode(
             assert persisted is not None
             assert persisted.audio_version == 1
             assert persisted.actual_duration_ms == 3000
-            assert persisted.draft_audio_path == f"audio/{episode.id}.mp3"
+            assert persisted.draft_audio_path == f"audio/drafts/{episode.id}/revision-1.mp3"
+        assert result.tts_character_count > 0
     finally:
         factory.kw["bind"].dispose()
 
@@ -363,5 +364,6 @@ def test_generate_audio_pipeline_step_reports_episode_audio_metrics(
         assert result.details["segment_count"] == 3
         assert result.details["provider_calls"] == 3
         assert result.details["duration_ms"] == 3000
+        assert result.tts_character_count > 0
     finally:
         factory.kw["bind"].dispose()

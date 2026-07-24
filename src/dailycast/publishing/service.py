@@ -34,7 +34,9 @@ class PublicationOperationError(DailyCastError):
     """Raised when local immutable asset or RSS Feed side effects cannot be safely completed."""
 
     def __init__(self, message: str) -> None:
-        super().__init__(code="PUBLICATION_FAILED", message=message, status_code=502)
+        super().__init__(
+            code="PUBLICATION_FAILED", message=message, status_code=502, retryable=True
+        )
 
 
 @dataclass(frozen=True, slots=True)

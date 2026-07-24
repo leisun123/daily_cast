@@ -85,14 +85,28 @@ class ArticleService:
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             articles = ArticleRepository(unit.session)
-            existing = articles.get_by_url_hash(sha256_text(normalized_url))
+            url_hash = sha256_text(normalized_url)
+            existing_by_external = (
+                articles.get_by_source_external_id(candidate.source_id, candidate.external_id)
+                if candidate.external_id is not None
+                else None
+            )
+            if existing_by_external is not None and existing_by_external.url_hash != url_hash:
+                raise ArticleValidationError(
+                    SourceError(
+                        "RSS_EXTERNAL_ID_URL_CONFLICT",
+                        "RSS external_id was observed with a different normalized URL",
+                        False,
+                    )
+                )
+            existing = existing_by_external or articles.get_by_url_hash(url_hash)
             if existing is None:
                 return articles.upsert(
                     source_id=candidate.source_id,
                     external_id=candidate.external_id,
                     url=candidate.url,
                     normalized_url=normalized_url,
-                    url_hash=sha256_text(normalized_url),
+                    url_hash=url_hash,
                     title=candidate.title.strip(),
                     normalized_title=normalized_title,
                     title_hash=sha256_text(normalized_title),

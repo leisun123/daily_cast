@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from dailycast.db.models import TaskRunStatus
+from dailycast.db.models import EpisodeStatus, TaskRunStatus, TaskType
 from dailycast.db.repositories import TaskRunRepository
 from dailycast.db.transactions import UnitOfWork
 from dailycast.episodes.service import EpisodeService
@@ -37,15 +37,19 @@ class CreateEpisodeStep:
         _active_task_step_id(context)
         store = EditorialArtifactStore(self.data_dir)
         outline = EpisodeOutline.model_validate(
-            store.read_json(context.task_run_id, "outline.json")
+            store.read_json(context.artifact_run_id, "outline.json")
         )
-        script = EpisodeScript.model_validate(store.read_json(context.task_run_id, "script.json"))
+        script = EpisodeScript.model_validate(
+            store.read_json(context.artifact_run_id, "script.json")
+        )
         validation = ValidationReport.model_validate(
-            store.read_json(context.task_run_id, "validation.json")
+            store.read_json(context.artifact_run_id, "validation.json")
         )
-        review = ScriptReview.model_validate(store.read_json(context.task_run_id, "review.json"))
+        review = ScriptReview.model_validate(
+            store.read_json(context.artifact_run_id, "review.json")
+        )
         selected_event_ids = _event_ids(context.values.get("outlined_news_event_ids"))
-        artifact_refs = _artifact_refs(context.task_run_id)
+        artifact_refs = _artifact_refs(context.artifact_run_id)
         if self.enforce_quality_gate and validation.has_blocking_issues:
             return _skipped_result(selected_event_ids, artifact_refs, "SCRIPT_VALIDATION_FAILED")
         if self.enforce_quality_gate and (
@@ -61,12 +65,17 @@ class CreateEpisodeStep:
             )
         try:
             metadata = EpisodeMetadata.model_validate(
-                store.read_json(context.task_run_id, "metadata.json")
+                store.read_json(context.artifact_run_id, "metadata.json")
             )
         except RuntimeError:
             return _skipped_result(selected_event_ids, artifact_refs, "METADATA_UNAVAILABLE")
-        episode_date, edition = self._episode_identity(context)
-        episode = self.episode_service.create_from_editorial_artifacts(
+        episode_date, edition, task_type = self._task_identity(context)
+        create = (
+            self.episode_service.regenerate_from_editorial_artifacts
+            if task_type is TaskType.REGENERATE_EPISODE
+            else self.episode_service.create_from_editorial_artifacts
+        )
+        episode = create(
             episode_date=episode_date,
             edition=edition,
             outline=outline,
@@ -80,6 +89,32 @@ class CreateEpisodeStep:
             enforce_quality_gate=self.enforce_quality_gate,
         )
         context.values["episode_id"] = episode.id
+        if (
+            task_type is not TaskType.REGENERATE_EPISODE
+            and episode.status is EpisodeStatus.PUBLISHED
+        ):
+            return StepResult(
+                input_count=len(selected_event_ids),
+                output_count=1,
+                warning_count=1,
+                checkpoint_json=_canonical_json(
+                    {
+                        "artifact_refs": artifact_refs,
+                        "episode_id": episode.id,
+                        "episode_public_id": episode.public_id,
+                        "reused_published_episode": True,
+                    }
+                ),
+                details={
+                    "episode_id": episode.id,
+                    "episode_public_id": episode.public_id,
+                    "episode_status": episode.status.value,
+                    "reused_published_episode": True,
+                },
+                stop_pipeline=True,
+                completion_code="EPISODE_ALREADY_PUBLISHED",
+                completion_summary="same-day retry reused the immutable published Episode",
+            )
         return StepResult(
             input_count=len(selected_event_ids),
             output_count=1,
@@ -97,10 +132,10 @@ class CreateEpisodeStep:
                 "episode_status": episode.status.value,
                 "script_revision": episode.script_revision,
             },
-            artifact_path=f"work/{context.task_run_id}/editorial/metadata.json",
+            artifact_path=f"work/{context.artifact_run_id}/editorial/metadata.json",
         )
 
-    def _episode_identity(self, context: PipelineContext) -> tuple[date, str]:
+    def _task_identity(self, context: PipelineContext) -> tuple[date, str, TaskType]:
         """Read the durable business identity from the submitted TaskRun, not untrusted files."""
         with UnitOfWork(context.session_factory) as unit:
             assert unit.session is not None
@@ -119,9 +154,15 @@ class CreateEpisodeStep:
         if not isinstance(raw_date, str) or not isinstance(raw_edition, str) or not raw_edition:
             raise RuntimeError("TaskRun request must contain episode_date and edition")
         try:
-            return date.fromisoformat(raw_date), raw_edition
+            return date.fromisoformat(raw_date), raw_edition, task_run.task_type
         except ValueError as error:
             raise RuntimeError("TaskRun episode_date must use YYYY-MM-DD") from error
+
+    def restore_checkpoint(self, context: PipelineContext, checkpoint: dict[str, object]) -> None:
+        """Pass a durable Episode identity to later audio/publication recovery checkpoints."""
+        episode_id = checkpoint.get("episode_id")
+        if isinstance(episode_id, int) and episode_id > 0:
+            context.values["episode_id"] = episode_id
 
 
 def _active_task_step_id(context: PipelineContext) -> int:

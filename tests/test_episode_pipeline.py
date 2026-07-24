@@ -278,7 +278,6 @@ def test_quality_flagged_artifacts_are_persisted_only_when_alpha_gate_is_relaxed
             factory,
             FakeTTSProvider(),
             data_dir=tmp_path / "audio-data",
-            public_dir=tmp_path / "public",
             merger=AtomicFakeMerger(),
             settings=TTSGenerationSettings(voice="zh-CN-XiaoxiaoNeural"),
         )
@@ -294,7 +293,9 @@ def test_quality_flagged_artifacts_are_persisted_only_when_alpha_gate_is_relaxed
             )
         )
         assert audio_result.output_count == 1
-        assert (tmp_path / "public" / "audio" / f"{episode_id}.mp3").is_file()
+        assert (
+            tmp_path / "audio-data" / "audio" / "drafts" / str(episode_id) / "revision-1.mp3"
+        ).is_file()
         with UnitOfWork(factory) as unit:
             assert unit.session is not None
             publish_step_id = (
@@ -315,6 +316,7 @@ def test_quality_flagged_artifacts_are_persisted_only_when_alpha_gate_is_relaxed
                 PublicationService(
                     factory,
                     RSSPublisher(
+                        data_dir=tmp_path / "audio-data",
                         public_dir=tmp_path / "public",
                         settings=RSSSettings(
                             public_base_url="http://127.0.0.1:8000",
