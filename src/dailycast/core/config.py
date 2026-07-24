@@ -106,7 +106,7 @@ class LLMSettings(BaseModel):
     provider: str = "openai_compatible"
     base_url: str = "https://api.openai.com/v1"
     api_key: str | None = None
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-5.6-terra"
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     max_output_tokens: int = Field(default=2000, ge=1)

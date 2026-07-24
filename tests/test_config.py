@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from dailycast.core.config import AppSettings, EditorialSettings, PublishingSettings, load_settings
+from dailycast.core.config import (
+    AppSettings,
+    EditorialSettings,
+    LLMSettings,
+    PublishingSettings,
+    load_settings,
+)
 from dailycast.core.errors import ConfigurationError
 
 
@@ -66,6 +72,7 @@ def test_alpha_example_unblocks_quality_gated_output_and_auto_publish(tmp_path: 
     assert settings.publishing.auto_publish is True
     assert settings.publishing.public_base_url == "http://127.0.0.1:8000"
     assert settings.publishing.feed_title == "DailyCast"
+    assert settings.llm.model == "gpt-5.6-terra"
     assert settings.tts.text_mode == "enhanced_text"
     assert settings.resolve_path(settings.tts.pronunciation_dictionary_path).is_file()
 
@@ -74,6 +81,11 @@ def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:
     """Deployments must opt in to Alpha relaxation rather than inherit it silently."""
     assert EditorialSettings().enforce_quality_gate is True
     assert PublishingSettings().auto_publish is False
+
+
+def test_default_llm_model_is_gpt_5_6_terra() -> None:
+    """New installations use the production model verified against the Responses endpoint."""
+    assert LLMSettings().model == "gpt-5.6-terra"
 
 
 def test_application_timezone_must_be_an_iana_timezone() -> None:
