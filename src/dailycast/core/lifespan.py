@@ -217,7 +217,15 @@ def build_lifespan(
                 timezone=settings.app.timezone,
                 enabled=settings.scheduler.enabled,
             )
-            scheduler.start()
+            try:
+                scheduler.start()
+            except Exception:
+                # Scheduler availability must not turn an otherwise ready local product into a
+                # startup outage. The next restart can safely retry this in-process capability.
+                logger.exception(
+                    "scheduler failed to start; application will continue without ticks"
+                )
+                scheduler = None
         runtime = AppRuntime(
             settings=settings,
             engine=engine,
@@ -280,11 +288,15 @@ def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) ->
 def build_daily_generation_command(settings: Settings, *, trigger_type: TriggerType) -> TaskCommand:
     """Build the one documented daily command for scheduler and manual submission alike."""
     now = datetime.now(ZoneInfo(settings.app.timezone))
+    episode_date = now.date().isoformat()
+    scheduled_idempotency_key = (
+        f"scheduled:daily:{episode_date}:rss-v1" if trigger_type is TriggerType.SCHEDULED else None
+    )
     return TaskCommand(
         task_type=TaskType.DAILY_GENERATE,
         request={
             "edition": "daily",
-            "episode_date": now.date().isoformat(),
+            "episode_date": episode_date,
         },
         config_snapshot={
             "pipeline": "rss-v1",
@@ -296,5 +308,6 @@ def build_daily_generation_command(settings: Settings, *, trigger_type: TriggerT
         },
         pipeline_version="rss-v1",
         trigger_type=trigger_type,
+        idempotency_key=scheduled_idempotency_key,
         deadline_at=now + timedelta(seconds=settings.task_execution.deadline_seconds),
     )

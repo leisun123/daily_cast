@@ -120,6 +120,8 @@ def test_accepted_editorial_artifacts_create_review_required_episode(
         assert episode.approved_audio_version is None
         assert episode.published_at is None
         assert episode.audio_version == 0
+        assert episode.news_count == 1
+        assert episode.generation_time_seconds is None
         assert episode.script_text == "\n\n".join(
             section.text for section in artifacts.script.sections
         )

@@ -94,6 +94,12 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
             context={
                 "episode": episode,
                 "audio_url": _public_audio_url(publication),
+                "duration": _format_audio_duration(
+                    episode.actual_duration_ms if episode is not None else None
+                ),
+                "generation_time": _format_generation_time(
+                    episode.generation_time_seconds if episode is not None else None
+                ),
             },
         )
 
@@ -121,6 +127,8 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
                 "items": items,
                 "source_count": source_count,
                 "audio_url": _public_audio_url(publication),
+                "duration": _format_audio_duration(episode.actual_duration_ms),
+                "generated_at": _format_generated_at(episode.created_at),
             },
         )
 
@@ -290,3 +298,23 @@ def _format_duration(task_run: TaskRun | None) -> str:
         return "进行中"
     seconds = max(0, round((ended_at - started_at).total_seconds()))
     return f"{seconds} 秒"
+
+
+def _format_audio_duration(duration_ms: int | None) -> str:
+    """Render persisted merged-audio duration consistently in both minimal web pages."""
+    if duration_ms is None or duration_ms < 0:
+        return "—"
+    total_seconds = round(duration_ms / 1000)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}"
+
+
+def _format_generation_time(seconds: int | None) -> str:
+    """Show a persisted task wall-clock metric only after a daily run has completed."""
+    return f"{seconds} 秒" if seconds is not None else "—"
+
+
+def _format_generated_at(value: datetime) -> str:
+    """Use one compact, locale-independent timestamp for a persisted Episode snapshot."""
+    return value.strftime("%Y-%m-%d %H:%M UTC")

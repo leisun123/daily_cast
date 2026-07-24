@@ -195,6 +195,9 @@ def test_rss_feed_contains_stable_guid_and_valid_enclosure(
             "type": "audio/mpeg",
             "url": publication.public_audio_url,
         }
+        assert item.findtext("description") == (
+            "围绕一项经过核验的科技新闻展开。\n\n时长：0:00:03 · 话题数：1"
+        )
     finally:
         factory.kw["bind"].dispose()
 

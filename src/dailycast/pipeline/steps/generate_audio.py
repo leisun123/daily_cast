@@ -41,6 +41,7 @@ class GenerateAudioStep:
             details=details,
             artifact_path=result.draft_audio_path,
             tts_character_count=result.tts_character_count,
+            cache_hit_count=result.cache_hits,
         )
 
     def restore_checkpoint(self, context: PipelineContext, checkpoint: dict[str, object]) -> None:

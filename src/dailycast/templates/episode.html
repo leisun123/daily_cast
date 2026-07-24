@@ -5,6 +5,7 @@
   <h1>{{ episode.title or "未命名节目" }}</h1>
   <p class="status">状态：{{ episode.status.value }} · {{ episode.episode_date }} · {{ episode.edition }}</p>
   {% if episode.description %}<p>{{ episode.description }}</p>{% endif %}
+  <p class="muted">节目时长：{{ duration }} · 生成时间：{{ generated_at }} · 收录新闻：{{ episode.news_count }} 条</p>
   {% if audio_url %}
     <audio controls preload="metadata"><source src="{{ audio_url }}" type="audio/mpeg">当前浏览器不支持音频播放。</audio>
   {% else %}

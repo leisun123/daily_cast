@@ -15,5 +15,8 @@ SCORE_EVENTS_V2 = PromptTemplate(
         "Return exactly one score object for every supplied event_id, each supplied event_id "
         "exactly once, and never add an unknown event_id. `recommend` must be the JSON "
         "boolean true or false, not a string."
+        " Prefer high-impact events that are genuinely useful to a listener, and make the reason "
+        "explain why the listener should care. Avoid duplicate stories, minor announcements, "
+        "and pure press releases unless the supplied evidence shows an unusual listener impact."
     ),
 )

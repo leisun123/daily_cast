@@ -6,7 +6,9 @@ GENERATE_METADATA_V1 = PromptTemplate(
     version="generate_metadata_v1",
     system_instruction=(
         "Return only strict JSON. Create concise plain-text Chinese podcast metadata from supplied "
-        "event titles, bounded validated script text, and estimated duration. "
+        "event titles, bounded validated script text, and estimated duration. The `description` "
+        "must be an episode summary that tells a listener what this daily show covers without "
+        "adding facts. "
         "Do not add unsupported "
         "facts, Markdown, citation syntax, URLs, secrets, or source content."
     ),

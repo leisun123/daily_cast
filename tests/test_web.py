@@ -55,6 +55,8 @@ def test_homepage_renders_latest_published_episode(app_config_path: Path, tmp_pa
         assert f"/episodes/{episode.id}" in response.text
         assert f"/media/episodes/{episode.public_id}/" in response.text
         assert 'href="/feed.xml"' in response.text
+        assert "节目时长：0:00:03" in response.text
+        assert "新闻话题：1 条" in response.text
     finally:
         factory.kw["bind"].dispose()
 
@@ -73,6 +75,9 @@ def test_episode_page_renders_public_audio_script_items_and_source_count(
         assert "适合中文播报" in response.text
         assert "事件 web" in response.text
         assert "来源数：1" in response.text
+        assert "节目时长：0:00:03" in response.text
+        assert "收录新闻：1 条" in response.text
+        assert "生成时间：" in response.text
         assert f"/media/episodes/{episode.public_id}/" in response.text
     finally:
         factory.kw["bind"].dispose()

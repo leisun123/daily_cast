@@ -101,7 +101,7 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             database_url=database_url,
         )
         assert revision.is_current is True
-        assert revision.current == ("0004_tts_preprocess_identity",)
+        assert revision.current == ("0006_backfill_episode_news_count",)
     finally:
         engine.dispose()
 

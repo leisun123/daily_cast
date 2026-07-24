@@ -11,6 +11,7 @@
       <p class="status">状态：{{ episode.status.value }}</p>
       <h2><a href="/episodes/{{ episode.id }}">{{ episode.title or "未命名节目" }}</a></h2>
       {% if episode.description %}<p>{{ episode.description }}</p>{% endif %}
+      <p class="muted">生成耗时：{{ generation_time }} · 节目时长：{{ duration }} · 新闻话题：{{ episode.news_count }} 条</p>
       {% if audio_url %}
         <audio controls preload="metadata"><source src="{{ audio_url }}" type="audio/mpeg">当前浏览器不支持音频播放。</audio>
       {% else %}

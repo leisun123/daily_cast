@@ -54,6 +54,7 @@ class StepResult:
     llm_input_tokens: int = 0
     llm_output_tokens: int = 0
     tts_character_count: int = 0
+    cache_hit_count: int = 0
     stop_pipeline: bool = False
     terminal_status: TaskRunStatus | None = None
     completion_code: str | None = None
@@ -72,6 +73,7 @@ class StepResult:
                 self.llm_input_tokens,
                 self.llm_output_tokens,
                 self.tts_character_count,
+                self.cache_hit_count,
             )
             < 0
         ):

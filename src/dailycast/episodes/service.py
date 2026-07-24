@@ -150,6 +150,7 @@ class EpisodeService:
                     }
                 ),
                 target_duration_seconds=artifacts.outline.target_seconds,
+                news_count=len(selected_events),
             )
             item_repository = EpisodeItemRepository(unit.session)
             for position, event in enumerate(selected_events, start=1):
@@ -239,6 +240,7 @@ class EpisodeService:
                 }
             )
             episode.target_duration_seconds = artifacts.outline.target_seconds
+            episode.news_count = len(selected_events)
             episode.actual_duration_ms = None
             episode.audio_version = 0
             episode.audio_manifest_hash = None

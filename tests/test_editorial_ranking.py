@@ -222,6 +222,9 @@ def test_score_events_v2_prompt_declares_the_complete_json_object_contract() -> 
     assert "event_id" in instruction
     assert "recommend" in instruction
     assert "exactly once" in instruction
+    assert "high-impact" in instruction
+    assert "listener" in instruction
+    assert "press releases" in instruction
 
 
 def test_event_card_is_bounded_and_excludes_full_article_content(
