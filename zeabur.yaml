@@ -94,13 +94,13 @@ spec:
           DAILYCAST_PUBLISHING__AUTO_PUBLISH:
             default: "true"
           DAILYCAST_PUBLISHING__PUBLIC_BASE_URL:
-            default: https://${PUBLIC_DOMAIN}
+            default: ${ZEABUR_WEB_URL}
           DAILYCAST_UID:
             default: "1000"
           DAILYCAST_GID:
             default: "1000"
         instructions:
           - title: RSS Feed
-            content: https://${PUBLIC_DOMAIN}/feed.xml
+            content: ${ZEABUR_WEB_URL}/feed.xml
           - title: Readiness
-            content: https://${PUBLIC_DOMAIN}/readyz
+            content: ${ZEABUR_WEB_URL}/readyz

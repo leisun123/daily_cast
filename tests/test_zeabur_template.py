@@ -30,3 +30,7 @@ def test_zeabur_template_uses_github_and_persistent_runtime_volumes() -> None:
     assert spec["env"]["DAILYCAST_APP__PUBLIC_ONLY"]["default"] == "true"
     assert spec["env"]["DAILYCAST_SCHEDULER__ENABLED"]["default"] == "true"
     assert spec["env"]["DAILYCAST_PUBLISHING__AUTO_PUBLISH"]["default"] == "true"
+    assert (
+        spec["env"]["DAILYCAST_PUBLISHING__PUBLIC_BASE_URL"]["default"]
+        == "${ZEABUR_WEB_URL}"
+    )
