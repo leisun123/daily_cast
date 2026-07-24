@@ -21,7 +21,9 @@ dailycast/
 │   ├── env.py
 │   ├── script.py.mako
 │   └── versions/
-│       └── 0001_initial_schema.py
+│       ├── 0001_initial_schema.py
+│       ├── 0002_task_run_waiting_action.py
+│       └── 0003_reliability_hardening.py
 ├── config/
 │   ├── app.example.yaml
 │   └── sources.example.yaml         # 首次/缺失项种子，不覆盖数据库修改
@@ -289,14 +291,14 @@ V1 实现 `RSSPublisher`。未来的 `PodbeanAPIPublisher` 和 `NetEasePlaywrigh
 ```text
 PipelineStep.run(context) -> StepResult
 TaskSubmissionService.submit(command) -> TaskRun
-InProcessTaskExecutor.enqueue(task_run_id) -> None
+InProcessTaskExecutor.enqueue(task_run_id) -> bool
 InProcessTaskExecutor.shutdown(grace_seconds) -> None
 PipelineOrchestrator.execute(task_run_id) -> TaskRun
 IdempotencyService.acquire(business_key, idempotency_key) -> LeaseResult
 RecoveryService.next_valid_step(task_run, current_inputs) -> StepName
 ```
 
-`submission.py` 保证先提交 queued TaskRun 再 enqueue；`executor.py` 拥有有界队列、单并发槽、心跳和 SIGTERM 关闭；`orchestrator.py` 执行步骤。每个 `PipelineStep` 负责一个清晰检查点，返回输入/输出计数、artifact 引用、警告和错误分类，由 orchestrator 统一落库。
+`submission.py` 保证先提交 queued TaskRun 再 enqueue，并只在本地队列实际接受后标记为已投递；`executor.py` 拥有有界队列、单并发槽、心跳、QueueFull 后从 SQLite queued 行重新投递、worker supervisor、readiness 状态和 SIGTERM 关闭；`orchestrator.py` 在 deadline 检查点执行步骤、恢复已验证 checkpoint，并把精确 error_code/retryable 与 LLM/TTS 用量统一落库。每个 `PipelineStep` 负责一个清晰检查点，返回输入/输出计数、artifact 引用、警告和错误分类。
 
 `scheduler/service.py` 和 `pipeline/recovery.py` 只构造提交命令并调用 `TaskSubmissionService.submit`；它们不得直接调用 `PipelineOrchestrator.execute`。数据库活动 business key 是 APScheduler、API 与恢复入口的共同防重复边界。
 
@@ -329,7 +331,7 @@ Route 禁止做：
 - LLMArtifact 七字段缓存键、未校验结果拒绝保存和跨 TaskRun 复用；provider/model/Prompt/schema/input 以及 endpoint identity、temperature、top_p、max output tokens、response format/其他语义 model options 任一变化 cache miss，密钥/timeout/retry 不参与 `generation_config_hash`；
 - Episode 状态迁移、稿件修订、数字/来源检查；
 - 分段稳定性、包含 `provider_config_hash` 的完整缓存键和“只重生成变化片段”；验证 Provider 实现/endpoint、voice、speed、model、format/额外语义参数变化 cache miss，密钥/timeout/retry 不参与；
-- 任务步骤依赖、超时判断、幂等业务键；
+- 任务步骤依赖、deadline 超时判断、worker supervisor/restart、QueueFull 重投、精确错误分类、幂等业务键和父 checkpoint 恢复；
 - RSS item/GUID/enclosure、publishing candidate 显式注入和重复 GUID 拒绝规则。
 
 ### `tests/integration`
@@ -337,7 +339,7 @@ Route 禁止做：
 使用临时 SQLite、临时媒体目录和本地固定响应服务器：
 
 - Alembic 从空库 upgrade head、revision 检查、foreign keys、部分唯一索引、JSON check、包含 `generation_config_hash` 的 LLMArtifact 七字段唯一键和 Article/NewsEvent 循环外键；
-- LLMArtifact exact-key 查询、JSON check、TaskRun/TaskStep 外键和并发插入；
+- LLMArtifact exact-key 查询、JSON check、TaskRun/TaskStep 外键和并发插入，以及 TaskStep TTS 非负用量约束和 TaskRun 汇总；
 - RSS/HTML fixture 采集、trafilatura 提取；
 - FFmpeg 合并与 `ffprobe` 校验；
 - FastAPI 路由、错误 envelope、分页与静态文件；

@@ -169,7 +169,7 @@ erDiagram
 
 - 唯一：`url_hash`；`(source_id, external_id)` 在 external_id 非空时唯一。
 - 索引：`source_id`、`published_at DESC`、`status`、`title_hash`、`content_hash`、`news_event_id`、`duplicate_of_article_id`。
-- 同一 URL 重复发现执行 upsert 并保留最早 `discovered_at`；正文发生真实变化可更新内容字段和哈希，但须使相关未发布下游 fingerprint 失效。
+- 同一 URL 重复发现执行 upsert 并保留最早 `discovered_at`；正文发生真实变化可更新内容字段和哈希，但须使相关未发布下游 fingerprint 失效。对同一 `(source_id, external_id)`，若新候选的规范 URL 与已持久化 URL 不同，拒绝该候选并记录稳定错误码 `RSS_EXTERNAL_ID_URL_CONFLICT`，不覆盖旧 Article，也不依赖数据库唯一冲突作为控制流。
 - 用于已发布 EpisodeItem 的 Article 不自动删除。超出保留期的失败/过滤 Article 可按配置清理，但先检查事件和节目引用。
 - 关系：属于一个 Source；可指向一个主 Article；可属于一个 NewsEvent；可作为 NewsEvent 代表文章。
 
@@ -247,7 +247,7 @@ erDiagram
 | `actual_duration_ms` | INTEGER | 否 |  | 当前草稿时长 |
 | `audio_version` | INTEGER | 是 | 默认 0 | 每次有效合并 +1 |
 | `audio_manifest_hash` | TEXT(64) | 否 |  | 有序片段清单 hash |
-| `draft_audio_path` | TEXT | 否 | 相对私有目录 | 当前草稿 MP3 |
+| `draft_audio_path` | TEXT | 否 | 相对 `DATA_DIR/audio/drafts/` | 当前草稿 MP3，绝不位于 `PUBLIC_DIR` |
 | `draft_audio_sha256` | TEXT(64) | 否 |  |  |
 | `approved_script_revision` | INTEGER | 否 |  | 批准绑定版本 |
 | `approved_audio_version` | INTEGER | 否 |  | 批准绑定版本 |
@@ -264,7 +264,7 @@ erDiagram
 
 - 唯一：`public_id`、`(episode_date, edition)`。
 - 索引：`status`、`episode_date DESC`、`published_at DESC`。
-- 新建为 draft；只有当前稿件修订、检查结果和草稿音频全部有效时才能进入 review_required；人工批准绑定修订；发布成功后 published。
+- 新建为 draft；只有当前稿件修订、检查结果和草稿音频全部有效时才能进入 review_required；人工批准绑定修订；发布成功后 published。普通同日 retry 复用同一 Episode；只有显式 `regenerate_episode` TaskRun 才能替换未发布 Episode 的编辑内容、增加 `script_revision` 并清除音频/批准绑定。published/publishing Episode 不能原地 regenerate。
 - 标题/简介在发布前修正时增加 `lock_version`；若原为 approved，则清空批准绑定并进入 review_required，但不使检查和音频失效。人工修改稿件必须增加 `script_revision`，清空 `approved_script_revision`、`approved_audio_version`、`approved_at` 和 `review_json`，清除 `audio_manifest_hash`、`draft_audio_path`、`draft_audio_sha256` 与当前时长引用，并进入 draft；旧文件按保留策略留作历史，不再视为当前音频。
 - 从 approved 仅撤销批准且稿件、检查和音频仍有效时，清空批准字段并进入 review_required。修改稿件、音色、语速、TTS model 或当前有效音频片段时必须使相应产物失效并进入 draft；完成重新检查和最终音频合并后才回到 review_required。
 - published Episode 默认永久保留且 V1 不允许编辑；修正通过新 edition 表达，公开音频不随数据库字段更新而覆盖。
@@ -339,13 +339,13 @@ erDiagram
 | `created_at` | DATETIME | 是 |  |  |
 | `updated_at` | DATETIME | 是 |  |  |
 
-`status`：`queued`、`running`、`succeeded`、`succeeded_with_warnings`、`failed`、`timed_out`、`interrupted`、`cancelled`。
+`status`：`queued`、`running`、`waiting_action`、`succeeded`、`succeeded_with_warnings`、`failed`、`timed_out`、`interrupted`、`cancelled`。
 
 ### 8.3 约束、索引与生命周期
 
 - 唯一：`id`、`idempotency_key`；部分唯一 `(business_key) WHERE status IN ('queued','running')`。
 - 索引：`created_at DESC`、`status`、`task_type`、`episode_id`、`parent_task_run_id`、`heartbeat_at`。
-- 终态记录不可重新置为 running；续跑创建新 TaskRun 并关联 parent。
+- `waiting_action` 是保留 artifact 的非失败终态；其他终态记录不可重新置为 running。续跑创建新 TaskRun 并关联 parent。
 - 启动恢复先重新入队 queued；将心跳超过 60 秒未更新的 running 行置为 interrupted，并以旧 TaskRun ID 派生幂等键创建至多一个 queued 子恢复任务。
 - 审计摘要长期保留；详细 JSONL 可按保留期清理。
 - 关系：可属于 Episode；一对多 TaskStep 和首次创建的 LLMArtifact；可形成父子续跑链。
@@ -379,6 +379,7 @@ erDiagram
 | `llm_call_count` | INTEGER | 是 | 默认 0 |  |
 | `llm_input_tokens` | INTEGER | 是 | 默认 0 |  |
 | `llm_output_tokens` | INTEGER | 是 | 默认 0 |  |
+| `tts_character_count` | INTEGER | 是 | 默认 0，非负 CHECK | 实际 Provider 请求字符数 |
 | `retryable` | BOOLEAN | 是 | 默认 false |  |
 | `error_code` | TEXT | 否 |  |  |
 | `error_summary` | TEXT | 否 | 最长 1,000 字符 |  |
@@ -694,7 +695,7 @@ CREATE TABLE task_runs (
   business_key TEXT NOT NULL,
   idempotency_key TEXT NOT NULL UNIQUE,
   trigger_type TEXT NOT NULL CHECK (trigger_type IN ('manual','scheduled','retry')),
-  status TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','succeeded_with_warnings','failed','timed_out','interrupted','cancelled')),
+  status TEXT NOT NULL CHECK (status IN ('queued','running','waiting_action','succeeded','succeeded_with_warnings','failed','timed_out','interrupted','cancelled')),
   current_step TEXT,
   episode_id INTEGER REFERENCES episodes(id) ON DELETE SET NULL,
   parent_task_run_id TEXT REFERENCES task_runs(id) ON DELETE SET NULL,
@@ -746,6 +747,7 @@ CREATE TABLE task_steps (
   llm_call_count INTEGER NOT NULL DEFAULT 0,
   llm_input_tokens INTEGER NOT NULL DEFAULT 0,
   llm_output_tokens INTEGER NOT NULL DEFAULT 0,
+  tts_character_count INTEGER NOT NULL DEFAULT 0 CHECK (tts_character_count >= 0),
   retryable INTEGER NOT NULL DEFAULT 0 CHECK (retryable IN (0, 1)),
   error_code TEXT,
   error_summary TEXT,
@@ -859,7 +861,7 @@ V1 用 TaskRun/TaskStep 保存可查询摘要，用每任务 JSONL 保存高频�
 
 ### 13.3 初始 migration 验证要求
 
-从空 SQLite 文件执行 `alembic upgrade head` 后，集成测试必须验证 `foreign_keys=ON`、活动 TaskRun partial unique index、所有 JSON `json_valid` CHECK、Article/NewsEvent 循环外键插入流程，以及 LLMArtifact 包含 `generation_config_hash` 的七字段唯一键。还需验证 AudioSegment 的 `provider_config_hash/cache_key` 长度约束和复合缓存查询索引存在；相同六个旧身份字段但 generation config 不同的两条成功 Artifact 必须可共存，而完整七字段重复必须被唯一约束拒绝。
+从空 SQLite 文件执行 `alembic upgrade head` 后，集成测试必须验证 `foreign_keys=ON`、活动 TaskRun partial unique index、所有 JSON `json_valid` CHECK、Article/NewsEvent 循环外键插入流程，以及 LLMArtifact 包含 `generation_config_hash` 的七字段唯一键。还需验证 AudioSegment 的 `provider_config_hash/cache_key` 长度约束和复合缓存查询索引存在、TaskStep 的 `tts_character_count >= 0` CHECK 生效；相同六个旧身份字段但 generation config 不同的两条成功 Artifact 必须可共存，而完整七字段重复必须被唯一约束拒绝。
 
 ## 14. 数据保留与删除规则
 

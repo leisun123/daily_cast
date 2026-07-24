@@ -327,7 +327,7 @@ V1 不实现用户认证。非 Docker 本地开发默认监听 `127.0.0.1:8000`�
       "llm_calls": 7,
       "llm_input_tokens": 28600,
       "llm_output_tokens": 7200,
-      "tts_characters": 6840
+      "tts_character_count": 6840
     },
     "steps": [
       {
@@ -340,6 +340,12 @@ V1 不实现用户认证。非 Docker 本地开发默认监听 `127.0.0.1:8000`�
         "input_count": 42,
         "output_count": 39,
         "warning_count": 3,
+        "usage": {
+          "llm_call_count": 0,
+          "llm_input_tokens": 0,
+          "llm_output_tokens": 0,
+          "tts_character_count": 0
+        },
         "error": null,
         "retryable": false
       }
@@ -373,7 +379,7 @@ V1 不实现用户认证。非 Docker 本地开发默认监听 `127.0.0.1:8000`�
 }
 ```
 
-`from_step=null` 表示系统根据检查点选择最早失效步骤。指定步骤只能向前扩大重做范围，不能跳过无效依赖。`use_current_config=false` 默认复用父运行脱敏配置快照。
+`from_step=null` 表示系统沿 `parent_task_run_id` 读取可验证 checkpoint，并从最早失效步骤恢复。指定步骤只能向前扩大重做范围，不能跳过无效依赖。恢复任务复用已验证的对象 ID、LLMArtifact 和音频缓存，并保留已完成用量审计；产生私有 editorial 文件的步骤会在子任务自己的 artifact 根目录重跑，绝不写入父任务目录。`use_current_config=false` 默认复用父运行脱敏配置快照。
 
 - 返回：`202` + 新 TaskRun，含 `parent_task_run_id`。
 - 常见错误：`404 TASK_RUN_NOT_FOUND`、`409 TASK_NOT_RETRYABLE`、`409 TASK_ALREADY_RUNNING`、`409 IDEMPOTENCY_KEY_REUSED`、`422 INVALID_RESUME_STEP`。

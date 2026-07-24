@@ -30,6 +30,11 @@ scheduler:
   enabled: false
   cron_expression: "0 8 * * *"
 
+# A durable deadline ends an overlong task at checkpoint boundaries. It is not
+# a queue timeout and does not require an additional worker or broker.
+task_execution:
+  deadline_seconds: 1800
+
 # Supported direct providers are openai_compatible (Chat Completions) and
 # openai_responses (Responses/Codex). The key deliberately stays out of YAML.
 # Set DAILYCAST_LLM__API_KEY in .env or the deployment environment instead.
