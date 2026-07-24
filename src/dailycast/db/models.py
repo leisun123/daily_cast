@@ -597,6 +597,7 @@ class TaskStep(Base):
             "checkpoint_json IS NULL OR json_valid(checkpoint_json)", name="checkpoint_json_valid"
         ),
         CheckConstraint("json_valid(details_json)", name="details_json_valid"),
+        CheckConstraint("tts_character_count >= 0", name="tts_character_count_nonnegative"),
         CheckConstraint("retryable IN (0, 1)", name="retryable_boolean"),
         UniqueConstraint(
             "task_run_id", "step_name", "attempt", name="uq_task_steps_run_name_attempt"
@@ -636,6 +637,9 @@ class TaskStep(Base):
         Integer, nullable=False, default=0, server_default=sql_text("0")
     )
     llm_output_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sql_text("0")
+    )
+    tts_character_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=sql_text("0")
     )
     retryable: Mapped[bool] = mapped_column(

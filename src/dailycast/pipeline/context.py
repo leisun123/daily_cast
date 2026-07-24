@@ -19,3 +19,8 @@ class PipelineContext:
     shutdown_requested: asyncio.Event
     clock: Clock
     values: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def artifact_run_id(self) -> str:
+        """Return this attempt's private artifact root; recovery never rewrites ancestor output."""
+        return self.task_run_id

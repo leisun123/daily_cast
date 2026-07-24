@@ -73,6 +73,12 @@ class SchedulerSettings(BaseModel):
     cron_expression: str = "0 8 * * *"
 
 
+class TaskExecutionSettings(BaseModel):
+    """Bound the lifetime of one local pipeline request without adding a worker service."""
+
+    deadline_seconds: int = Field(default=1800, ge=1, le=86_400)
+
+
 class LLMBudgetSettings(BaseModel):
     """Hard per-task LLM use limits, applied before cache-miss provider calls."""
 
@@ -257,6 +263,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     sources: SourcesSettings = Field(default_factory=SourcesSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
+    task_execution: TaskExecutionSettings = Field(default_factory=TaskExecutionSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     editorial: EditorialSettings = Field(default_factory=EditorialSettings)
     processing: ProcessingSettings = Field(default_factory=ProcessingSettings)

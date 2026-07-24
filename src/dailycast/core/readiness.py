@@ -32,6 +32,10 @@ class RuntimeForReadiness(Protocol):
     def startup_revision_error(self) -> str | None:
         """Return a safe startup revision inspection failure, if any."""
 
+    @property
+    def executor(self) -> object | None:
+        """Return the single in-process task executor when the current schema is usable."""
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -133,4 +137,12 @@ def evaluate_readiness(runtime: RuntimeForReadiness) -> ReadinessReport:
     checks.append(_check_writable("data_dir", settings.data_dir))
     checks.append(_check_writable("public_dir", settings.public_dir))
     checks.append(_check_ffmpeg())
+    executor = runtime.executor
+    worker_healthy = bool(getattr(executor, "is_healthy", False))
+    worker_detail = (
+        str(getattr(executor, "readiness_detail", "single worker is not available"))
+        if executor is not None
+        else "single worker is not initialized"
+    )
+    checks.append(CheckResult(name="task_worker", ok=worker_healthy, detail=worker_detail))
     return ReadinessReport(checks=tuple(checks))

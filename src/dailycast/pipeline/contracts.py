@@ -50,6 +50,10 @@ class StepResult:
     details: Mapping[str, JSONValue] = field(default_factory=dict)
     artifact_path: str | None = None
     retryable: bool = False
+    llm_call_count: int = 0
+    llm_input_tokens: int = 0
+    llm_output_tokens: int = 0
+    tts_character_count: int = 0
     stop_pipeline: bool = False
     terminal_status: TaskRunStatus | None = None
     completion_code: str | None = None
@@ -59,6 +63,20 @@ class StepResult:
     def details_json(self) -> str:
         """Return valid, canonical JSON suitable for TaskStep.details_json."""
         return canonical_json(self.details)
+
+    def __post_init__(self) -> None:
+        """Reject impossible resource counters before they enter a durable audit record."""
+        if (
+            min(
+                self.llm_call_count,
+                self.llm_input_tokens,
+                self.llm_output_tokens,
+                self.tts_character_count,
+            )
+            < 0
+        ):
+            msg = "step usage counters must be non-negative"
+            raise ValueError(msg)
 
 
 class PipelineStep(Protocol):

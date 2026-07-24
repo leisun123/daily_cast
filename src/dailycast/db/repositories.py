@@ -6,7 +6,7 @@ import json
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from dailycast.db.models import (
@@ -98,6 +98,15 @@ class ArticleRepository:
     def get_by_url_hash(self, url_hash: str) -> Article | None:
         """Return the unique article identified by its normalized URL hash."""
         return self._session.scalar(select(Article).where(Article.url_hash == url_hash))
+
+    def get_by_source_external_id(self, source_id: str, external_id: str) -> Article | None:
+        """Return the stable RSS/source identity when a feed GUID is supplied."""
+        return self._session.scalar(
+            select(Article).where(
+                Article.source_id == source_id,
+                Article.external_id == external_id,
+            )
+        )
 
     def get(self, article_id: int) -> Article | None:
         """Return one Article by its durable integer identifier."""
@@ -230,6 +239,11 @@ class EpisodeItemRepository:
         )
         return list(self._session.scalars(statement))
 
+    def delete_by_episode(self, episode_id: int) -> None:
+        """Replace editable unpublished Episode snapshots during an explicit regenerate request."""
+        self._session.execute(delete(EpisodeItem).where(EpisodeItem.episode_id == episode_id))
+        self._session.flush()
+
 
 class TaskRunRepository:
     """Persistence operations for task submission and heartbeat records."""
@@ -291,6 +305,39 @@ class TaskRunRepository:
         )
         return self._session.scalar(statement)
 
+    def lineage_ids(self, task_run: TaskRun) -> tuple[str, ...]:
+        """Return root-to-current recovery lineage with a bounded cycle-safe traversal."""
+        lineage: list[str] = []
+        current: TaskRun | None = task_run
+        seen: set[str] = set()
+        while current is not None and current.id not in seen:
+            lineage.append(current.id)
+            seen.add(current.id)
+            current = (
+                self.get(current.parent_task_run_id)
+                if current.parent_task_run_id is not None
+                else None
+            )
+        return tuple(reversed(lineage))
+
+    def add_usage(
+        self,
+        task_run: TaskRun,
+        *,
+        llm_call_count: int = 0,
+        llm_input_tokens: int = 0,
+        llm_output_tokens: int = 0,
+        tts_character_count: int = 0,
+    ) -> TaskRun:
+        """Accumulate committed per-step provider usage into the TaskRun audit totals."""
+        task_run.llm_call_count += llm_call_count
+        task_run.llm_input_tokens += llm_input_tokens
+        task_run.llm_output_tokens += llm_output_tokens
+        task_run.tts_character_count += tts_character_count
+        task_run.updated_at = utc_now()
+        self._session.flush()
+        return task_run
+
     def update_status(
         self, task_run: TaskRun, status: TaskRunStatus | str, **changes: Any
     ) -> TaskRun:
@@ -341,6 +388,27 @@ class TaskStepRepository:
             .order_by(TaskStep.step_order, TaskStep.attempt, TaskStep.id)
         )
         return list(self._session.scalars(statement))
+
+    def list_by_task_run_ids(self, task_run_ids: tuple[str, ...]) -> list[TaskStep]:
+        """Return historical checkpoint attempts for a recovery lineage in durable order."""
+        if not task_run_ids:
+            return []
+        statement = (
+            select(TaskStep)
+            .where(TaskStep.task_run_id.in_(task_run_ids))
+            .order_by(TaskStep.task_run_id, TaskStep.step_order, TaskStep.attempt, TaskStep.id)
+        )
+        return list(self._session.scalars(statement))
+
+    def next_attempt(self, task_run_id: str, step_name: str) -> int:
+        """Return the next durable attempt number for a logical checkpoint."""
+        maximum = self._session.scalar(
+            select(func.max(TaskStep.attempt)).where(
+                TaskStep.task_run_id == task_run_id,
+                TaskStep.step_name == step_name,
+            )
+        )
+        return int(maximum or 0) + 1
 
     def finish(
         self,
