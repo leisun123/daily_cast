@@ -191,6 +191,7 @@ def build_lifespan(
                         settings.editorial.max_automatic_script_revisions
                     ),
                 ),
+                artifact_roots=(settings.data_dir, settings.public_dir),
             )
             executor = InProcessTaskExecutor(session_factory, orchestrator)
             publication_service.reconcile()

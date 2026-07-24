@@ -50,10 +50,12 @@ class PipelineOrchestrator:
         steps: Sequence[PipelineStep],
         *,
         clock: Clock | None = None,
+        artifact_roots: Sequence[Path] = (),
     ) -> None:
         self._session_factory = session_factory
         self._steps = tuple(steps)
         self._clock = clock or Clock()
+        self._artifact_roots = tuple(root.resolve() for root in artifact_roots)
 
     async def execute(
         self, task_run_id: str, shutdown_requested: asyncio.Event | None = None
@@ -322,12 +324,19 @@ class PipelineOrchestrator:
             persisted = completed.get(step.name)
             if persisted is None:
                 break
-            checkpoint = _checkpoint_mapping(persisted.checkpoint_json)
+            checkpoint = _validated_recovery_checkpoint(
+                context, step, persisted, self._artifact_roots
+            )
+            if checkpoint is None:
+                break
             restorer = getattr(step, "restore_checkpoint", None)
-            if callable(restorer):
-                restored = restorer(context, checkpoint) is not False
-            else:
-                restored = _restore_generic_checkpoint(context, step.name, checkpoint)
+            try:
+                if callable(restorer):
+                    restored = restorer(context, checkpoint) is not False
+                else:
+                    restored = _restore_generic_checkpoint(context, step.name, checkpoint)
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+                restored = False
             if not restored:
                 break
             warning_count += int(persisted.warning_count)
@@ -423,15 +432,63 @@ def _is_expired(deadline_at: datetime | None, now: datetime) -> bool:
     return deadline <= current
 
 
-def _checkpoint_mapping(raw: str | None) -> dict[str, object]:
-    """Treat malformed legacy checkpoint JSON as empty rather than reusing unsafe state."""
+def _validated_recovery_checkpoint(
+    context: PipelineContext,
+    step: PipelineStep,
+    persisted: TaskStep,
+    artifact_roots: Sequence[Path],
+) -> dict[str, object] | None:
+    """Return a checkpoint only when its recorded output still proves safe to reuse."""
+    if persisted.status not in {TaskStepStatus.SUCCEEDED, TaskStepStatus.SUCCEEDED_WITH_WARNINGS}:
+        return None
+    checkpoint = _checkpoint_mapping(persisted.checkpoint_json)
+    if checkpoint is None:
+        return None
+    if persisted.artifact_path is not None and not _artifact_exists(
+        persisted.artifact_path, artifact_roots
+    ):
+        return None
+    expected_fingerprint = _expected_output_fingerprint(step, context, checkpoint)
+    if expected_fingerprint is not None and expected_fingerprint != persisted.output_fingerprint:
+        return None
+    return checkpoint
+
+
+def _checkpoint_mapping(raw: str | None) -> dict[str, object] | None:
+    """Reject absent or malformed checkpoint JSON instead of treating it as reusable state."""
     if raw is None:
-        return {}
+        return None
     try:
         value = json.loads(raw)
     except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _artifact_exists(artifact_path: str, artifact_roots: Sequence[Path]) -> bool:
+    """Require a declared output to remain a regular file below an explicit controlled root."""
+    relative = Path(artifact_path)
+    if relative.is_absolute():
+        return False
+    for root in artifact_roots:
+        candidate = (root / relative).resolve()
+        if candidate.is_relative_to(root) and candidate.is_file():
+            return True
+    return False
+
+
+def _expected_output_fingerprint(
+    step: PipelineStep, context: PipelineContext, checkpoint: dict[str, object]
+) -> str | None:
+    """Ask steps to prove that a fingerprinted historical output is still current."""
+    resolver = getattr(step, "expected_output_fingerprint", None)
+    if not callable(resolver):
+        return None
+    try:
+        fingerprint = resolver(context, checkpoint)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return ""
+    return fingerprint if isinstance(fingerprint, str) and fingerprint else ""
 
 
 def _restore_generic_checkpoint(

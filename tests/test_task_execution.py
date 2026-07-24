@@ -1025,6 +1025,179 @@ def test_checkpoint_recovery_replays_artifact_producing_steps_in_the_child_run(
     assert outlining.artifact_run_id == child_id
 
 
+def test_checkpoint_recovery_reruns_when_a_recorded_artifact_is_missing(
+    migrated_session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A successful historical row cannot skip work after its declared output disappears."""
+
+    class RestorableStep:
+        name = "restorable"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, context: PipelineContext) -> StepResult:
+            self.calls += 1
+            context.values["restorable_output"] = "rerun"
+            return StepResult(checkpoint_json='{"result":"rerun"}')
+
+        def restore_checkpoint(
+            self, context: PipelineContext, checkpoint: dict[str, object]
+        ) -> bool:
+            context.values["restorable_output"] = checkpoint["result"]
+            return True
+
+    class DownstreamStep:
+        name = "downstream"
+
+        async def run(self, context: PipelineContext) -> StepResult:
+            assert context.values["restorable_output"] == "rerun"
+            return StepResult(checkpoint_json="{}")
+
+    now = datetime.now(UTC)
+    parent_id = str(uuid4())
+    child_id = str(uuid4())
+    with UnitOfWork(migrated_session_factory) as unit:
+        assert unit.session is not None
+        runs = TaskRunRepository(unit.session)
+        parent = runs.create(
+            id=parent_id,
+            task_type=TaskType.DAILY_GENERATE,
+            business_key="daily:2026-07-13:daily:test-v1",
+            idempotency_key="missing-artifact-parent",
+            trigger_type=TriggerType.MANUAL,
+            status=TaskRunStatus.INTERRUPTED,
+            pipeline_version="test-v1",
+            config_fingerprint="a" * 64,
+            config_snapshot_json="{}",
+            request_json='{"edition":"daily","episode_date":"2026-07-13"}',
+            created_at=now - timedelta(minutes=2),
+            updated_at=now - timedelta(minutes=1),
+        )
+        runs.create(
+            id=child_id,
+            task_type=TaskType.DAILY_GENERATE,
+            business_key=parent.business_key,
+            idempotency_key="missing-artifact-child",
+            trigger_type=TriggerType.RETRY,
+            status=TaskRunStatus.QUEUED,
+            parent_task_run_id=parent.id,
+            pipeline_version="test-v1",
+            config_fingerprint="a" * 64,
+            config_snapshot_json="{}",
+            request_json=parent.request_json,
+            created_at=now,
+            updated_at=now,
+        )
+        TaskStepRepository(unit.session).create(
+            task_run_id=parent.id,
+            step_name="restorable",
+            step_order=1,
+            attempt=1,
+            status=TaskStepStatus.SUCCEEDED,
+            checkpoint_json='{"result":"restored"}',
+            details_json="{}",
+            artifact_path="work/missing.json",
+        )
+
+    restorable = RestorableStep()
+    completed = asyncio.run(
+        PipelineOrchestrator(
+            migrated_session_factory,
+            (restorable, DownstreamStep()),
+            artifact_roots=(tmp_path,),
+        ).execute(child_id)
+    )
+
+    assert completed is not None
+    assert completed.status is TaskRunStatus.SUCCEEDED
+    assert restorable.calls == 1
+
+
+def test_checkpoint_recovery_reruns_when_output_fingerprint_no_longer_matches(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A restorer must rerun its checkpoint when current output identity differs from history."""
+
+    class FingerprintedStep:
+        name = "fingerprinted"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, context: PipelineContext) -> StepResult:
+            self.calls += 1
+            context.values["fingerprinted_output"] = "current"
+            return StepResult(checkpoint_json='{"result":"current"}')
+
+        def restore_checkpoint(
+            self, context: PipelineContext, checkpoint: dict[str, object]
+        ) -> bool:
+            context.values["fingerprinted_output"] = checkpoint["result"]
+            return True
+
+        def expected_output_fingerprint(
+            self, context: PipelineContext, checkpoint: dict[str, object]
+        ) -> str:
+            del context, checkpoint
+            return "current-fingerprint"
+
+    now = datetime.now(UTC)
+    parent_id = str(uuid4())
+    child_id = str(uuid4())
+    with UnitOfWork(migrated_session_factory) as unit:
+        assert unit.session is not None
+        runs = TaskRunRepository(unit.session)
+        parent = runs.create(
+            id=parent_id,
+            task_type=TaskType.DAILY_GENERATE,
+            business_key="daily:2026-07-12:daily:test-v1",
+            idempotency_key="fingerprint-parent",
+            trigger_type=TriggerType.MANUAL,
+            status=TaskRunStatus.INTERRUPTED,
+            pipeline_version="test-v1",
+            config_fingerprint="a" * 64,
+            config_snapshot_json="{}",
+            request_json='{"edition":"daily","episode_date":"2026-07-12"}',
+            created_at=now - timedelta(minutes=2),
+            updated_at=now - timedelta(minutes=1),
+        )
+        runs.create(
+            id=child_id,
+            task_type=TaskType.DAILY_GENERATE,
+            business_key=parent.business_key,
+            idempotency_key="fingerprint-child",
+            trigger_type=TriggerType.RETRY,
+            status=TaskRunStatus.QUEUED,
+            parent_task_run_id=parent.id,
+            pipeline_version="test-v1",
+            config_fingerprint="a" * 64,
+            config_snapshot_json="{}",
+            request_json=parent.request_json,
+            created_at=now,
+            updated_at=now,
+        )
+        TaskStepRepository(unit.session).create(
+            task_run_id=parent.id,
+            step_name="fingerprinted",
+            step_order=1,
+            attempt=1,
+            status=TaskStepStatus.SUCCEEDED,
+            checkpoint_json='{"result":"historical"}',
+            details_json="{}",
+            output_fingerprint="historical-fingerprint",
+        )
+
+    fingerprinted = FingerprintedStep()
+    completed = asyncio.run(
+        PipelineOrchestrator(migrated_session_factory, (fingerprinted,)).execute(child_id)
+    )
+
+    assert completed is not None
+    assert completed.status is TaskRunStatus.SUCCEEDED
+    assert fingerprinted.calls == 1
+
+
 def test_orchestrator_persists_step_and_task_provider_usage(
     migrated_session_factory: sessionmaker[Session],
 ) -> None:
