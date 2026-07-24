@@ -517,9 +517,9 @@ def _classify_error(error: Exception) -> tuple[str, bool]:
     """Persist a specific stable code and conservative retryability for pipeline failures."""
     if isinstance(error, DailyCastError):
         return error.code, error.retryable
-    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
+    if isinstance(error, TimeoutError | ConnectionError | OSError):
         return "PIPELINE_TRANSIENT_INFRASTRUCTURE_ERROR", True
-    if isinstance(error, (ValueError, LookupError, TypeError)):
+    if isinstance(error, ValueError | LookupError | TypeError):
         return "PIPELINE_INPUT_INVALID", False
     return "PIPELINE_UNEXPECTED_ERROR", False
 
