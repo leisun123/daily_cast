@@ -32,6 +32,7 @@ from dailycast.db.transactions import UnitOfWork
 
 logger = logging.getLogger(__name__)
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+PODCAST_COVER_PATH = Path(__file__).resolve().parents[2] / "assets" / "dailycast-cover.png"
 
 
 def get_runtime(request: Request) -> AppRuntime:
@@ -212,6 +213,14 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="RSS feed is not published")
         return FileResponse(feed_path, media_type="application/rss+xml; charset=utf-8")
 
+    @app.api_route("/cover.png", methods=["GET", "HEAD"], tags=["public"])
+    async def cover(runtime: RuntimeDependency) -> FileResponse:
+        """Serve the stable channel artwork referenced by the public podcast Feed."""
+        _require_ready(runtime)
+        if not PODCAST_COVER_PATH.is_file():
+            raise HTTPException(status_code=404, detail="podcast cover is not available")
+        return FileResponse(PODCAST_COVER_PATH, media_type="image/png")
+
     @app.api_route(
         "/media/episodes/{episode_public_id}/{asset_filename}.mp3",
         methods=["GET", "HEAD"],
@@ -267,7 +276,9 @@ app = create_app()
 
 def _is_public_deployment_path(path: str) -> bool:
     """Allow only diagnostics and immutable podcast resources on an unauthenticated domain."""
-    return path in {"/healthz", "/readyz", "/feed.xml"} or path.startswith("/media/episodes/")
+    return path in {"/healthz", "/readyz", "/feed.xml", "/cover.png"} or path.startswith(
+        "/media/episodes/"
+    )
 
 
 def _require_ready(runtime: AppRuntime) -> None:
