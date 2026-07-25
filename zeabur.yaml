@@ -95,6 +95,22 @@ spec:
             default: "true"
           DAILYCAST_PUBLISHING__PUBLIC_BASE_URL:
             default: ${ZEABUR_WEB_URL}
+          DAILYCAST_PUBLISHING__RSS__ENABLED:
+            default: "true"
+          DAILYCAST_PUBLISHING__NETEASE__ENABLED:
+            default: "false"
+          DAILYCAST_PUBLISHING__NETEASE__PROFILE_DIR:
+            default: netease/profile
+          DAILYCAST_PUBLISHING__NETEASE__STORAGE_STATE_PATH:
+            default: netease/storage-state.json
+          DAILYCAST_PUBLISHING__NETEASE__HEADLESS:
+            default: "true"
+          DAILYCAST_PUBLISHING__NETEASE__CREATOR_URL:
+            default: https://musicupload.netease.com/
+          DAILYCAST_PUBLISHING__NETEASE__CATEGORY:
+            default: 科技
+          DAILYCAST_PUBLISHING__XIAOYUZHOU__ENABLED:
+            default: "false"
           DAILYCAST_UID:
             default: "1000"
           DAILYCAST_GID:

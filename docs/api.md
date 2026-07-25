@@ -622,6 +622,19 @@ V1 只允许已配置的 RSS target。Publisher 类型由 target 配置确定，
 - 常见错误：`404 PUBLICATION_NOT_FOUND`。
 - 幂等键：不需要。
 
+### 8.3 恢复单个平台发布
+
+- 方法/路径：`POST /episodes/{episode_id}/publications/{platform}/resume`
+- Path：`platform` 为 `rss`、`netease` 或 `xiaoyuzhou`，且必须在当前配置中启用。
+- 请求体：无。
+- 返回：PublicationTarget 的 `id`、`episode_id`、`platform`、`status`、
+  `remote_id`、`remote_url`、`last_error`、`attempt_count`。
+- 语义：只执行指定 Publisher 的恢复逻辑，不重新采集新闻、不重新生成稿件或音频，
+  也不重发其他已成功平台。网易云恢复会先按远端身份/精确标题 reconcile，再决定上传。
+- 常见错误：`404`（公网只读模式隐藏管理路由）、`409`（平台未启用或 Episode 不存在）、
+  返回 `needs_attention`（登录失效、验证码、页面改版）。
+- 幂等键：不需要；`(episode_id, platform)` 唯一行和远端 reconcile 提供幂等边界。
+
 ## 9. RSS 与公开静态音频
 
 ### 9.1 获取 RSS Feed

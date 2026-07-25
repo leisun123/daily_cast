@@ -14,6 +14,8 @@ DailyCast is a self-hosted, single-process Python application for producing a re
 - Configurable TTS generation with resumable audio-segment caching
 - FFmpeg audio assembly into a checksum-verified draft MP3
 - Immutable public audio assets and self-hosted RSS podcast publishing
+- Independent multi-platform delivery state with failure isolation
+- Optional NetEase Cloud Music creator upload through Playwright
 - Docker Compose deployment with SQLite migrations and health checks
 
 ## Architecture
@@ -24,8 +26,11 @@ flowchart LR
     N --> E["Editorial Pipeline\nRank · Evidence · Outline · Script · Check"]
     E --> EP["Episode\nReview-gated Draft"]
     EP --> T["TTS\nSegment Cache · FFmpeg Merge"]
-    T --> P["RSS Publisher\nImmutable Media"]
-    P --> F["RSS Feed"]
+    T --> P["Publication Dispatcher"]
+    P --> R["RSS Publisher\nImmutable Media"]
+    P --> W["NetEase Playwright\nOptional RPA"]
+    P --> X["Xiaoyuzhou\nRSS Claim State"]
+    R --> F["RSS Feed"]
 ```
 
 ## Current Status
@@ -40,6 +45,7 @@ Completed:
 - [x] Script generation
 - [x] TTS generation
 - [x] RSS publishing
+- [x] Optional NetEase Playwright publishing
 - [x] Docker deployment
 
 The Alpha example configuration records every validation/review finding while setting
@@ -103,6 +109,49 @@ key, so repeated ticks and restarts do not create a duplicate daily TaskRun or E
 
 For a non-loopback public Feed, configure an explicit HTTPS `DAILYCAST_PUBLISHING__PUBLIC_BASE_URL` and expose only the intended Feed/media paths through your reverse proxy or static hosting setup.
 
+### NetEase Cloud Music
+
+NetEase delivery is opt-in and uses only the official creator website. DailyCast never
+stores a username or password and never calls reverse-engineered APIs. Enable it after
+an RSS publication is working:
+
+```dotenv
+DAILYCAST_PUBLISHING__RSS__ENABLED=true
+DAILYCAST_PUBLISHING__NETEASE__ENABLED=true
+DAILYCAST_PUBLISHING__NETEASE__PROFILE_DIR=netease/profile
+DAILYCAST_PUBLISHING__NETEASE__HEADLESS=true
+```
+
+The Chromium profile is stored under `DATA_DIR/netease/profile` and must be kept on a
+persistent, private volume. Establish the first login on a trusted computer:
+
+```bash
+poetry run playwright install chromium
+poetry run dailycast-netease-login
+```
+
+This opens the official creator site in a headed Chromium window and waits for you to scan
+or complete the normal login. It writes a portable
+`DATA_DIR/netease/storage-state.json` with mode `0600`; that file is an account credential.
+Transfer it to the same private path in the production persistent volume using your hosting
+provider's secure file tooling. Never commit it, paste it into logs, or place it under
+`PUBLIC_DIR`.
+
+The first production run, an expired login, a captcha, or an unrecognized page puts only
+the NetEase target into `needs_attention`; RSS and the generated Episode remain valid.
+After renewing the official login state, resume only NetEase:
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/episodes/<episode-id>/publications/netease/resume
+```
+
+The login and resume routes are operator operations and are intentionally hidden when
+`app.public_only=true`. Do not expose it without external authentication. Playwright
+selectors are covered by mocked contract tests, but the platform can change its page at
+any time; DailyCast stops with `NETEASE_PAGE_CHANGED` instead of guessing or bypassing
+security controls.
+
 ### Zeabur
 
 `zeabur.yaml` is a one-service deployment resource whose source is the public GitHub repository's
@@ -115,6 +164,10 @@ password variable and must never be committed. The template enables `app.public_
 public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
 `/media/episodes/...` assets. Management pages and `POST /generate` return `404`; production
 generation is driven by the durable scheduler.
+
+When NetEase is enabled, both `netease/profile` and `netease/storage-state.json` live below
+the existing `/app/data` persistent volume. Upload the state file through a private
+administrative channel before enabling the target; it is never part of the GitHub deployment.
 
 Deploy into a selected Zeabur project with:
 
@@ -149,14 +202,17 @@ DAILYCAST_RUN_DOCKER_TEST=1 poetry run pytest -q tests/integration/test_docker_s
 ## Roadmap
 
 - [x] Alpha pipeline
+- [x] Multi-platform publication dispatcher
+- [x] NetEase Playwright publisher
 - [ ] Web dashboard
 - [ ] Zeabur one-click deployment
 - [ ] Dify workflow provider
 - [ ] n8n integration
-- [ ] RPA publisher
+- [ ] Additional API/RPA publishers
 - [ ] Multi-model support
 
-The Alpha does not include a web dashboard, Dify, n8n, RPA publishing, multi-user accounts, or SaaS functionality.
+The project does not include a web dashboard, Dify, n8n, multi-user accounts, or SaaS
+functionality. NetEase RPA is optional and never participates in generation.
 
 ## License
 
