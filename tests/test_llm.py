@@ -427,6 +427,48 @@ def test_openai_compatible_provider_requests_json_schema_output() -> None:
     assert result.request_id == "provider-request"
 
 
+def test_openai_compatible_json_object_embeds_schema_contract() -> None:
+    """JSON-only Chat Completions gateways receive the local output contract."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"score":7}'}}]},
+        )
+
+    async def scenario() -> StructuredResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICompatibleLLMProvider(
+                base_url="https://models.example/v1",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=30,
+                response_format="json_object",
+                http_client=client,
+            )
+            return await provider.generate_structured(
+                LLMOperation.SCORE_EVENTS,
+                (LLMMessage(role="user", content="Score this."),),
+                ScoreOutput,
+                {},
+            )
+
+    result = asyncio.run(scenario())
+
+    request = captured["request"]
+    assert isinstance(request, httpx.Request)
+    payload = json.loads(request.content)
+    contract = payload["messages"][0]["content"]
+    assert payload["response_format"] == {"type": "json_object"}
+    assert "Structured output contract" in contract
+    assert '"score"' in contract
+    assert result.content == {"score": 7}
+
+
 def test_openai_responses_provider_requests_json_schema_and_reads_output_text() -> None:
     """Responses requests use input/text.format and ignore non-message output items."""
     captured: dict[str, object] = {}

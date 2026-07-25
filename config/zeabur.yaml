@@ -3,7 +3,7 @@
 app:
   environment: production
   timezone: Asia/Shanghai
-  public_only: false
+  public_only: true
   server:
     host: 0.0.0.0
     port: 8000
@@ -23,6 +23,7 @@ scheduler:
 # rather than the OpenAI-specific json_schema response format.
 llm:
   response_format: json_object
+  timeout_seconds: 120
 
 editorial:
   enforce_quality_gate: false

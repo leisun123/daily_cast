@@ -97,6 +97,7 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.editorial.enforce_quality_gate is False
     assert settings.publishing.auto_publish is True
     assert settings.llm.response_format == "json_object"
+    assert settings.llm.timeout_seconds == 120
 
 
 def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path(
