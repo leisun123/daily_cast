@@ -98,6 +98,11 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.publishing.auto_publish is True
     assert settings.llm.response_format == "json_object"
     assert settings.llm.timeout_seconds == 120
+    # DeepSeek reasoning plus real event-card and evidence-dossier prompts
+    # exceeded lower ceilings and returned truncated JSON. Keep room for one
+    # schema-repair call on top of the five normal Alpha editorial calls.
+    assert settings.llm.max_output_tokens == 8192
+    assert settings.llm.budget.max_output_tokens == 49_152
 
 
 def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path(
