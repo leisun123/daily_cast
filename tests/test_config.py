@@ -98,6 +98,53 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.publishing.auto_publish is True
 
 
+def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deployed pre-template service upgrades to the checked-in Zeabur defaults."""
+    monkeypatch.setenv("ZEABUR_WEB_URL", "https://dailycast.example")
+    monkeypatch.setenv("DAILYCAST_CONFIG_PATH", "/app/config/app.example.yaml")
+
+    settings = load_settings(env_file=tmp_path / "absent.env")
+
+    assert settings.app.environment == "production"
+    assert settings.app.public_only is True
+    assert settings.scheduler.enabled is True
+
+
+def test_unresolved_native_llm_placeholders_fall_back_to_existing_legacy_values(
+    app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A literal Zeabur template reference never overrides a real inherited setting."""
+    monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "${LLM_PROVIDER}")
+    monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "${LLM_BASE_URL}")
+    monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "${LLM_API_KEY}")
+    monkeypatch.setenv("LLM_PROVIDER", "openai_responses")
+    monkeypatch.setenv("LLM_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("LLM_API_KEY", "existing-secret")
+
+    settings = load_settings(config_path=app_config_path, env_file=tmp_path / "absent.env")
+
+    assert settings.llm.provider == "openai_responses"
+    assert settings.llm.base_url == "https://gateway.example/v1"
+    assert settings.llm.api_key == "existing-secret"
+
+
+def test_real_native_llm_values_take_precedence_over_legacy_compatibility_values(
+    app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh deployments stay on the documented native DailyCast variable names."""
+    monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "openai_compatible")
+    monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "https://native.example/v1")
+    monkeypatch.setenv("LLM_PROVIDER", "openai_responses")
+    monkeypatch.setenv("LLM_BASE_URL", "https://legacy.example/v1")
+
+    settings = load_settings(config_path=app_config_path, env_file=tmp_path / "absent.env")
+
+    assert settings.llm.provider == "openai_compatible"
+    assert settings.llm.base_url == "https://native.example/v1"
+
+
 def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:
     """Deployments must opt in to Alpha relaxation rather than inherit it silently."""
     assert EditorialSettings().enforce_quality_gate is True

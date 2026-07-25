@@ -136,11 +136,17 @@ public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
 `/media/episodes/...` assets plus `/cover.png`. Management pages and `POST /generate` return `404`; production
 generation is driven by the durable scheduler.
 
-Use only the four application-native LLM variable names in Zeabur:
+New Zeabur deployments use only the four application-native LLM variable names:
 `DAILYCAST_LLM__PROVIDER`, `DAILYCAST_LLM__BASE_URL`, `DAILYCAST_LLM__MODEL`, and the
-password variable `DAILYCAST_LLM__API_KEY`. Older `LLM_PROVIDER`, `LLM_BASE_URL`,
-`LLM_MODEL`, and `LLM_API_KEY` rows are not read by DailyCast and should be removed from an
-existing service after confirming the corresponding `DAILYCAST_LLM__*` values are present.
+password variable `DAILYCAST_LLM__API_KEY`.
+
+Some older services contain literal values such as `${LLM_BASE_URL}` in the corresponding
+`DAILYCAST_LLM__*` rows plus real values in older `LLM_*` rows. This is an old template
+expansion mistake, not a request to copy a secret by hand. Current DailyCast releases ignore
+those literal placeholders and automatically use the existing legacy value as a temporary
+migration fallback. Deploy this release first; the placeholder rows are harmless and can be
+removed later without re-entering the API key. Fresh deployments never create the duplicate
+`LLM_*` rows.
 
 Deploy into a selected Zeabur project with:
 

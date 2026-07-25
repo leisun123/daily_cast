@@ -1,6 +1,8 @@
 """Pydantic Settings loader with YAML, .env, and environment overrides."""
 
 import os
+import re
+from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal
@@ -16,10 +18,20 @@ from dailycast.core.errors import ConfigurationError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.example.yaml"
+ZEABUR_CONFIG_PATH = PROJECT_ROOT / "config" / "zeabur.yaml"
 _yaml_path_context: ContextVar[Path] = ContextVar(
     "dailycast_yaml_path", default=DEFAULT_CONFIG_PATH
 )
 _env_file_context: ContextVar[Path | None] = ContextVar("dailycast_env_file_path", default=None)
+
+_UNRESOLVED_TEMPLATE_REFERENCE = re.compile(r"^\$\{[A-Z][A-Z0-9_]*\}$")
+_LLM_TEMPLATE_COMPATIBILITY_FIELDS = frozenset({"provider", "base_url", "model", "api_key"})
+_LEGACY_LLM_ENVIRONMENT_NAMES = {
+    "LLM_PROVIDER": "provider",
+    "LLM_BASE_URL": "base_url",
+    "LLM_MODEL": "model",
+    "LLM_API_KEY": "api_key",
+}
 
 
 class ServerSettings(BaseModel):
@@ -264,6 +276,76 @@ class DirectStoragePathSettingsSource(PydanticBaseSettingsSource):
         return self._values
 
 
+def _is_unresolved_template_reference(value: Any) -> bool:
+    """Return whether a deployment persisted an unexpanded `${VARIABLE}` literal."""
+    return isinstance(value, str) and _UNRESOLVED_TEMPLATE_REFERENCE.fullmatch(value) is not None
+
+
+class UnresolvedTemplateFilteringSettingsSource(PydanticBaseSettingsSource):
+    """Discard unresolved LLM placeholder literals before validation and source merging."""
+
+    def __init__(
+        self,
+        settings_cls: type[BaseSettings],
+        delegate: PydanticBaseSettingsSource,
+    ) -> None:
+        super().__init__(settings_cls)
+        self._delegate = delegate
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        """Delegate normal Pydantic field loading to the wrapped source."""
+        return self._delegate.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        """Remove only `${NAME}` values from LLM settings, preserving all real overrides."""
+        values = self._delegate()
+        llm_values = values.get("llm")
+        if not isinstance(llm_values, dict):
+            return values
+
+        sanitized_llm = {
+            field_name: value
+            for field_name, value in llm_values.items()
+            if not (
+                field_name in _LLM_TEMPLATE_COMPATIBILITY_FIELDS
+                and _is_unresolved_template_reference(value)
+            )
+        }
+        if sanitized_llm == llm_values:
+            return values
+
+        sanitized_values = dict(values)
+        sanitized_values["llm"] = sanitized_llm
+        return sanitized_values
+
+
+class LegacyLLMSettingsSource(PydanticBaseSettingsSource):
+    """Read old bare LLM names only as a temporary Zeabur migration fallback."""
+
+    def __init__(
+        self,
+        settings_cls: type[BaseSettings],
+        values: Mapping[str, str | None],
+    ) -> None:
+        super().__init__(settings_cls)
+        llm_values = {
+            setting_name: raw_value
+            for environment_name, setting_name in _LEGACY_LLM_ENVIRONMENT_NAMES.items()
+            if (raw_value := values.get(environment_name)) is not None
+            and not _is_unresolved_template_reference(raw_value)
+        }
+        self._values: dict[str, Any] = {"llm": llm_values} if llm_values else {}
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        """Return legacy values through Pydantic's normal field preparation."""
+        del field
+        return self._values.get(field_name), field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        """Provide legacy fields only when a higher-priority native value is absent."""
+        return self._values
+
+
 class Settings(BaseSettings):
     """Immutable application configuration after source precedence is resolved."""
 
@@ -299,11 +381,15 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Apply explicit values, environment, .env, then YAML defaults in that order."""
+        dotenv_path = _env_file_context.get()
+        dotenv_values_map = dotenv_values(dotenv_path) if dotenv_path is not None else {}
         return (
             init_settings,
-            env_settings,
+            UnresolvedTemplateFilteringSettingsSource(settings_cls, env_settings),
+            LegacyLLMSettingsSource(settings_cls, os.environ),
             DirectStoragePathSettingsSource(settings_cls),
-            dotenv_settings,
+            UnresolvedTemplateFilteringSettingsSource(settings_cls, dotenv_settings),
+            LegacyLLMSettingsSource(settings_cls, dotenv_values_map),
             YamlSettingsSource(settings_cls, _yaml_path_context.get()),
             file_secret_settings,
         )
@@ -329,6 +415,11 @@ def _resolve_yaml_path(config_path: Path | None, env_file: Path | None) -> Path:
     dotenv_path = env_file or (Path.cwd() / ".env")
     dotenv_config_path = dotenv_values(dotenv_path).get("DAILYCAST_CONFIG_PATH")
     configured_path = os.environ.get("DAILYCAST_CONFIG_PATH", dotenv_config_path)
+    if os.environ.get("ZEABUR_WEB_URL") and configured_path in {
+        None,
+        "/app/config/app.example.yaml",
+    }:
+        return ZEABUR_CONFIG_PATH
     if configured_path is None:
         return DEFAULT_CONFIG_PATH
     path = Path(configured_path)
