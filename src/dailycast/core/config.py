@@ -29,6 +29,9 @@ _LLM_ENVIRONMENT_NAMES = {
     "LLM_MODEL": "model",
     "LLM_API_KEY": "api_key",
 }
+_CANONICAL_LLM_DOTENV_KEYS = frozenset(
+    f"llm_{field_name}" for field_name in _LLM_ENVIRONMENT_NAMES.values()
+)
 
 
 class ServerSettings(BaseModel):
@@ -291,10 +294,10 @@ class DailyCastWithoutLLMSettingsSource(PydanticBaseSettingsSource):
     def __call__(self) -> dict[str, Any]:
         """Remove every nested `llm` value from the DAILYCAST_* source."""
         values = self._delegate()
-        if "llm" not in values:
-            return values
         sanitized_values = dict(values)
-        del sanitized_values["llm"]
+        sanitized_values.pop("llm", None)
+        for key in _CANONICAL_LLM_DOTENV_KEYS:
+            sanitized_values.pop(key, None)
         return sanitized_values
 
 

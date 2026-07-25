@@ -132,6 +132,34 @@ def test_llm_settings_use_canonical_llm_names_when_dailycast_values_are_placehol
     assert settings.llm.api_key == "existing-secret"
 
 
+def test_llm_settings_load_canonical_names_from_dotenv(
+    app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local .env files use the same LLM_* interface as deployment environment variables."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "LLM_PROVIDER=openai_compatible",
+                "LLM_BASE_URL=https://api.deepseek.example",
+                "LLM_MODEL=deepseek-test",
+                "LLM_API_KEY=test-secret",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    for name in ("LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = load_settings(config_path=app_config_path, env_file=env_file)
+
+    assert settings.llm.provider == "openai_compatible"
+    assert settings.llm.base_url == "https://api.deepseek.example"
+    assert settings.llm.model == "deepseek-test"
+    assert settings.llm.api_key == "test-secret"
+
+
 def test_dailycast_llm_values_are_ignored_in_favor_of_canonical_llm_names(
     app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
