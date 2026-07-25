@@ -54,44 +54,9 @@ spec:
           DAILYCAST_CONFIG_PATH:
             default: /app/config/zeabur.yaml
             readonly: true
-        configs:
-          - path: /app/config/zeabur.yaml
-            permission: 420
-            envsubst: true
-            template: |-
-              app:
-                environment: production
-                timezone: Asia/Shanghai
-                public_only: true
-                server:
-                  host: 0.0.0.0
-                  port: 8000
-
-              scheduler:
-                enabled: true
-                cron_expression: "0 6 * * *"
-
-              llm:
-                provider: openai_responses
-                model: gpt-5.6-terra
-
-              editorial:
-                enforce_quality_gate: false
-
-              publishing:
-                auto_publish: true
-                public_base_url: ${ZEABUR_WEB_URL}
-                rss:
-                  enabled: true
-                netease:
-                  enabled: true
-                  profile_dir: netease/profile
-                  storage_state_path: netease/storage-state.json
-                  headless: true
-                  creator_url: https://musicupload.netease.com/
-                  category: 科技
-                xiaoyuzhou:
-                  enabled: false
+          DAILYCAST_PUBLISHING__PUBLIC_BASE_URL:
+            default: ${ZEABUR_WEB_URL}
+            readonly: true
         instructions:
           - title: RSS Feed
             content: ${ZEABUR_WEB_URL}/feed.xml

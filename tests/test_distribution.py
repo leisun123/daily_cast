@@ -877,7 +877,9 @@ def test_zeabur_template_persists_netease_profile_and_documents_target_settings(
     project_root = Path(__file__).resolve().parents[1]
     template = yaml.safe_load((project_root / "zeabur.yaml").read_text(encoding="utf-8"))
     service_spec = template["spec"]["services"][0]["spec"]
-    runtime_config = yaml.safe_load(service_spec["configs"][0]["template"])
+    runtime_config = yaml.safe_load(
+        (project_root / "config" / "zeabur.yaml").read_text(encoding="utf-8")
+    )
     netease = runtime_config["publishing"]["netease"]
 
     assert {"id": "data", "dir": "/app/data"} in service_spec["volumes"]

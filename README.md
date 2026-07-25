@@ -169,7 +169,7 @@ service.
 
 During deployment, maintain only three inputs: `PUBLIC_DOMAIN`,
 `DAILYCAST_LLM__BASE_URL`, and `DAILYCAST_LLM__API_KEY`. Provider, model, schedule,
-paths, TTS, RSS, and NetEase defaults live in one generated non-secret YAML configuration
+paths, TTS, RSS, and NetEase defaults live in one versioned non-secret YAML configuration
 instead of being duplicated as environment variables. `PORT` and `PASSWORD` are
 Zeabur-provided service variables rather than DailyCast settings. The API key is a Zeabur
 password variable and must never be committed. The template enables `app.public_only`, so

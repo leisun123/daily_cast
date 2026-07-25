@@ -54,14 +54,17 @@ def test_zeabur_template_uses_github_and_persistent_runtime_volumes() -> None:
         "DAILYCAST_CONFIG_PATH": {
             "default": "/app/config/zeabur.yaml",
             "readonly": True,
-        }
+        },
+        "DAILYCAST_PUBLISHING__PUBLIC_BASE_URL": {
+            "default": "${ZEABUR_WEB_URL}",
+            "readonly": True,
+        },
     }
 
-    runtime_config = spec["configs"][0]
-    assert runtime_config["path"] == "/app/config/zeabur.yaml"
-    assert runtime_config["envsubst"] is True
-    assert runtime_config["permission"] == 420
-    parsed_config = yaml.safe_load(runtime_config["template"])
+    assert "configs" not in spec
+    parsed_config = yaml.safe_load(
+        (Path(__file__).parents[1] / "config" / "zeabur.yaml").read_text(encoding="utf-8")
+    )
     assert parsed_config["app"]["public_only"] is True
     assert parsed_config["scheduler"] == {
         "enabled": True,
@@ -71,7 +74,6 @@ def test_zeabur_template_uses_github_and_persistent_runtime_volumes() -> None:
         "provider": "openai_responses",
         "model": "gpt-5.6-terra",
     }
-    assert parsed_config["publishing"]["public_base_url"] == "${ZEABUR_WEB_URL}"
     assert parsed_config["publishing"]["auto_publish"] is True
     assert parsed_config["publishing"]["rss"]["enabled"] is True
     assert parsed_config["publishing"]["netease"]["enabled"] is True
@@ -99,15 +101,12 @@ def test_generated_zeabur_config_combines_three_inputs_with_yaml_defaults(
 ) -> None:
     """The compact deployment contract must still construct complete runtime settings."""
     project_root = Path(__file__).parents[1]
-    resource = yaml.safe_load((project_root / "zeabur.yaml").read_text(encoding="utf-8"))
-    config_template = resource["spec"]["services"][0]["spec"]["configs"][0]["template"]
+    config_template = (project_root / "config" / "zeabur.yaml").read_text(encoding="utf-8")
     config_path = tmp_path / "zeabur.yaml"
-    config_path.write_text(
-        config_template.replace("${ZEABUR_WEB_URL}", "https://dailycast.example"),
-        encoding="utf-8",
-    )
+    config_path.write_text(config_template, encoding="utf-8")
     monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "https://gateway.example/v1")
     monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "test-secret")
+    monkeypatch.setenv("DAILYCAST_PUBLISHING__PUBLIC_BASE_URL", "https://dailycast.example")
 
     settings = load_settings(config_path=config_path, env_file=tmp_path / "missing.env")
 
