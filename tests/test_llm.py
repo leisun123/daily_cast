@@ -213,10 +213,60 @@ def test_llm_settings_have_explicit_safe_defaults(app_config_path: Path) -> None
 
     assert settings.llm.provider == "openai_compatible"
     assert settings.llm.temperature == 0.1
-    assert settings.llm.max_output_tokens == 2000
     assert settings.llm.budget.max_calls == 12
     assert settings.llm.budget.max_input_tokens == 60_000
-    assert settings.llm.budget.max_output_tokens == 15_000
+    assert not hasattr(settings.llm, "max_output_tokens")
+    assert not hasattr(settings.llm.budget, "max_output_tokens")
+
+
+def test_unbounded_providers_omit_application_output_token_ceiling() -> None:
+    """Absent an explicit per-call option, providers defer output length to the model."""
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        if request.url.path.endswith("/responses"):
+            return httpx.Response(
+                200,
+                json={
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": '{"score":7}'}],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"score":7}'}}]})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            chat = OpenAICompatibleLLMProvider(
+                base_url="https://models.example/v1",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=None,
+                http_client=client,
+            )
+            responses = OpenAIResponsesLLMProvider(
+                base_url="https://models.example/v1",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=None,
+                http_client=client,
+            )
+            request = (LLMMessage(role="user", content="Score this."),)
+            await chat.generate_structured(LLMOperation.SCORE_EVENTS, request, ScoreOutput, {})
+            await responses.generate_structured(LLMOperation.SCORE_EVENTS, request, ScoreOutput, {})
+
+    asyncio.run(scenario())
+
+    assert "max_tokens" not in captured[0]
+    assert "max_output_tokens" not in captured[1]
 
 
 def test_llm_settings_allow_only_supported_wire_protocols() -> None:

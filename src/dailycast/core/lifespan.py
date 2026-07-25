@@ -192,7 +192,6 @@ def build_lifespan(
                     lambda: BudgetController(
                         max_calls=settings.llm.budget.max_calls,
                         max_input_tokens=settings.llm.budget.max_input_tokens,
-                        max_output_tokens=settings.llm.budget.max_output_tokens,
                     ),
                     data_dir=settings.data_dir,
                     auto_publish=settings.publishing.auto_publish,
@@ -263,7 +262,6 @@ def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) ->
             timeout_seconds=settings.llm.timeout_seconds,
             temperature=settings.llm.temperature,
             top_p=settings.llm.top_p,
-            max_output_tokens=settings.llm.max_output_tokens,
             max_retries=settings.llm.max_retries,
             response_format=settings.llm.response_format,
             http_client=http_client,
@@ -276,7 +274,6 @@ def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) ->
             timeout_seconds=settings.llm.timeout_seconds,
             temperature=settings.llm.temperature,
             top_p=settings.llm.top_p,
-            max_output_tokens=settings.llm.max_output_tokens,
             max_retries=settings.llm.max_retries,
             response_format=settings.llm.response_format,
             http_client=http_client,

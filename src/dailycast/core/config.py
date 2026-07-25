@@ -105,11 +105,10 @@ class TaskExecutionSettings(BaseModel):
 
 
 class LLMBudgetSettings(BaseModel):
-    """Hard per-task LLM use limits, applied before cache-miss provider calls."""
+    """Hard per-task request and input limits, applied before cache-miss provider calls."""
 
     max_calls: int = Field(default=12, ge=0)
     max_input_tokens: int = Field(default=60_000, ge=0)
-    max_output_tokens: int = Field(default=15_000, ge=0)
 
 
 class LLMSettings(BaseModel):
@@ -121,7 +120,6 @@ class LLMSettings(BaseModel):
     model: str = "gpt-5.6-terra"
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
-    max_output_tokens: int = Field(default=2000, ge=1)
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=10)
     response_format: str = "json_schema"

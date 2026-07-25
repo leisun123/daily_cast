@@ -47,14 +47,12 @@ llm:
   model: gpt-5.6-terra
   temperature: 0.1
   top_p: null
-  max_output_tokens: 2000
   timeout_seconds: 30
   max_retries: 2
   response_format: json_schema
   budget:
     max_calls: 12
     max_input_tokens: 60000
-    max_output_tokens: 15000
 
 editorial:
   # Alpha records deterministic/LLM quality findings but does not block output.

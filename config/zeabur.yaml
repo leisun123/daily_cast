@@ -24,12 +24,6 @@ scheduler:
 llm:
   response_format: json_object
   timeout_seconds: 120
-  # DeepSeek emits reasoning tokens before JSON. Real score and outline
-  # batches truncate below 8,192 output tokens.
-  max_output_tokens: 8192
-  budget:
-    # Five normal Alpha editorial calls plus one bounded schema-repair call.
-    max_output_tokens: 49152
 
 editorial:
   enforce_quality_gate: false

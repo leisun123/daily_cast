@@ -132,11 +132,11 @@ Alpha 示例可将 `editorial.enforce_quality_gate=false` 与 `publishing.auto_p
 
 ### FR-5 AI 编辑与生成
 
-- 通过 OpenAI API 兼容 Provider 调用模型，配置 `base_url`、`api_key`、`model`、`timeout`、`temperature`、可选 `top_p`、`max_output_tokens`、response format/structured output mode、其他受支持的模型选项和输入限制。
+- 通过 OpenAI API 兼容 Provider 调用模型，配置 `base_url`、`api_key`、`model`、`timeout`、`temperature`、可选 `top_p`、response format/structured output mode、其他受支持的模型选项和输入限制。V1 默认不发送应用层最大输出 token 参数，由模型服务决定可用输出长度。
 - LLM 完成事件评分与理由、节目大纲、口播稿、标题简介以及基于证据包的最终语义检查。
 - 所有步骤使用版本化提示词和结构化 JSON 输出；响应必须经过 schema 校验。
 - schema 校验成功的结构化结果按 `operation + provider + model + prompt_version + schema_version + generation_config_hash + input_hash` 持久化为 LLMArtifact；任务恢复和新任务都可精确复用。
-- `generation_config_hash` 是影响模型输出语义的非敏感配置 canonical JSON 的 SHA-256，至少覆盖脱敏规范化后的 Provider endpoint 身份、temperature、可选 top_p、max output tokens、response format/structured output mode 和其他模型语义选项；API Key、Authorization、timeout 和 retry 次数不得参与或被保存。上述任一配置变化都必须 cache miss。
+- `generation_config_hash` 是影响模型输出语义的非敏感配置 canonical JSON 的 SHA-256，至少覆盖脱敏规范化后的 Provider endpoint 身份、temperature、可选 top_p、显式的 per-call max output tokens（默认不设置）、response format/structured output mode 和其他模型语义选项；API Key、Authorization、timeout 和 retry 次数不得参与或被保存。上述任一配置变化都必须 cache miss。
 - LLMArtifact 不保存密钥、Authorization、未经限制的完整原始 Prompt 或全部新闻正文；失败和未通过 schema 校验的响应不能进入缓存。
 - 模型只接收事件卡片和入选事件的有限证据包，不接收所有原始全文。
 - 每期设置最大候选事件数、最大入选事件数、单事件字符数、总输入 Token 和模型调用次数。

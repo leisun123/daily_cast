@@ -286,7 +286,7 @@ V1 的 `OpenAICompatibleLLMProvider` 支持：
 
 - `base_url`、环境变量引用的 `api_key`、`model`；
 - 连接/读取/总超时；
-- 每操作 temperature、可选 top_p、最大输出 tokens 和其他受支持的模型选项；
+- 每操作 temperature、可选 top_p、显式 per-call 输出 token 参数（默认不设置）和其他受支持的模型选项；
 - Provider 支持时使用 JSON Schema response format，不支持时退化为 JSON 模式并本地严格校验；
 - 记录 provider、模型、提示词版本、schema 版本、`generation_config_hash`、输入/输出哈希、用量和供应商 request ID，不记录秘密或明文 endpoint。
 
@@ -310,7 +310,7 @@ V1 的 `OpenAICompatibleLLMProvider` 支持：
 - EventCard 只含短摘要和极少证据，入选后才构造 EvidenceDossier；
 - 每来源片段和每事件证据有字符上限，优先保留含数字、主体和动作的句子；
 - 使用 tokenizer 在调用前估算，按操作分配预算；不以字符数冒充最终 Token 计量；
-- 默认每期最大 12 次 LLM 调用、60,000 输入 tokens 和 15,000 输出 tokens；达到硬限制抛出 `AI_BUDGET_EXCEEDED`；
+- 默认每期最大 12 次 LLM 调用和 60,000 输入 tokens；达到硬限制抛出 `AI_BUDGET_EXCEEDED`。V1 不设置应用层输出 token 上限，也不以累计输出 token 阻断模型调用；模型服务自行执行其输出限制。
 - 评分按固定批次，脚本按 1–3 个连续 section batch 生成，默认总调用约 5–8 次；
 - 成功响应以 `operation + provider + model + prompt_version + schema_version + generation_config_hash + input_hash` 作为唯一缓存身份；
 - schema 修复重试也计入调用预算；网络失败且供应商确认未受理时不计模型用量，但仍计尝试次数；
@@ -333,7 +333,7 @@ operation + provider + model + prompt_version + schema_version + generation_conf
   endpoint_identity_hash,
   temperature,
   top_p_or_null,
-  max_output_tokens,
+  max_output_tokens_or_null,
   response_format_or_structured_output_mode,
   provider_model_options_sorted
 }
@@ -849,7 +849,7 @@ Fake LLM/TTS 驱动整条流水线，至少覆盖：
 | TTS | OpenAI-compatible TTS Provider |
 | 发布 | 人工批准后显式 RSSPublisher 发布 |
 | 最少/最多事件 | 最少 3，最多 8；LLM 评分最多 30 |
-| 模型预算 | 每期最多 12 次、60k 输入 tokens、15k 输出 tokens |
+| 模型预算 | 每期最多 12 次、60k 输入 tokens；输出长度由模型服务决定 |
 | TTS 重试 | 最多 3 次，逐段持久化 |
 | 任务并发 | 单个重型流水线；单 Uvicorn worker |
 | 公开资产 | 不可变 MP3，Feed 原子替换 |
