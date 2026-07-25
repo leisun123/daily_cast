@@ -14,6 +14,7 @@ DailyCast is a self-hosted, single-process Python application for producing a re
 - Configurable TTS generation with resumable audio-segment caching
 - FFmpeg audio assembly into a checksum-verified draft MP3
 - Immutable public audio assets and self-hosted RSS podcast publishing
+- Standard RSS distribution for podcast platforms that support RSS claiming or import, including NetEase Cloud Music and Xiaoyuzhou
 - Docker Compose deployment with SQLite migrations and health checks
 
 ## Architecture
@@ -79,6 +80,25 @@ The Feed URL is `http://127.0.0.1:8000/feed.xml`. It returns `404` until at leas
 
 `data/` is the private runtime volume for SQLite and task artifacts. `public/` contains the generated Feed and immutable media assets. Neither directory should be committed.
 
+### RSS distribution: NetEase Cloud Music and Xiaoyuzhou
+
+For a real podcast platform, deploy DailyCast behind a stable public HTTPS domain and use its
+Feed URL, for example `https://your-domain.example/feed.xml`. Do not use the local
+`127.0.0.1` URL outside your computer.
+
+DailyCast does not upload credentials or automate platform logins for this workflow. Instead,
+bind or claim the same public Feed in each platform's creator console:
+
+- **NetEase Cloud Music:** choose the RSS import/claim flow, enter the Feed URL, and provide a
+  screenshot of the hosting dashboard that visibly associates your DailyCast service with the
+  public domain when ownership proof is requested. If you already created the podcast in
+  NetEase, choose **同步至现有播客** rather than creating a second podcast.
+- **Xiaoyuzhou:** use its RSS claim/import flow and enter the same public Feed URL.
+
+After a platform accepts the Feed, it fetches the current episode and polls the stable URL for
+future episodes. Initial ingestion is asynchronous; keep `publishing.public_base_url` and the
+Feed URL stable so existing subscribers and platform records are not broken.
+
 ## Configuration
 
 DailyCast uses two configuration layers:
@@ -113,7 +133,7 @@ Alembic before Uvicorn, and binds a Zeabur HTTPS domain to the RSS service.
 During deployment, supply the public domain and LLM provider settings. The API key is a Zeabur
 password variable and must never be committed. The template enables `app.public_only`, so the
 public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
-`/media/episodes/...` assets. Management pages and `POST /generate` return `404`; production
+`/media/episodes/...` assets plus `/cover.png`. Management pages and `POST /generate` return `404`; production
 generation is driven by the durable scheduler.
 
 Deploy into a selected Zeabur project with:
@@ -153,10 +173,12 @@ DAILYCAST_RUN_DOCKER_TEST=1 poetry run pytest -q tests/integration/test_docker_s
 - [ ] Zeabur one-click deployment
 - [ ] Dify workflow provider
 - [ ] n8n integration
-- [ ] RPA publisher
+- [ ] Direct RPA publisher for platforms that cannot consume RSS
 - [ ] Multi-model support
 
-The Alpha does not include a web dashboard, Dify, n8n, RPA publishing, multi-user accounts, or SaaS functionality.
+The Alpha does not include a web dashboard, Dify, n8n, direct RPA publishing, multi-user
+accounts, or SaaS functionality. NetEase Cloud Music and Xiaoyuzhou distribution uses their
+RSS claim/import flows rather than browser automation.
 
 ## License
 
