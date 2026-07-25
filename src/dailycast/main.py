@@ -19,7 +19,13 @@ from dailycast.core.identifiers import UUIDGenerator
 from dailycast.core.lifespan import AppRuntime, build_daily_generation_command, build_lifespan
 from dailycast.core.logging import get_request_id, reset_request_id, set_request_id
 from dailycast.core.readiness import evaluate_readiness
-from dailycast.db.models import EpisodeItem, Publication, TaskRun, TriggerType
+from dailycast.db.models import (
+    EpisodeItem,
+    Publication,
+    PublicationPlatform,
+    TaskRun,
+    TriggerType,
+)
 from dailycast.db.repositories import (
     ArticleRepository,
     EpisodeItemRepository,
@@ -190,6 +196,35 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
                 "task_url": "/tasks/latest",
             },
         )
+
+    @app.post(
+        "/episodes/{episode_id}/publications/{platform}/resume",
+        tags=["web"],
+    )
+    async def resume_publication(
+        episode_id: int,
+        platform: PublicationPlatform,
+        runtime: RuntimeDependency,
+    ) -> dict[str, object]:
+        """Resume one external delivery target without rerunning episode generation."""
+        _require_ready(runtime)
+        dispatcher = runtime.publication_dispatcher
+        if dispatcher is None:
+            raise InfrastructureError("publication dispatcher is not available")
+        try:
+            target = await dispatcher.resume(episode_id, platform)
+        except LookupError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            "id": target.id,
+            "episode_id": target.episode_id,
+            "platform": target.platform.value,
+            "status": target.status.value,
+            "remote_id": target.remote_id,
+            "remote_url": target.remote_url,
+            "last_error": target.last_error,
+            "attempt_count": target.attempt_count,
+        }
 
     @app.get("/healthz", tags=["system"])
     async def healthz() -> dict[str, str]:

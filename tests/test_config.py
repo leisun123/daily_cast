@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from dailycast.core.config import (
     AppSettings,
@@ -86,6 +87,47 @@ def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:
 def test_default_llm_model_is_gpt_5_6_terra() -> None:
     """New installations use the production model verified against the Responses endpoint."""
     assert LLMSettings().model == "gpt-5.6-terra"
+
+
+def test_distribution_targets_are_explicit_and_external_publishers_default_off() -> None:
+    """RSS stays enabled while credential-bearing browser automation is opt-in."""
+    settings = PublishingSettings()
+
+    assert settings.rss.enabled is True
+    assert settings.netease.enabled is False
+    assert settings.netease.profile_dir == Path("netease/profile")
+    assert settings.netease.storage_state_path == Path("netease/storage-state.json")
+    assert settings.netease.headless is True
+    assert settings.netease.creator_url == "https://musicupload.netease.com/"
+    assert settings.xiaoyuzhou.enabled is False
+
+
+@pytest.mark.parametrize("platform", ["netease", "xiaoyuzhou"])
+def test_external_distribution_requires_rss_immutable_asset(platform: str) -> None:
+    """External targets cannot run without the RSS-owned immutable MP3 source."""
+    publishing = {
+        "rss": {"enabled": False},
+        platform: {"enabled": True},
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=f"publishing.{platform}.enabled requires publishing.rss.enabled",
+    ):
+        PublishingSettings.model_validate(publishing)
+
+
+def test_example_yaml_documents_all_distribution_targets() -> None:
+    """Operators can enable NetEase without inventing undocumented nested keys."""
+    example_path = Path(__file__).resolve().parents[1] / "config" / "app.example.yaml"
+    raw = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+
+    assert raw["publishing"]["rss"] == {"enabled": True}
+    assert raw["publishing"]["netease"]["enabled"] is False
+    assert raw["publishing"]["netease"]["profile_dir"] == "netease/profile"
+    assert raw["publishing"]["netease"]["storage_state_path"] == "netease/storage-state.json"
+    assert raw["publishing"]["netease"]["headless"] is True
+    assert raw["publishing"]["xiaoyuzhou"]["enabled"] is False
 
 
 def test_application_timezone_must_be_an_iana_timezone() -> None:

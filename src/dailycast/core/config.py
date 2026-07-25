@@ -3,12 +3,12 @@
 import os
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
@@ -177,6 +177,42 @@ class FFmpegSettings(BaseModel):
     bitrate: str = "64k"
 
 
+class RSSPublishingSettings(BaseModel):
+    """Enable the existing self-hosted RSS target in the distribution dispatcher."""
+
+    enabled: bool = True
+
+
+class NetEasePublishingSettings(BaseModel):
+    """Official creator-page browser automation settings without account credentials."""
+
+    enabled: bool = False
+    profile_dir: Path = Path("netease/profile")
+    storage_state_path: Path = Path("netease/storage-state.json")
+    headless: bool = True
+    creator_url: str = "https://musicupload.netease.com/"
+    category: str = "科技"
+    cover_path: Path | None = None
+    timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
+
+    @field_validator("creator_url")
+    @classmethod
+    def require_official_https_creator_url(cls, value: str) -> str:
+        """Reject insecure or reverse-engineered publication endpoints."""
+        if not value.startswith("https://musicupload.netease.com/"):
+            raise ValueError(
+                "publishing.netease.creator_url must use the official HTTPS creator site"
+            )
+        return value
+
+
+class XiaoyuzhouPublishingSettings(BaseModel):
+    """RSS-based Xiaoyuzhou preparation; no browser automation is enabled by default."""
+
+    enabled: bool = False
+    program_url: str | None = None
+
+
 class PublishingSettings(BaseModel):
     """Self-hosted RSS publication configuration without changing management API exposure."""
 
@@ -186,6 +222,18 @@ class PublishingSettings(BaseModel):
     feed_description: str = "A personal AI news podcast."
     language: str = "zh-CN"
     author: str = "DailyCast"
+    rss: RSSPublishingSettings = Field(default_factory=RSSPublishingSettings)
+    netease: NetEasePublishingSettings = Field(default_factory=NetEasePublishingSettings)
+    xiaoyuzhou: XiaoyuzhouPublishingSettings = Field(default_factory=XiaoyuzhouPublishingSettings)
+
+    @model_validator(mode="after")
+    def require_rss_for_external_targets(self) -> Self:
+        """Keep one verified immutable asset source for every external publisher."""
+        if not self.rss.enabled and self.netease.enabled:
+            raise ValueError("publishing.netease.enabled requires publishing.rss.enabled")
+        if not self.rss.enabled and self.xiaoyuzhou.enabled:
+            raise ValueError("publishing.xiaoyuzhou.enabled requires publishing.rss.enabled")
+        return self
 
     @field_validator("public_base_url")
     @classmethod
