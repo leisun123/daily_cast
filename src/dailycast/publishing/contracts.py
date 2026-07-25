@@ -7,7 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from dailycast.db.models import Episode, Publication
+from dailycast.db.models import (
+    Episode,
+    Publication,
+    PublicationPlatform,
+    PublicationTarget,
+    PublicationTargetStatus,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,27 +50,84 @@ class FeedWriteResult:
     item_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class PlatformPublishResult:
+    """Stable remote identity returned by one platform-specific publisher."""
+
+    remote_id: str | None = None
+    remote_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DistributionResult:
+    """Detached per-platform outcomes for one independent dispatch pass."""
+
+    targets: tuple[PublicationTarget, ...]
+
+    @property
+    def published_platforms(self) -> tuple[PublicationPlatform, ...]:
+        """Return successful platforms without treating other outcomes as a rollback."""
+        return tuple(
+            target.platform
+            for target in self.targets
+            if target.status is PublicationTargetStatus.PUBLISHED
+        )
+
+    @property
+    def needs_attention_platforms(self) -> tuple[PublicationPlatform, ...]:
+        """Return platforms that require a human login, captcha, or page review."""
+        return tuple(
+            target.platform
+            for target in self.targets
+            if target.status is PublicationTargetStatus.NEEDS_ATTENTION
+        )
+
+
+class PublisherError(RuntimeError):
+    """One platform operation failed without invalidating the generated Episode."""
+
+
+class PublisherNeedsAttentionError(PublisherError):
+    """One platform requires a human action before only that target can resume."""
+
+
 class Publisher(Protocol):
-    """Isolate publication lifecycle code from the local RSS filesystem implementation."""
+    """Independent distribution adapter implemented by every enabled platform."""
+
+    platform_name: PublicationPlatform
+
+    async def validate(self, episode: Episode) -> None:
+        """Reject an Episode that cannot be delivered safely to this platform."""
+
+    async def publish(self, episode: Episode) -> PlatformPublishResult:
+        """Deliver one already generated Episode without changing generation artifacts."""
+
+    async def check_status(
+        self, episode: Episode, target: PublicationTarget
+    ) -> PlatformPublishResult:
+        """Inspect whether a previous side effect already completed remotely."""
+
+    async def resume(self, episode: Episode, target: PublicationTarget) -> PlatformPublishResult:
+        """Resume only this platform after a retryable or human-attention outcome."""
+
+
+class RSSPublicationTarget(Protocol):
+    """RSS-specific target capabilities used by the V1 immutable-media service."""
 
     target_key: str
-
-    def validate(self, episode: Episode, asset: PublicAsset) -> None:
-        """Reject an Episode or asset that is unsafe to publish to this target."""
-
-    def publish(self, items: tuple[RSSFeedItem, ...]) -> FeedWriteResult:
-        """Atomically write a validated target representation for the supplied Feed items."""
-
-    def reconcile(self, publication: Publication, episode: Episode) -> bool:
-        """Return whether durable target state already proves Publication completion."""
-
-
-class RSSPublicationTarget(Publisher, Protocol):
-    """RSS-specific target capabilities used by the V1 immutable-media service."""
 
     @property
     def feed_path(self) -> Path:
         """Return the public Feed destination rooted below configured PUBLIC_DIR."""
+
+    def validate(self, episode: Episode, asset: PublicAsset) -> None:
+        """Reject an Episode or asset that is unsafe for the RSS target."""
+
+    def publish(self, items: tuple[RSSFeedItem, ...]) -> FeedWriteResult:
+        """Atomically write a validated RSS representation."""
+
+    def reconcile(self, publication: Publication, episode: Episode) -> bool:
+        """Return whether files and Feed already prove publication completion."""
 
     def promote_asset(self, episode: Episode) -> PublicAsset:
         """Promote verified draft audio to a durable immutable public asset."""

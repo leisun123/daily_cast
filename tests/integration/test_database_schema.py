@@ -15,6 +15,9 @@ from dailycast.db.models import (
     Episode,
     LLMArtifact,
     NewsEvent,
+    PublicationPlatform,
+    PublicationTarget,
+    PublicationTargetStatus,
     Source,
     TaskRun,
     TaskStep,
@@ -94,6 +97,7 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             "llm_artifacts",
             "audio_segments",
             "publications",
+            "publication_targets",
         }.issubset({name for (name,) in tables})
         revision = inspect_revision(
             engine=engine,
@@ -101,7 +105,7 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             database_url=database_url,
         )
         assert revision.is_current is True
-        assert revision.current == ("0006_backfill_episode_news_count",)
+        assert revision.current == ("0007_publication_targets",)
     finally:
         engine.dispose()
 
@@ -228,6 +232,21 @@ def test_unique_constraints_reject_duplicate_v1_identities(app_config_path: Path
         session.add(LLMArtifact(**{**artifact_fields, "generation_config_hash": "1" * 64}))
         session.commit()
         session.add(LLMArtifact(**artifact_fields))
+        with pytest.raises(IntegrityError):
+            session.flush()
+        session.rollback()
+
+        episode = session.query(Episode).filter_by(public_id=episode.public_id).one()
+        target_fields = {
+            "episode_id": episode.id,
+            "platform": PublicationPlatform.NETEASE,
+            "status": PublicationTargetStatus.PENDING,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        session.add(PublicationTarget(**target_fields))
+        session.commit()
+        session.add(PublicationTarget(**target_fields))
         with pytest.raises(IntegrityError):
             session.flush()
     finally:

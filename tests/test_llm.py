@@ -211,7 +211,7 @@ def test_llm_settings_have_explicit_safe_defaults(app_config_path: Path) -> None
         env_file=app_config_path.with_suffix(".env"),
     )
 
-    assert settings.llm.provider == "openai_compatible"
+    assert settings.llm.provider == "openai_responses"
     assert settings.llm.temperature == 0.1
     assert settings.llm.max_output_tokens == 2000
     assert settings.llm.budget.max_calls == 12

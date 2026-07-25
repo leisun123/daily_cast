@@ -23,7 +23,11 @@ dailycast/
 │   └── versions/
 │       ├── 0001_initial_schema.py
 │       ├── 0002_task_run_waiting_action.py
-│       └── 0003_reliability_hardening.py
+│       ├── 0003_reliability_hardening.py
+│       ├── 0004_tts_preprocess_identity.py
+│       ├── 0005_production_experience_metrics.py
+│       ├── 0006_backfill_episode_news_count.py
+│       └── 0007_publication_targets.py
 ├── config/
 │   ├── app.example.yaml
 │   └── sources.example.yaml         # 首次/缺失项种子，不覆盖数据库修改
@@ -92,8 +96,12 @@ dailycast/
 │       │   └── validation.py
 │       ├── publishing/
 │       │   ├── contracts.py
+│       │   ├── dispatcher.py
+│       │   ├── netease.py
+│       │   ├── netease_login.py
 │       │   ├── service.py
-│       │   └── rss.py
+│       │   ├── rss.py
+│       │   └── xiaoyuzhou.py
 │       ├── pipeline/
 │       │   ├── contracts.py
 │       │   ├── context.py
@@ -197,7 +205,7 @@ dailycast/
 | `episodes` | 节目状态、Episode/EpisodeItem 用例、稿件修订和检查规则 | FastAPI、FFmpeg 命令细节、供应商 SDK |
 | `tts` | TTS 协议、分段、缓存键、逐段合成和重试 | 最终公开 URL、Feed 生成 |
 | `media` | 文件抽象、路径安全、FFmpeg 合并、音频校验、原子写 | 选题和发布状态决策 |
-| `publishing` | Publisher 协议、发布前校验和 V1 RSS 实现 | 新闻理解、稿件生成、定时触发、V1 外部平台发布 |
+| `publishing` | Publisher 协议、分发隔离、RSS 原子发布、网易云 Playwright 与小宇宙 RSS 认领适配 | 新闻理解、稿件生成、定时触发、逆向平台 API |
 | `pipeline` | 跨模块步骤编排、检查点、幂等、超时、失败恢复 | 供应商协议细节、HTML 页面 |
 | `scheduler` | 将 Cron 触发转换为提交命令，只调用 `TaskSubmissionService`，维护单实例参数 | 直接调用 Orchestrator、实际流水线逻辑、业务数据加工 |
 | `api` | JSON 请求校验、调用用例、状态码与响应映射 | SQL 查询拼装、Prompt、FFmpeg、重试循环 |
@@ -279,12 +287,17 @@ MediaStore.promote_draft(artifact, public_key) -> PublicAsset
 ### 5.4 发布
 
 ```text
-Publisher.validate(episode, asset) -> ValidationReport
-Publisher.publish(publication_request) -> PublicationResult
-Publisher.reconcile(publication) -> PublicationResult
+Publisher.validate(episode) -> None
+Publisher.publish(episode) -> PlatformPublishResult
+Publisher.check_status(episode, target) -> PlatformPublishResult
+Publisher.resume(episode, target) -> PlatformPublishResult
+PublicationDispatcher.publish(episode_id) -> DistributionResult
+PublicationDispatcher.resume(episode_id, platform) -> PublicationTarget
 ```
 
-V1 实现 `RSSPublisher`。未来的 `PodbeanAPIPublisher` 和 `NetEasePlaywrightPublisher` 使用相同输入，只接收已批准节目及不可变音频资产。
+RSS 原子 Feed 逻辑仍由 `PublicationService/RSSPublisher` 实现，
+`RSSDistributionPublisher` 只做协议适配。`NetEasePlaywrightPublisher` 仅上传 RSS
+流程已经提升并校验的不可变 MP3；`XiaoyuzhouPublisher` 只记录 RSS 认领状态。
 
 ### 5.5 流水线
 
@@ -344,6 +357,7 @@ Route 禁止做：
 - FFmpeg 合并与 `ffprobe` 校验；
 - FastAPI 路由、错误 envelope、分页与静态文件；
 - Feed 原子替换与历史节目保留；覆盖“published 基础集合 + 当前 publishing candidate”，以及 Feed 替换后数据库提交前崩溃的 reconcile 补写且不重复资产/item；
+- PublicationTarget 唯一约束、平台错误隔离、网易云登录/验证码/上传失败、远端查重和单平台 resume；
 - revision 不匹配时只允许 health/readiness 诊断端点，全部管理页面及业务读写/Feed/media 路由 fail closed；校验 Compose 容器监听 `0.0.0.0:8000` 且宿主端口绑定 `127.0.0.1:8000:8000`。
 
 ### `tests/contract`
@@ -360,7 +374,7 @@ Route 禁止做：
 
 - 真正接入 Dify 时，在 `src/dailycast/llm/providers/dify_workflow.py` 实现现有 `LLMProvider`，继续使用同一结构化 schema 和 LLMArtifact 缓存身份。
 - 真正接入 Podbean 官方 API 时，在 `src/dailycast/publishing/providers/podbean_api.py` 实现现有 `Publisher`；届时再创建 `providers/` 目录和相应 Alembic revision。
-- 真正进入网易云 RPA 阶段时，在 `src/dailycast/publishing/providers/netease_playwright.py` 实现现有 `Publisher`，并在该阶段才把 Playwright 加入可选依赖。
+- 新增其他无官方 API 的平台时，在 `src/dailycast/publishing/` 增加受测适配器并复用 PublicationTarget；不得复制生成流水线或调用逆向 API。
 
 这些扩展只能在对应阶段具备可运行实现和测试时加入，不能以空文件表示支持。
 

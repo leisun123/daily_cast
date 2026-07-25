@@ -39,6 +39,7 @@ def test_public_only_mode_hides_management_routes(app_config_path: Path) -> None
             root = client.get("/")
             task = client.get("/tasks/latest")
             generate = client.post("/generate")
+            resume = client.post("/episodes/1/publications/netease/resume")
     finally:
         factory.kw["bind"].dispose()
 
@@ -48,3 +49,4 @@ def test_public_only_mode_hides_management_routes(app_config_path: Path) -> None
     assert root.status_code == 404
     assert task.status_code == 404
     assert generate.status_code == 404
+    assert resume.status_code == 404

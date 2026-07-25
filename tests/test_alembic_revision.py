@@ -28,7 +28,7 @@ def test_initial_schema_revision_reaches_head(app_config_path: Path) -> None:
         engine.dispose()
 
     assert revision.is_current is True
-    assert revision.current == ("0006_backfill_episode_news_count",)
+    assert revision.current == ("0007_publication_targets",)
 
 
 def test_production_metrics_migration_backfills_existing_episode_news_count(

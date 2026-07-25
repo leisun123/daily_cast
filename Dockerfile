@@ -3,7 +3,8 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     POETRY_NO_INTERACTION=1 \
-    POETRY_VIRTUALENVS_CREATE=false
+    POETRY_VIRTUALENVS_CREATE=false \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ffmpeg gosu \
@@ -15,6 +16,8 @@ WORKDIR /app
 
 COPY pyproject.toml poetry.lock README.md ./
 RUN poetry install --only main --no-root
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
 
 COPY alembic.ini ./
 COPY config ./config

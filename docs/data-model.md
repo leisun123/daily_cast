@@ -59,6 +59,7 @@ erDiagram
     TASK_RUN ||--o{ LLM_ARTIFACT : creates
     TASK_STEP ||--o{ LLM_ARTIFACT : validates
     EPISODE ||--o{ PUBLICATION : publishes_to
+    EPISODE ||--o{ PUBLICATION_TARGET : distributes_to
 
     LLM_ARTIFACT {
         int id PK
@@ -77,6 +78,12 @@ erDiagram
         string status
         string feed_guid
     }
+    PUBLICATION_TARGET {
+        int id PK
+        string platform
+        string status
+        string remote_id
+    }
 ```
 
 说明：
@@ -86,7 +93,8 @@ erDiagram
 - 一个 Episode 可由多个生成/恢复/发布 TaskRun 操作。
 - LLMArtifact 由一个 TaskRun/TaskStep 在 schema 校验成功后创建，但可被恢复任务和其他新 TaskRun 按完整缓存身份复用。
 - AudioSegment 按 `script_revision` 保留版本；Episode 只指向当前有效音频版本。
-- 一个 Episode 对每个发布目标最多一个逻辑 Publication，失败重试更新尝试信息而不创建重复远端节目。
+- Publication 继续专门保存 RSS 原子发布、Feed 和不可变资产状态。
+- 一个 Episode 对每个平台最多一个 PublicationTarget；平台失败只更新自己的目标行，不改变其他平台或 Episode 生成结果。
 
 ## 3. Source
 
@@ -493,7 +501,7 @@ erDiagram
 
 ### 12.1 职责
 
-记录某 Episode 向 V1 RSS 目标的幂等发布状态、公开资产和验证信息。未来外部平台字段和人工处理状态通过对应阶段的 Alembic revision 增加。
+记录某 Episode 向 RSS 目标的幂等发布状态、公开资产和验证信息。外部平台状态由 PublicationTarget 隔离，避免改变 RSS 的原子发布语义。
 
 ### 12.2 字段
 
@@ -522,7 +530,7 @@ erDiagram
 | `created_at` | DATETIME | 是 |  |  |
 | `updated_at` | DATETIME | 是 |  |  |
 
-V1 `status`：`pending`、`publishing`、`published`、`failed`。未来实现 RPA 时再通过 migration 增加 `needs_attention` 和 `human_action_code`。
+RSS Publication `status` 仍只有：`pending`、`publishing`、`published`、`failed`。
 
 ### 12.3 约束、索引与生命周期
 
@@ -530,8 +538,38 @@ V1 `status`：`pending`、`publishing`、`published`、`failed`。未来实现 R
 - 索引：`status`、`publisher_type`、`remote_id`、`published_at DESC`。
 - 重试先 reconcile 当前行和目标状态，再增加 attempt；不能通过新增行规避不确定发布结果。发布顺序固定为：创建/复用 `publishing` 行，提升并校验不可变 MP3，读取既有 published 行，把当前 publishing 行作为已验证 candidate 显式注入内存 Feed，校验并原子替换 Feed，最后短事务标记 Publication/Episode=`published`。
 - 若 Feed 已包含该 `feed_guid` 且 enclosure、MIME、长度和公开文件 checksum 正确，而数据库仍为 `publishing`，reconcile 补写两个 published 状态；按 GUID upsert，不重复 item，不重复复制或覆盖已存在的不可变音频。稳定状态 Feed 只包含成功 published 节目。
-- RSS published 后公开资产默认永久保留。V1 不创建 Podbean 或网易云 Publication。
+- RSS published 后公开资产默认永久保留。网易云和小宇宙不复用此表表达平台状态。
 - 关系：属于一个 Episode。
+
+## 12A. PublicationTarget
+
+### 职责
+
+记录一个已生成 Episode 在各独立分发平台上的状态。当前平台为 `rss`、
+`netease`、`xiaoyuzhou`；RSS target 包装现有 PublicationService，网易云只消费
+RSS 已提升并校验的不可变 MP3，小宇宙只记录 RSS 认领状态。
+
+| 字段 | 类型 | 必填 | 约束/默认 | 说明 |
+|---|---|---:|---|---|
+| `id` | INTEGER | 是 | PK autoincrement | |
+| `episode_id` | INTEGER | 是 | FK Episode，CASCADE | |
+| `platform` | TEXT | 是 | `rss/netease/xiaoyuzhou` | |
+| `status` | TEXT | 是 | 见下方 | 当前目标状态 |
+| `remote_id` | TEXT | 否 | | 平台节目 ID |
+| `remote_url` | TEXT | 否 | | 平台公开/管理 URL |
+| `last_error` | TEXT | 否 | 最长持久化 1,000 字符 | 脱敏错误码/摘要 |
+| `attempt_count` | INTEGER | 是 | 默认 0，非负 | 发布/恢复尝试数 |
+| `created_at` | DATETIME | 是 | | |
+| `updated_at` | DATETIME | 是 | | |
+
+状态：`pending`、`publishing`、`published`、`needs_attention`、`failed`。
+`needs_attention` 只表示该平台需要登录、验证码或页面检查，不表示 Episode 生成失败。
+
+- 唯一：`(episode_id, platform)`，重试和恢复必须复用同一行。
+- 索引：`episode_id`、`status`、`(platform, status)`。
+- 启动只 reconcile 中断的 `publishing` 行；人工处理后只 resume 指定平台。
+- `remote_id` 已存在或页面精确查到同标题节目时不得重复上传。
+- 浏览器 Cookie、密码、页面 HTML、截图和 trace 不存入此表。
 
 ## 13. 建议 SQLite 表结构
 
@@ -852,6 +890,26 @@ CREATE INDEX ix_publications_status ON publications(status);
 CREATE INDEX ix_publications_type ON publications(publisher_type);
 CREATE INDEX ix_publications_remote ON publications(remote_id);
 CREATE INDEX ix_publications_published ON publications(published_at DESC);
+
+CREATE TABLE publication_targets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL CHECK (platform IN ('rss','netease','xiaoyuzhou')),
+  status TEXT NOT NULL CHECK (
+    status IN ('pending','publishing','published','needs_attention','failed')
+  ),
+  remote_id TEXT,
+  remote_url TEXT,
+  last_error TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  UNIQUE (episode_id, platform)
+);
+CREATE INDEX ix_publication_targets_episode ON publication_targets(episode_id);
+CREATE INDEX ix_publication_targets_status ON publication_targets(status);
+CREATE INDEX ix_publication_targets_platform_status
+  ON publication_targets(platform, status);
 ```
 
 ### 13.1 关于循环外键
@@ -879,6 +937,7 @@ V1 用 TaskRun/TaskStep 保存可查询摘要，用每任务 JSONL 保存高频�
 | LLMArtifact | 180 天 | 仅按 `created_at` 清理成功缓存；业务输出已快照，删除不影响 Episode |
 | AudioSegment 记录 | 当前与历史修订 90 天 | 不被当前 manifest 使用且文件可清理 |
 | Publication | 永久 | 不自动删除 |
+| PublicationTarget | 与 Episode 同生命周期 | Episode 物理删除时级联 |
 | public MP3 | 永久 | 仅显式下架且 Feed 已无引用 |
 
 保留期是默认运维策略，不应由后台定时任务在缺少引用检查时直接删除。

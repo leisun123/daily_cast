@@ -19,7 +19,10 @@ from dailycast.db.models import (
     LLMArtifact,
     NewsEvent,
     Publication,
+    PublicationPlatform,
     PublicationStatus,
+    PublicationTarget,
+    PublicationTargetStatus,
     Source,
     TaskRun,
     TaskRunStatus,
@@ -646,3 +649,58 @@ class PublicationRepository:
         publication.updated_at = utc_now()
         self._session.flush()
         return publication
+
+
+class PublicationTargetRepository:
+    """Persistence operations for isolated per-platform distribution state."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, **values: Any) -> PublicationTarget:
+        """Create and flush one platform target without committing its transaction."""
+        target = PublicationTarget(**values)
+        self._session.add(target)
+        self._session.flush()
+        return target
+
+    def get(self, target_id: int) -> PublicationTarget | None:
+        """Return one distribution target by database identifier."""
+        return self._session.get(PublicationTarget, target_id)
+
+    def get_by_episode_and_platform(
+        self, episode_id: int, platform: PublicationPlatform
+    ) -> PublicationTarget | None:
+        """Return the unique durable target for an Episode and platform."""
+        statement = select(PublicationTarget).where(
+            PublicationTarget.episode_id == episode_id,
+            PublicationTarget.platform == platform,
+        )
+        return self._session.scalar(statement)
+
+    def list_by_episode(self, episode_id: int) -> list[PublicationTarget]:
+        """List one Episode's targets in stable platform order."""
+        statement = (
+            select(PublicationTarget)
+            .where(PublicationTarget.episode_id == episode_id)
+            .order_by(PublicationTarget.id)
+        )
+        return list(self._session.scalars(statement))
+
+    def list_by_status(self, *statuses: PublicationTargetStatus) -> list[PublicationTarget]:
+        """List retryable target work in deterministic oldest-first order."""
+        if not statuses:
+            return []
+        statement = (
+            select(PublicationTarget)
+            .where(PublicationTarget.status.in_(statuses))
+            .order_by(PublicationTarget.created_at, PublicationTarget.id)
+        )
+        return list(self._session.scalars(statement))
+
+    def update(self, target: PublicationTarget, **changes: Any) -> PublicationTarget:
+        """Persist one target transition inside the caller-owned transaction."""
+        _apply_changes(target, changes)
+        target.updated_at = utc_now()
+        self._session.flush()
+        return target

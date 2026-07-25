@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.core.config import Settings, load_settings
+from dailycast.core.config import PublishingSettings, Settings, load_settings
 from dailycast.core.logging import configure_logging
 from dailycast.db.models import SourceKind, TaskType, TriggerType
 from dailycast.db.revision import RevisionStatus, inspect_revision
@@ -31,8 +31,18 @@ from dailycast.pipeline.executor import InProcessTaskExecutor
 from dailycast.pipeline.orchestrator import PipelineOrchestrator, build_collection_pipeline
 from dailycast.pipeline.recovery import RecoveryService
 from dailycast.pipeline.submission import TaskSubmissionService
+from dailycast.publishing.contracts import Publisher
+from dailycast.publishing.dispatcher import (
+    PublicationDispatcher,
+    RSSDistributionPublisher,
+)
+from dailycast.publishing.netease import (
+    NetEasePlaywrightPublisher,
+    NetEasePublisherSettings,
+)
 from dailycast.publishing.rss import RSSPublisher, RSSSettings
 from dailycast.publishing.service import PublicationService
+from dailycast.publishing.xiaoyuzhou import XiaoyuzhouPublisher
 from dailycast.scheduler.service import SchedulerService
 from dailycast.sources.bootstrap import seed_missing_sources
 from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
@@ -59,6 +69,7 @@ class AppRuntime:
     executor: InProcessTaskExecutor | None
     submission_service: TaskSubmissionService | None
     scheduler: SchedulerService | None
+    publication_dispatcher: PublicationDispatcher | None
 
 
 def build_lifespan(
@@ -88,6 +99,7 @@ def build_lifespan(
         executor: InProcessTaskExecutor | None = None
         submission_service: TaskSubmissionService | None = None
         scheduler: SchedulerService | None = None
+        publication_dispatcher: PublicationDispatcher | None = None
         llm_client: httpx.AsyncClient | None = None
         if startup_revision_status is not None and startup_revision_status.is_current:
             created_source_count = seed_missing_sources(
@@ -178,6 +190,16 @@ def build_lifespan(
                     ),
                 ),
             )
+            publication_dispatcher = PublicationDispatcher(
+                session_factory,
+                build_distribution_publishers(
+                    settings.publishing,
+                    session_factory=session_factory,
+                    data_dir=settings.data_dir,
+                    public_dir=settings.public_dir,
+                    rss_service=publication_service,
+                ),
+            )
             orchestrator = PipelineOrchestrator(
                 session_factory,
                 build_collection_pipeline(
@@ -188,7 +210,7 @@ def build_lifespan(
                     editorial_service,
                     EpisodeService(session_factory),
                     audio_service,
-                    publication_service,
+                    publication_dispatcher,
                     lambda: BudgetController(
                         max_calls=settings.llm.budget.max_calls,
                         max_input_tokens=settings.llm.budget.max_input_tokens,
@@ -204,7 +226,9 @@ def build_lifespan(
                 artifact_roots=(settings.data_dir, settings.public_dir),
             )
             executor = InProcessTaskExecutor(session_factory, orchestrator)
-            publication_service.reconcile()
+            if settings.publishing.rss.enabled:
+                publication_service.reconcile()
+            await publication_dispatcher.reconcile()
             submission_service = TaskSubmissionService(session_factory, executor)
             await executor.start()
             await RecoveryService(session_factory, submission_service).recover()
@@ -235,6 +259,7 @@ def build_lifespan(
             executor=executor,
             submission_service=submission_service,
             scheduler=scheduler,
+            publication_dispatcher=publication_dispatcher,
         )
         app.state.runtime = runtime
         logger.info("application_started")
@@ -251,6 +276,59 @@ def build_lifespan(
             logger.info("application_stopped")
 
     return lifespan
+
+
+def build_distribution_publishers(
+    settings: PublishingSettings,
+    *,
+    session_factory: sessionmaker[Session],
+    data_dir: Path,
+    public_dir: Path,
+    rss_service: PublicationService,
+) -> tuple[Publisher, ...]:
+    """Build only configured adapters while keeping browser state under private storage."""
+    publishers: list[Publisher] = []
+    if settings.rss.enabled:
+        publishers.append(RSSDistributionPublisher(rss_service))
+    if settings.netease.enabled:
+        profile_dir = _private_storage_path(data_dir, settings.netease.profile_dir)
+        storage_state_path = _private_storage_path(data_dir, settings.netease.storage_state_path)
+        cover_path = (
+            _private_storage_path(data_dir, settings.netease.cover_path)
+            if settings.netease.cover_path is not None
+            else None
+        )
+        publishers.append(
+            NetEasePlaywrightPublisher(
+                session_factory,
+                public_dir=public_dir,
+                settings=NetEasePublisherSettings(
+                    profile_dir=profile_dir,
+                    storage_state_path=storage_state_path,
+                    creator_url=settings.netease.creator_url,
+                    headless=settings.netease.headless,
+                    category=settings.netease.category,
+                    cover_path=cover_path,
+                    timeout_ms=int(settings.netease.timeout_seconds * 1000),
+                ),
+            )
+        )
+    if settings.xiaoyuzhou.enabled:
+        publishers.append(XiaoyuzhouPublisher(program_url=settings.xiaoyuzhou.program_url))
+    return tuple(publishers)
+
+
+def _private_storage_path(data_dir: Path, configured: Path) -> Path:
+    """Resolve RPA profile/cover paths below DATA_DIR unless explicitly absolute."""
+    private_root = data_dir.resolve()
+    resolved = (
+        configured.resolve() if configured.is_absolute() else (private_root / configured).resolve()
+    )
+    try:
+        resolved.relative_to(private_root)
+    except ValueError as error:
+        raise ValueError("RPA profile and cover paths must stay below DATA_DIR") from error
+    return resolved
 
 
 def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) -> LLMProvider:

@@ -265,7 +265,7 @@ V1 明确不做：
 - 多 Agent 协作、向量知识库、向量数据库和复杂数据分析；
 - Redis、Celery、Kafka、Elasticsearch、Kubernetes 或微服务拆分；
 - 大量站点专用抓取器、绕过反爬或非官方逆向接口；
-- 自动发布网易云、Playwright RPA 发布和验证码自动绕过；
+- V1 初始版本不自动发布网易云；Sprint 10 已增加可选 Playwright 发布。验证码自动绕过仍是非目标；
 - 把 Dify 作为 V1 运行时、调度器、数据库或音频处理器；
 - 在同一实例并行生成多期重型任务，或提供商业级高可用。
 
@@ -343,6 +343,8 @@ V1 明确不做：
 
 ### V2.1：受控 RPA 发布
 
-- 实现 `NetEasePlaywrightPublisher`，使用独立持久化浏览器配置目录和人工登录。
+- Sprint 10 已实现 `NetEasePlaywrightPublisher`，使用独立持久化浏览器配置目录和人工登录。
+- 首次人工登录通过官方页面导出私有 storage state；生产只从 DATA_DIR 持久卷加载，不提交 Cookie/密码。
 - 登录失效、验证码、风控或页面选择器失配时进入 `needs_attention`，保存脱敏截图和 trace，等待人工处理；不尝试绕过安全机制。
 - RPA 仍只消费已批准的 Episode 和最终音频，不参与新闻理解或内容生成。
+- 每个平台使用独立 PublicationTarget；RSS 成功而网易云需要人工处理时，Episode 仍是有效生成结果。

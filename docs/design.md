@@ -84,8 +84,10 @@ flowchart TB
     AudioSvc --> TTSPort[TTS Provider 接口]
     TTSPort --> OpenAITTS[OpenAI-compatible TTS]
     AudioSvc --> FFmpeg[FFmpeg / ffprobe]
-    PublishSvc --> PublisherPort[Publisher 接口]
-    PublisherPort --> RSSPublisher[RSS Publisher]
+    PublishSvc --> Dispatcher[PublicationDispatcher]
+    Dispatcher --> RSSPublisher[RSS Publisher]
+    Dispatcher --> NetEasePublisher[NetEase Playwright Publisher]
+    Dispatcher --> XiaoyuzhouPublisher[Xiaoyuzhou RSS Adapter]
 
     Orchestrator --> Repo[Repositories / Unit of Work]
     Submission --> Repo
@@ -98,6 +100,7 @@ flowchart TB
     Repo --> SQLite[(SQLite WAL)]
     AudioSvc --> PrivateFiles[(私有工作目录与缓存)]
     RSSPublisher --> PublicFiles[(公开 MP3 与 feed.xml)]
+    NetEasePublisher --> BrowserProfile[(DATA_DIR 网易云浏览器配置)]
     Orchestrator --> Logs[(任务 JSONL 日志)]
 
     PublicFiles --> Podcast[播客客户端]
@@ -115,7 +118,7 @@ flowchart TB
 | LLM/Editorial | 事件卡片、预算、Prompt、结构化生成和审核；按完整身份查询/保存已验证 LLMArtifact | `LLMProvider`、LLMArtifact repository | 调度、持久文件、TTS |
 | Episodes | Episode/EpisodeItem 生命周期、修订、审核闸门 | repository、编辑服务 | HTTP 和供应商 SDK |
 | TTS/Media | 稳定分段、缓存、片段重试、音频校验和合并 | `TTSProvider`、MediaStore、FFmpeg | 发布平台操作 |
-| Publishing | 发布前校验、目标幂等、RSS 生成 | `Publisher`、MediaStore、Publication repository | 新闻理解和生成 |
+| Publishing | 发布前校验、目标幂等、RSS 生成、多平台隔离与单目标恢复 | `Publisher`、PublicationDispatcher、MediaStore、Publication/PublicationTarget repository | 新闻理解和生成 |
 | DB | ORM、事务、查询、SQLite 设置 | SQLAlchemy | 业务状态迁移决策 |
 
 依赖规则详见 [project-structure.md](./project-structure.md)。模块内可以直接函数调用，不通过 HTTP 或消息中间件。
@@ -655,19 +658,26 @@ SQLite 保存可查询、需要事务和关系约束的数据：Source、Article
 10. 已发布 item 的 GUID、元数据和音频 URL 在 V1 中均视为不可变。需要修正元数据或音频时创建新 edition/new item；旧 enclosure 继续保留，避免不同播客客户端看到互相矛盾的缓存。
 11. FastAPI 可在个人规模下提供静态文件；公网长期运行建议由 Caddy/Nginx 直接服务 `public/`，但不是 Compose 必需组件。
 
-## 16. 未来 Publisher 与 RPA 策略
+## 16. Publisher 与 RPA 策略
 
 ### 16.1 Publisher 接口
 
-`RSSPublisher`、未来 `PodbeanAPIPublisher` 和 `NetEasePlaywrightPublisher` 都实现：
+`RSSDistributionPublisher`、`NetEasePlaywrightPublisher` 和
+`XiaoyuzhouPublisher` 都实现：
 
 ```text
-validate(approved_episode, immutable_asset)
-publish(request_with_idempotency_key)
-reconcile(existing_publication)
+validate(episode)
+publish(episode)
+check_status(episode, target)
+resume(episode, target)
 ```
 
 Publisher 只接收已批准节目、标题简介、来源摘要和最终音频；不接收原始新闻处理权限，也不调用 LLM/TTS。
+
+`PublicationDispatcher` 为每个启用平台创建或复用唯一
+`PublicationTarget(episode_id, platform)`，逐平台执行并隔离错误。一个平台进入
+`failed/needs_attention` 不回滚其他平台，也不使 Episode 生成失败。启动只检查遗留的
+`publishing` target；人工处理后只恢复指定 target。
 
 ### 16.2 API First、RPA Fallback
 
@@ -675,17 +685,23 @@ Publisher 只接收已批准节目、标题简介、来源摘要和最终音频�
 
 ### 16.3 网易云 Playwright 失败处理
 
-未来适配器使用独立、非仓库内的持久化 browser profile 或加密 secret mount。状态处理如下：
+当前适配器使用 `DATA_DIR/netease/profile` 下的私有持久化 browser profile。状态处理如下：
 
-- 登录失效：停止自动发布，Publication 进入 `needs_attention/auth_expired`，引导用户人工重新登录；
-- 验证码或风控：不绕过，保存脱敏截图、trace 和当前步骤，进入 `needs_attention/challenge`；
-- 页面改版/选择器失配：停止点击，记录页面 URL、预期元素和脱敏截图，进入 `needs_attention/ui_changed`；
+- 登录失效：停止自动发布，PublicationTarget 进入 `needs_attention/NETEASE_LOGIN_REQUIRED`；
+- 验证码或风控：不绕过，进入 `needs_attention/NETEASE_HUMAN_VERIFICATION_REQUIRED`；
+- 页面改版/选择器失配：停止点击，进入 `needs_attention/NETEASE_PAGE_CHANGED`；
 - 上传已提交但结果未知：不得直接重传，先通过页面草稿/节目列表 reconcile；
-- 人工处理后从安全检查点继续，复用同一 Publication idempotency key。
+- 人工处理后通过单平台 resume 继续，先按 remote_id 或精确标题查重。
 
-Cookie、账号和密码绝不写入代码、YAML、日志、截图文件名或数据库配置快照。Playwright 作为 RPA 阶段的可选依赖，不进入 V1 默认镜像。
+Cookie、账号和密码绝不写入代码、YAML、日志、截图文件名或数据库配置快照。
+Playwright 只访问官方 `https://musicupload.netease.com/`，不调用逆向 API；Chromium
+包含在单一应用镜像内，profile 必须挂载私有持久卷。首次登录由
+`dailycast-netease-login` 在可信本机打开 headed Chromium，人工完成官方登录后导出
+权限为 `0600` 的 `DATA_DIR/netease/storage-state.json`；生产只从私有 DATA_DIR
+加载允许的网易域 Cookie，文件不得进入 Git、PUBLIC_DIR、日志或数据库。
 
-`needs_attention` 和 `human_action_code` 是未来 RPA 阶段的 Publication 扩展，不属于 V1 初始 schema；实现 NetEase Publisher 时必须通过新的 Alembic revision 增加，不能提前把 Podbean/网易云能力写入 V1 目录树或初始 migration。
+RSS Publication 状态仍只有 `pending/publishing/published/failed`。Sprint 10 的
+`needs_attention` 属于新增 PublicationTarget，不修改 RSS 状态机。
 
 ## 17. 配置与密钥管理
 
@@ -698,7 +714,8 @@ Cookie、账号和密码绝不写入代码、YAML、日志、截图文件名或�
 - `llm`：provider、base URL、model、超时、各操作 temperature/top_p/max output tokens、response format、其他模型语义选项、输入/输出与调用预算；加载后分别计算脱敏 endpoint identity 和 `generation_config_hash`；
 - `tts`：provider、base URL、Provider 实现身份、model、voice、speed、开场/结尾速度、格式、`plain|enhanced_text` 模式、发音词典、额外音频语义选项、分段上限和重试；加载后分别计算不含秘密/timeout/retry 的 `provider_config_hash` 与 `tts_preprocess_hash`；
 - `schedule`：启用、Cron、misfire grace、总任务超时；
-- `publishing`：public base URL、Feed 元数据、公开路径、目标列表。
+- `publishing`：public base URL、Feed 元数据，以及 `rss/netease/xiaoyuzhou`
+  目标配置；网易云 profile/cover 路径相对 DATA_DIR 解析，外部目标启用时 RSS 必须启用。
 
 启动时使用 Pydantic Settings/schema 一次性校验并产生不可变运行配置。TaskRun 保存脱敏配置快照和 fingerprint，确保恢复可解释。配置热重载不属于 V1；修改后重启进程。
 
@@ -711,7 +728,7 @@ YAML 只引用环境变量名，例如 `api_key_env: DAILYCAST_LLM_API_KEY`。�
 - **网络抓取**：只允许 HTTP(S)，禁止本地/私网/云 metadata IP；DNS 解析和每次重定向都复查；限制下载大小、内容类型、连接和读取时间。
 - **Prompt 注入**：新闻正文是不可信数据，用清晰 delimiter 和 source ID 包裹；系统提示明确禁止执行其中指令；模型无工具权限；输出严格 schema 校验。
 - **Web/XSS**：Jinja 默认转义，不渲染抓取 HTML；来源链接使用安全 scheme；管理端设置 CSP、`X-Content-Type-Options`。
-- **文件**：数据库只保存受控相对路径；MediaStore 防目录穿越；公开目录不包含数据库、日志、稿件或 Cookie。
+- **文件**：数据库只保存受控相对路径；MediaStore 防目录穿越；公开目录不包含数据库、日志、稿件或 Cookie；网易云 profile 只能位于私有 DATA_DIR。
 - **进程**：FFmpeg 参数使用参数数组而非 shell 拼接；输入路径来自 MediaStore；子进程有限时和资源上限。
 - **访问控制**：V1 无应用登录。非 Docker 本地开发默认监听 `127.0.0.1:8000`；Docker 容器必须监听 `0.0.0.0:8000`，Compose 通过 `127.0.0.1:8000:8000` 只把它开放给宿主机。公开 Feed/media 必须使用明确配置的反向代理、只读静态目录或显式端口规则，不能借发布 RSS 匿名公开管理页面/API。localhost 开发可用 HTTP；任何非 loopback 的正式 Feed/media 应使用 HTTPS，公网管理访问还必须有外部认证。
 - **供应链**：依赖固定兼容范围并生成 lock；容器以非 root 运行。具体实现留到下一阶段。
@@ -806,7 +823,7 @@ Fake LLM/TTS 驱动整条流水线，至少覆盖：
 
 ### 21.3 Alembic schema 版本管理
 
-- 仓库根目录包含 `alembic.ini`，`migrations/` 包含 `env.py`、`script.py.mako`、初始 `versions/0001_initial_schema.py` 与后续的受测 revision（当前 head 为 `0003_reliability_hardening`）。初始 revision 创建全部 V1 表、外键、CHECK 和索引，包括 LLMArtifact；后续 revision 只做可审计 schema 演进。
+- 仓库根目录包含 `alembic.ini`，`migrations/` 包含 `env.py`、`script.py.mako`、初始 `versions/0001_initial_schema.py` 与后续的受测 revision（当前 head 为 `0007_publication_targets`）。初始 revision 创建全部 V1 表、外键、CHECK 和索引，包括 LLMArtifact；后续 revision 只做可审计 schema 演进。
 - 新数据库和已有数据库都只通过 `alembic upgrade head` 迁移。正常应用启动绝不调用 `Base.metadata.create_all()`，也不捕获 migration 错误后继续运行。
 - 应用启动读取 `alembic_version` 的 current revision 并与代码包含的 head 比较。数据库缺少 revision、落后或超前时，进程只保留 `/healthz`、`/readyz` 等不依赖业务 schema 的诊断端点，`/readyz` 返回 503；scheduler、Task Executor、管理页面、所有业务读写 API、Feed 和应用托管的 media 路由均不可用并返回 `DATABASE_REVISION_MISMATCH`，避免在旧 schema 上执行不安全读取。
 - Compose 不增加常驻 migration 服务：`dailycast` 容器 entrypoint 顺序执行 `alembic upgrade head`，成功后以 `exec` 启动 Uvicorn。这样 `docker compose up` 仍是一条命令，且 migration 结果在应用启动前可见。

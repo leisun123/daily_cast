@@ -42,7 +42,7 @@ task_execution:
 # openai_responses (Responses/Codex). The key deliberately stays out of YAML.
 # Set DAILYCAST_LLM__API_KEY in .env or the deployment environment instead.
 llm:
-  provider: openai_compatible
+  provider: openai_responses
   base_url: https://api.openai.com/v1
   model: gpt-5.6-terra
   temperature: 0.1
@@ -114,6 +114,24 @@ publishing:
   feed_description: A personal AI news podcast.
   language: zh-CN
   author: DailyCast
+  rss:
+    enabled: true
+  # Uses only the official creator website through Playwright. Login cookies
+  # live in this DATA_DIR-relative persistent profile; no password is configured.
+  netease:
+    enabled: false
+    profile_dir: netease/profile
+    storage_state_path: netease/storage-state.json
+    headless: true
+    creator_url: https://musicupload.netease.com/
+    category: 科技
+    cover_path: null
+    timeout_seconds: 120
+  # Xiaoyuzhou consumes the public RSS. After manual claim, set its official
+  # podcast URL if per-platform status tracking is desired.
+  xiaoyuzhou:
+    enabled: false
+    program_url: null
 
 # Structured JSON logs are written to the console at this minimum level.
 logging:
