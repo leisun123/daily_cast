@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 from test_episode_service import accepted_artifacts, create_episode
@@ -874,16 +875,13 @@ def test_container_installs_playwright_chromium_for_single_service_rpa() -> None
 def test_zeabur_template_persists_netease_profile_and_documents_target_settings() -> None:
     """GitHub deployments keep login state inside the existing private /app/data volume."""
     project_root = Path(__file__).resolve().parents[1]
-    template = (project_root / "zeabur.yaml").read_text(encoding="utf-8")
-    env_example = (project_root / ".env.example").read_text(encoding="utf-8")
+    template = yaml.safe_load((project_root / "zeabur.yaml").read_text(encoding="utf-8"))
+    service_spec = template["spec"]["services"][0]["spec"]
+    runtime_config = yaml.safe_load(service_spec["configs"][0]["template"])
+    netease = runtime_config["publishing"]["netease"]
 
-    assert "dir: /app/data" in template
-    assert "DAILYCAST_PUBLISHING__NETEASE__ENABLED:" in template
-    assert "DAILYCAST_PUBLISHING__NETEASE__PROFILE_DIR:" in template
-    assert "DAILYCAST_PUBLISHING__NETEASE__STORAGE_STATE_PATH:" in template
-    assert "DAILYCAST_PUBLISHING__RSS__ENABLED:" in template
-    assert "DAILYCAST_PUBLISHING__NETEASE__ENABLED=false" in env_example
-    assert "DAILYCAST_PUBLISHING__NETEASE__PROFILE_DIR=netease/profile" in env_example
-    assert (
-        "DAILYCAST_PUBLISHING__NETEASE__STORAGE_STATE_PATH=" "netease/storage-state.json"
-    ) in env_example
+    assert {"id": "data", "dir": "/app/data"} in service_spec["volumes"]
+    assert runtime_config["publishing"]["rss"]["enabled"] is True
+    assert netease["enabled"] is True
+    assert netease["profile_dir"] == "netease/profile"
+    assert netease["storage_state_path"] == "netease/storage-state.json"

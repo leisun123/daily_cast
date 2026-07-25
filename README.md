@@ -64,7 +64,9 @@ cd dailycast
 cp .env.example .env
 ```
 
-Edit `.env` for environment-specific values and review `config/app.example.yaml` and `config/sources.example.yaml`. Set `DAILYCAST_LLM__API_KEY` only in your local `.env` or deployment environment; never put it in YAML or commit it.
+Edit `.env` only for the LLM endpoint and API key, then review
+`config/app.example.yaml` and `config/sources.example.yaml` for non-secret behavior.
+Never put the API key in YAML or commit it.
 
 Start the service:
 
@@ -89,14 +91,18 @@ The Feed URL is `http://127.0.0.1:8000/feed.xml`. It returns `404` until at leas
 
 DailyCast uses two configuration layers:
 
-- `.env` holds environment-specific values and secrets. Start with `.env.example`; its LLM API-key value is intentionally blank.
+- `.env` contains only the configuration path, optional LLM endpoint override, and LLM
+  API key. Start with `.env.example`; its API-key value is intentionally blank.
 - `config/app.example.yaml` contains non-secret application, database, processing, LLM, TTS, FFmpeg, scheduler, and RSS defaults.
 - `config/pronunciation.yaml` is a non-secret, versioned pronunciation dictionary used only
   while preparing provider input. It supports natural number and abbreviation speech without
   altering the reviewable stored script; changing it invalidates the affected audio cache.
 - `config/sources.example.yaml` declares first-run source seeds. At startup, DailyCast creates only missing source IDs and never overwrites existing SQLite source edits; do not store credentials in source configuration.
 
-Environment variables override YAML. `DATA_DIR` and `PUBLIC_DIR` select the runtime roots for local development; Compose also provides `DAILYCAST_DATA_DIR` and `DAILYCAST_PUBLIC_DIR` for the host-side volume paths.
+Environment variables still override YAML when an advanced deployment needs it, but normal
+operators should edit YAML instead of maintaining a second list of every default. `DATA_DIR`
+and `PUBLIC_DIR` remain supported optional overrides; Compose already supplies suitable
+volume defaults without listing them in `.env.example`.
 
 `task_execution.deadline_seconds` is a durable overall deadline checked at pipeline
 checkpoint boundaries. A timed-out run preserves its completed checkpoints for a later
@@ -111,15 +117,16 @@ For a non-loopback public Feed, configure an explicit HTTPS `DAILYCAST_PUBLISHIN
 
 ### NetEase Cloud Music
 
-NetEase delivery is opt-in and uses only the official creator website. DailyCast never
-stores a username or password and never calls reverse-engineered APIs. Enable it after
-an RSS publication is working:
+NetEase delivery uses only the official creator website. DailyCast never stores a username
+or password and never calls reverse-engineered APIs. Local deployments can enable it in
+`config/app.example.yaml`; the Zeabur deployment profile enables it by default:
 
-```dotenv
-DAILYCAST_PUBLISHING__RSS__ENABLED=true
-DAILYCAST_PUBLISHING__NETEASE__ENABLED=true
-DAILYCAST_PUBLISHING__NETEASE__PROFILE_DIR=netease/profile
-DAILYCAST_PUBLISHING__NETEASE__HEADLESS=true
+```yaml
+publishing:
+  rss:
+    enabled: true
+  netease:
+    enabled: true
 ```
 
 The Chromium profile is stored under `DATA_DIR/netease/profile` and must be kept on a
@@ -156,12 +163,17 @@ security controls.
 
 `zeabur.yaml` is a one-service deployment resource whose source is the public GitHub repository's
 `main` branch. It does not upload local source code. The resource mounts `/app/data` and
-`/app/public` as persistent volumes, enables the Asia/Shanghai 06:00 daily schedule, runs
-Alembic before Uvicorn, and binds a Zeabur HTTPS domain to the RSS service.
+`/app/public` as persistent volumes, enables the Asia/Shanghai 06:00 daily schedule and
+NetEase target, runs Alembic before Uvicorn, and binds a Zeabur HTTPS domain to the RSS
+service.
 
-During deployment, supply the public domain and LLM provider settings. The API key is a Zeabur
-password variable and must never be committed. The template enables `app.public_only`, so the
-public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
+During deployment, maintain only three inputs: `PUBLIC_DOMAIN`,
+`DAILYCAST_LLM__BASE_URL`, and `DAILYCAST_LLM__API_KEY`. Provider, model, schedule,
+paths, TTS, RSS, and NetEase defaults live in one generated non-secret YAML configuration
+instead of being duplicated as environment variables. `PORT` and `PASSWORD` are
+Zeabur-provided service variables rather than DailyCast settings. The API key is a Zeabur
+password variable and must never be committed. The template enables `app.public_only`, so
+the public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
 `/media/episodes/...` assets. Management pages and `POST /generate` return `404`; production
 generation is driven by the durable scheduler.
 

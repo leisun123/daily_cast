@@ -103,7 +103,7 @@ class LLMBudgetSettings(BaseModel):
 class LLMSettings(BaseModel):
     """Direct model-provider settings; the key comes only from .env or environment."""
 
-    provider: str = "openai_compatible"
+    provider: str = "openai_responses"
     base_url: str = "https://api.openai.com/v1"
     api_key: str | None = None
     model: str = "gpt-5.6-terra"
