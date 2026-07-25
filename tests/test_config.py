@@ -31,6 +31,19 @@ def test_dotenv_overrides_yaml_when_environment_is_absent(
     assert settings.app.server.host == "0.0.0.0"
 
 
+def test_tts_voice_dotenv_overrides_yaml_when_environment_is_absent(
+    app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The local voice selection is visible and takes precedence over the YAML default."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("DAILYCAST_TTS__VOICE=zh-CN-YunjianNeural\n", encoding="utf-8")
+    monkeypatch.delenv("DAILYCAST_TTS__VOICE", raising=False)
+
+    settings = load_settings(config_path=app_config_path, env_file=env_file)
+
+    assert settings.tts.voice == "zh-CN-YunjianNeural"
+
+
 def test_processing_defaults_are_loaded_from_configuration(app_config_path: Path) -> None:
     """Processing bounds are explicit configuration rather than hidden rule constants."""
     settings = load_settings(config_path=app_config_path)

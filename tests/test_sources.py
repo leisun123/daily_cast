@@ -46,6 +46,7 @@ from dailycast.pipeline.orchestrator import PipelineOrchestrator, build_collecti
 from dailycast.pipeline.submission import TaskSubmissionService
 from dailycast.sources.contracts import ArticleCandidate, CollectionWindow
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy, SafeHttpFetcher
+from dailycast.sources.html_list import HTMLListCollector
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import (
     ArticleService,
@@ -293,6 +294,73 @@ def test_rss_collector_returns_article_candidates_from_fixture() -> None:
         assert first.summary == "First summary."
         assert first.external_id == "hn-1001"
         assert first.published_at == datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+
+    asyncio.run(scenario())
+
+
+def test_html_list_collector_discovers_only_matching_public_recruitment_announcements() -> None:
+    """Official list pages become dated candidates after their recruitment title is matched."""
+
+    async def scenario() -> None:
+        html = """
+        <html><body><ul>
+        <li>
+          <a href="/content/show?id=100">2026年常州市事业单位公开招聘工作人员公告</a>
+          <span>2026-07-16</span>
+        </li>
+        <li>
+          <a href="https://other.example.test/notice">2026年事业单位公开招聘公告</a>
+          <span>2026-07-16</span>
+        </li>
+        <li><a href="/content/show?id=101">社会保险缴费基数调整通知</a><span>2026-07-15</span></li>
+        </ul></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            source = Source(
+                **source_values()
+                | {
+                    "id": "changzhou-public-recruitment",
+                    "name": "常州市事业单位公开招聘",
+                    "kind": SourceKind.HTML_LIST,
+                    "entry_url": "https://rsj.changzhou.gov.cn/recruitment",
+                    "normalized_entry_url": "https://rsj.changzhou.gov.cn/recruitment",
+                    "language": "zh-CN",
+                    "config_json": (
+                        '{"include_title_keywords":["事业单位","公务员","公开招聘"],'
+                        '"timezone":"Asia/Shanghai"}'
+                    ),
+                }
+            )
+            collector = HTMLListCollector(SafeHttpFetcher(client, url_validator=AllowAllUrls()))
+            result = await collector.collect(
+                source,
+                CollectionWindow(
+                    start=datetime(2026, 7, 15, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 17, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.errors == ()
+        assert len(result.candidates) == 1
+        candidate = result.candidates[0]
+        assert candidate.title == "2026年常州市事业单位公开招聘工作人员公告"
+        assert candidate.url == "https://rsj.changzhou.gov.cn/content/show?id=100"
+        assert candidate.published_at == datetime(2026, 7, 15, 16, tzinfo=UTC)
+        assert candidate.language == "zh-CN"
+        assert candidate.metadata == {"list_url": "https://rsj.changzhou.gov.cn/recruitment"}
 
     asyncio.run(scenario())
 
