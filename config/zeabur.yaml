@@ -19,6 +19,11 @@ scheduler:
   enabled: true
   cron_expression: "0 6 * * *"
 
+# DeepSeek's OpenAI-compatible Chat Completions endpoint accepts JSON mode,
+# rather than the OpenAI-specific json_schema response format.
+llm:
+  response_format: json_object
+
 editorial:
   enforce_quality_gate: false
 
