@@ -36,6 +36,7 @@ from dailycast.publishing.service import PublicationService
 from dailycast.scheduler.service import SchedulerService
 from dailycast.sources.bootstrap import seed_missing_sources
 from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
+from dailycast.sources.html_list import HTMLListCollector
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import ArticleService, SourceCollectionService
 from dailycast.tts.merge import FFmpegMerger
@@ -101,7 +102,10 @@ def build_lifespan(
             article_service = ArticleService(session_factory)
             collection_service = SourceCollectionService(
                 session_factory,
-                {SourceKind.RSS: RSSCollector(fetcher)},
+                {
+                    SourceKind.RSS: RSSCollector(fetcher),
+                    SourceKind.HTML_LIST: HTMLListCollector(fetcher),
+                },
                 article_service,
             )
             processing_policy = ProcessingPolicy(

@@ -31,7 +31,7 @@ def _factory(app_config_path: Path) -> sessionmaker[Session]:
 def test_startup_seeds_missing_sources_from_default_source_configuration(
     app_config_path: Path,
 ) -> None:
-    """A first Docker startup makes the configured Hacker News RSS source collectable."""
+    """A first startup makes curated RSS feeds and official recruitment notices collectable."""
     factory = _factory(app_config_path)
     try:
         with TestClient(create_app(config_path=app_config_path)):
@@ -42,7 +42,12 @@ def test_startup_seeds_missing_sources_from_default_source_configuration(
             sources = SourceRepository(unit.session).list()
 
         assert [(source.id, source.name) for source in sources] == [
-            ("hacker-news-rss", "Hacker News")
+            ("changzhou-public-recruitment", "常州市事业单位公开招聘"),
+            ("jiangsu-civil-service-notices", "江苏省公务员考试专题"),
+            ("hacker-news-rss", "Hacker News"),
+            ("ithome-rss", "IT之家"),
+            ("oschina-news-rss", "开源中国"),
+            ("sspai-rss", "少数派"),
         ]
     finally:
         factory.kw["bind"].dispose()

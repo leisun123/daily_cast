@@ -1,6 +1,6 @@
-# Source configuration example. V0.1 Alpha ships an RSS collector and extracts
-# linked web-page text through the shared safe HTTP extractor. No source
-# credential belongs in this file.
+# Source configuration example. V0.1 Alpha supports RSS/Atom feeds and
+# same-host official HTML announcement lists, then extracts linked article text
+# through the shared safe HTTP extractor. No source credential belongs here.
 sources:
   - id: hacker-news-rss
     name: Hacker News
@@ -11,4 +11,69 @@ sources:
     language: en
     request_timeout_seconds: 20
     max_items_per_run: 50
+    config: {}
+  # Official Changzhou public-institution recruitment announcements and results.
+  - id: changzhou-public-recruitment
+    name: 常州市事业单位公开招聘
+    kind: html_list
+    entry_url: https://rsj.changzhou.gov.cn/content/suitable/list?cate_id=33943
+    priority: 95
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      include_title_keywords:
+        - 事业单位
+        - 公开招聘
+        - 招聘工作人员
+        - 资格复审
+        - 面试
+        - 笔试
+        - 递补
+        - 拟聘用
+      timezone: Asia/Shanghai
+  # Official provincial civil-service examination notices relevant to Changzhou applicants.
+  - id: jiangsu-civil-service-notices
+    name: 江苏省公务员考试专题
+    kind: html_list
+    entry_url: https://jshrss.jiangsu.gov.cn/col/col57253/index.html
+    priority: 95
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      include_title_keywords:
+        - 公务员
+        - 考试录用
+        - 招录
+      timezone: Asia/Shanghai
+  # Broad Chinese technology, digital-product, and industry news.
+  - id: ithome-rss
+    name: IT之家
+    kind: rss
+    entry_url: https://www.ithome.com/rss/
+    priority: 75
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config: {}
+  # Chinese software, open-source, and developer-industry coverage.
+  - id: oschina-news-rss
+    name: 开源中国
+    kind: rss
+    entry_url: https://www.oschina.net/news/rss
+    priority: 70
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config: {}
+  # Chinese digital-product and consumer-technology reporting.
+  - id: sspai-rss
+    name: 少数派
+    kind: rss
+    entry_url: https://sspai.com/feed
+    priority: 65
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 20
     config: {}
