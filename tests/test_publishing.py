@@ -311,7 +311,7 @@ def test_reconcile_rebuilds_feed_when_a_published_item_is_missing(
         factory.kw["bind"].dispose()
 
 
-def test_public_feed_and_audio_endpoints_support_etag_and_byte_ranges(
+def test_public_feed_and_audio_endpoints_support_head_etag_and_byte_ranges(
     app_config_path: Path, tmp_path: Path
 ) -> None:
     """Only published immutable media is served, with standard ETag and Range behavior."""
@@ -322,7 +322,11 @@ def test_public_feed_and_audio_endpoints_support_etag_and_byte_ranges(
 
         with TestClient(create_app(config_path=app_config_path)) as client:
             feed = client.get("/feed.xml")
+            feed_head = client.head("/feed.xml")
             media = client.get(
+                f"/media/episodes/{episode.public_id}/{publication.asset_sha256}.mp3"
+            )
+            media_head = client.head(
                 f"/media/episodes/{episode.public_id}/{publication.asset_sha256}.mp3"
             )
             ranged = client.get(
@@ -332,9 +336,16 @@ def test_public_feed_and_audio_endpoints_support_etag_and_byte_ranges(
 
         assert feed.status_code == 200
         assert episode.public_id in feed.text
+        assert feed_head.status_code == 200
+        assert feed_head.headers["content-type"].startswith("application/rss+xml")
+        assert feed_head.content == b""
         assert media.status_code == 200
         assert media.headers["etag"] == f'"{publication.asset_sha256}"'
         assert media.headers["accept-ranges"] == "bytes"
+        assert media_head.status_code == 200
+        assert media_head.headers["etag"] == f'"{publication.asset_sha256}"'
+        assert media_head.headers["accept-ranges"] == "bytes"
+        assert media_head.content == b""
         assert ranged.status_code == 206
         assert ranged.headers["content-range"].startswith("bytes 0-9/")
         assert len(ranged.content) == 10

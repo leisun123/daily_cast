@@ -203,7 +203,7 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         status_code = 200 if report.ready else 503
         return JSONResponse(status_code=status_code, content=report.as_dict())
 
-    @app.get("/feed.xml", tags=["public"])
+    @app.api_route("/feed.xml", methods=["GET", "HEAD"], tags=["public"])
     async def feed(runtime: RuntimeDependency) -> FileResponse:
         """Serve only atomically published Feed data, never a draft or temporary file."""
         _require_ready(runtime)
@@ -212,7 +212,11 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="RSS feed is not published")
         return FileResponse(feed_path, media_type="application/rss+xml; charset=utf-8")
 
-    @app.get("/media/episodes/{episode_public_id}/{asset_filename}.mp3", tags=["public"])
+    @app.api_route(
+        "/media/episodes/{episode_public_id}/{asset_filename}.mp3",
+        methods=["GET", "HEAD"],
+        tags=["public"],
+    )
     async def media(
         episode_public_id: str, asset_filename: str, runtime: RuntimeDependency
     ) -> FileResponse:
