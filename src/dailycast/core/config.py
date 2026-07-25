@@ -1,7 +1,6 @@
 """Pydantic Settings loader with YAML, .env, and environment overrides."""
 
 import os
-import re
 from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
@@ -24,9 +23,7 @@ _yaml_path_context: ContextVar[Path] = ContextVar(
 )
 _env_file_context: ContextVar[Path | None] = ContextVar("dailycast_env_file_path", default=None)
 
-_UNRESOLVED_TEMPLATE_REFERENCE = re.compile(r"^\$\{[A-Z][A-Z0-9_]*\}$")
-_LLM_TEMPLATE_COMPATIBILITY_FIELDS = frozenset({"provider", "base_url", "model", "api_key"})
-_LEGACY_LLM_ENVIRONMENT_NAMES = {
+_LLM_ENVIRONMENT_NAMES = {
     "LLM_PROVIDER": "provider",
     "LLM_BASE_URL": "base_url",
     "LLM_MODEL": "model",
@@ -276,13 +273,8 @@ class DirectStoragePathSettingsSource(PydanticBaseSettingsSource):
         return self._values
 
 
-def _is_unresolved_template_reference(value: Any) -> bool:
-    """Return whether a deployment persisted an unexpanded `${VARIABLE}` literal."""
-    return isinstance(value, str) and _UNRESOLVED_TEMPLATE_REFERENCE.fullmatch(value) is not None
-
-
-class UnresolvedTemplateFilteringSettingsSource(PydanticBaseSettingsSource):
-    """Discard unresolved LLM placeholder literals before validation and source merging."""
+class DailyCastWithoutLLMSettingsSource(PydanticBaseSettingsSource):
+    """Preserve DAILYCAST_* settings while reserving LLM configuration for LLM_* names."""
 
     def __init__(
         self,
@@ -297,30 +289,17 @@ class UnresolvedTemplateFilteringSettingsSource(PydanticBaseSettingsSource):
         return self._delegate.get_field_value(field, field_name)
 
     def __call__(self) -> dict[str, Any]:
-        """Remove only `${NAME}` values from LLM settings, preserving all real overrides."""
+        """Remove every nested `llm` value from the DAILYCAST_* source."""
         values = self._delegate()
-        llm_values = values.get("llm")
-        if not isinstance(llm_values, dict):
+        if "llm" not in values:
             return values
-
-        sanitized_llm = {
-            field_name: value
-            for field_name, value in llm_values.items()
-            if not (
-                field_name in _LLM_TEMPLATE_COMPATIBILITY_FIELDS
-                and _is_unresolved_template_reference(value)
-            )
-        }
-        if sanitized_llm == llm_values:
-            return values
-
         sanitized_values = dict(values)
-        sanitized_values["llm"] = sanitized_llm
+        del sanitized_values["llm"]
         return sanitized_values
 
 
-class LegacyLLMSettingsSource(PydanticBaseSettingsSource):
-    """Read old bare LLM names only as a temporary Zeabur migration fallback."""
+class CanonicalLLMSettingsSource(PydanticBaseSettingsSource):
+    """Load the only supported model-provider environment interface: LLM_*."""
 
     def __init__(
         self,
@@ -330,9 +309,8 @@ class LegacyLLMSettingsSource(PydanticBaseSettingsSource):
         super().__init__(settings_cls)
         llm_values = {
             setting_name: raw_value
-            for environment_name, setting_name in _LEGACY_LLM_ENVIRONMENT_NAMES.items()
+            for environment_name, setting_name in _LLM_ENVIRONMENT_NAMES.items()
             if (raw_value := values.get(environment_name)) is not None
-            and not _is_unresolved_template_reference(raw_value)
         }
         self._values: dict[str, Any] = {"llm": llm_values} if llm_values else {}
 
@@ -342,7 +320,7 @@ class LegacyLLMSettingsSource(PydanticBaseSettingsSource):
         return self._values.get(field_name), field_name, False
 
     def __call__(self) -> dict[str, Any]:
-        """Provide legacy fields only when a higher-priority native value is absent."""
+        """Provide canonical model settings at normal environment precedence."""
         return self._values
 
 
@@ -385,11 +363,11 @@ class Settings(BaseSettings):
         dotenv_values_map = dotenv_values(dotenv_path) if dotenv_path is not None else {}
         return (
             init_settings,
-            UnresolvedTemplateFilteringSettingsSource(settings_cls, env_settings),
-            LegacyLLMSettingsSource(settings_cls, os.environ),
+            DailyCastWithoutLLMSettingsSource(settings_cls, env_settings),
+            CanonicalLLMSettingsSource(settings_cls, os.environ),
             DirectStoragePathSettingsSource(settings_cls),
-            UnresolvedTemplateFilteringSettingsSource(settings_cls, dotenv_settings),
-            LegacyLLMSettingsSource(settings_cls, dotenv_values_map),
+            DailyCastWithoutLLMSettingsSource(settings_cls, dotenv_settings),
+            CanonicalLLMSettingsSource(settings_cls, dotenv_values_map),
             YamlSettingsSource(settings_cls, _yaml_path_context.get()),
             file_secret_settings,
         )

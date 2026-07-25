@@ -40,7 +40,7 @@ task_execution:
 
 # Supported direct providers are openai_compatible (Chat Completions) and
 # openai_responses (Responses/Codex). The key deliberately stays out of YAML.
-# Set DAILYCAST_LLM__API_KEY in .env or the deployment environment instead.
+# Set LLM_API_KEY in .env or the deployment environment instead.
 llm:
   provider: openai_compatible
   base_url: https://api.openai.com/v1

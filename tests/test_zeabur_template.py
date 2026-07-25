@@ -31,25 +31,33 @@ def test_zeabur_template_uses_github_and_persistent_runtime_volumes() -> None:
     assert spec["env"]["DAILYCAST_PUBLISHING__PUBLIC_BASE_URL"]["default"] == "${ZEABUR_WEB_URL}"
 
 
-def test_zeabur_template_exposes_only_the_llm_environment_names_dailycast_reads() -> None:
-    """Template input names must not create unused LLM_* duplicates in a service."""
+def test_zeabur_template_exposes_only_the_canonical_llm_environment_names() -> None:
+    """Template input names must match the only LLM variables application code reads."""
     template_path = Path(__file__).parents[1] / "zeabur.yaml"
     resource = yaml.safe_load(template_path.read_text(encoding="utf-8"))
     variable_keys = {variable["key"] for variable in resource["spec"]["variables"]}
     service_environment = resource["spec"]["services"][0]["spec"]["env"]
 
     assert {
-        "DAILYCAST_LLM__PROVIDER",
-        "DAILYCAST_LLM__BASE_URL",
-        "DAILYCAST_LLM__MODEL",
-        "DAILYCAST_LLM__API_KEY",
+        "LLM_PROVIDER",
+        "LLM_BASE_URL",
+        "LLM_MODEL",
+        "LLM_API_KEY",
     }.issubset(variable_keys)
-    assert not {"LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY"} & variable_keys
+    assert (
+        not {
+            "DAILYCAST_LLM__PROVIDER",
+            "DAILYCAST_LLM__BASE_URL",
+            "DAILYCAST_LLM__MODEL",
+            "DAILYCAST_LLM__API_KEY",
+        }
+        & variable_keys
+    )
     assert not {
-        "DAILYCAST_LLM__PROVIDER",
-        "DAILYCAST_LLM__BASE_URL",
-        "DAILYCAST_LLM__MODEL",
-        "DAILYCAST_LLM__API_KEY",
+        "LLM_PROVIDER",
+        "LLM_BASE_URL",
+        "LLM_MODEL",
+        "LLM_API_KEY",
     } & set(service_environment)
 
 

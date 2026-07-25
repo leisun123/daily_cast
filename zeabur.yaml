@@ -9,19 +9,19 @@ spec:
       type: DOMAIN
       name: Public podcast domain
       description: Public HTTPS domain used by the RSS Feed and immutable MP3 URLs.
-    - key: DAILYCAST_LLM__PROVIDER
+    - key: LLM_PROVIDER
       type: STRING
       name: LLM provider
       description: Application provider name, such as openai_responses or openai_compatible.
-    - key: DAILYCAST_LLM__BASE_URL
+    - key: LLM_BASE_URL
       type: STRING
       name: LLM base URL
       description: Application endpoint without embedded credentials.
-    - key: DAILYCAST_LLM__MODEL
+    - key: LLM_MODEL
       type: STRING
       name: LLM model
       description: Model identifier supported by the configured endpoint.
-    - key: DAILYCAST_LLM__API_KEY
+    - key: LLM_API_KEY
       type: PASSWORD
       name: LLM API key
       description: Secret API key stored only in Zeabur environment configuration.

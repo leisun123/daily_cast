@@ -704,7 +704,7 @@ Cookie、账号和密码绝不写入代码、YAML、日志、截图文件名或�
 
 ### 17.2 密钥
 
-YAML 只引用环境变量名，例如 `api_key_env: DAILYCAST_LLM_API_KEY`。应用读取值后只将 Secret 类型传给 Provider；序列化、repr 和日志过滤器必须脱敏。`.env.example` 只列变量名和说明，不含任何真实值。生产部署优先使用 Compose secret/environment 注入并限制 `.env` 权限。
+YAML 只引用环境变量名，例如 `api_key_env: LLM_API_KEY`。应用读取值后只将 Secret 类型传给 Provider；序列化、repr 和日志过滤器必须脱敏。`.env.example` 只列变量名和说明，不含任何真实值。生产部署优先使用 Compose secret/environment 注入并限制 `.env` 权限。
 
 ## 18. 安全边界
 

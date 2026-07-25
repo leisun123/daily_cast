@@ -112,10 +112,10 @@ def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path
     assert settings.scheduler.enabled is True
 
 
-def test_unresolved_native_llm_placeholders_fall_back_to_existing_legacy_values(
+def test_llm_settings_use_canonical_llm_names_when_dailycast_values_are_placeholders(
     app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A literal Zeabur template reference never overrides a real inherited setting."""
+    """The canonical LLM variables keep a service working through the broken old rows."""
     monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "${LLM_PROVIDER}")
     monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "${LLM_BASE_URL}")
     monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "${LLM_API_KEY}")
@@ -130,10 +130,10 @@ def test_unresolved_native_llm_placeholders_fall_back_to_existing_legacy_values(
     assert settings.llm.api_key == "existing-secret"
 
 
-def test_real_native_llm_values_take_precedence_over_legacy_compatibility_values(
+def test_dailycast_llm_values_are_ignored_in_favor_of_canonical_llm_names(
     app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fresh deployments stay on the documented native DailyCast variable names."""
+    """Only LLM_* is a supported environment interface for model configuration."""
     monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "openai_compatible")
     monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "https://native.example/v1")
     monkeypatch.setenv("LLM_PROVIDER", "openai_responses")
@@ -141,8 +141,8 @@ def test_real_native_llm_values_take_precedence_over_legacy_compatibility_values
 
     settings = load_settings(config_path=app_config_path, env_file=tmp_path / "absent.env")
 
-    assert settings.llm.provider == "openai_compatible"
-    assert settings.llm.base_url == "https://native.example/v1"
+    assert settings.llm.provider == "openai_responses"
+    assert settings.llm.base_url == "https://legacy.example/v1"
 
 
 def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:
