@@ -136,6 +136,12 @@ public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
 `/media/episodes/...` assets plus `/cover.png`. Management pages and `POST /generate` return `404`; production
 generation is driven by the durable scheduler.
 
+Use only the four application-native LLM variable names in Zeabur:
+`DAILYCAST_LLM__PROVIDER`, `DAILYCAST_LLM__BASE_URL`, `DAILYCAST_LLM__MODEL`, and the
+password variable `DAILYCAST_LLM__API_KEY`. Older `LLM_PROVIDER`, `LLM_BASE_URL`,
+`LLM_MODEL`, and `LLM_API_KEY` rows are not read by DailyCast and should be removed from an
+existing service after confirming the corresponding `DAILYCAST_LLM__*` values are present.
+
 Deploy into a selected Zeabur project with:
 
 ```bash

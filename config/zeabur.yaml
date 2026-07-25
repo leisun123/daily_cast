@@ -1,0 +1,26 @@
+# Stable, non-secret settings for the GitHub-based Zeabur deployment. Dynamic
+# LLM credentials and the Zeabur public origin remain environment values.
+app:
+  environment: production
+  timezone: Asia/Shanghai
+  public_only: true
+  server:
+    host: 0.0.0.0
+    port: 8000
+
+database:
+  url: sqlite:////app/data/dailycast.db
+
+storage:
+  data_dir: /app/data
+  public_dir: /app/public
+
+scheduler:
+  enabled: true
+  cron_expression: "0 6 * * *"
+
+editorial:
+  enforce_quality_gate: false
+
+publishing:
+  auto_publish: true

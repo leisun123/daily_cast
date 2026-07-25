@@ -77,6 +77,27 @@ def test_alpha_example_unblocks_quality_gated_output_and_auto_publish(tmp_path: 
     assert settings.resolve_path(settings.tts.pronunciation_dictionary_path).is_file()
 
 
+def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environment(
+    tmp_path: Path,
+) -> None:
+    """Zeabur supplies only dynamic values while this checked-in YAML owns stable defaults."""
+    settings = load_settings(
+        config_path=Path(__file__).resolve().parents[1] / "config" / "zeabur.yaml",
+        env_file=tmp_path / "absent.env",
+    )
+
+    assert settings.app.environment == "production"
+    assert settings.app.public_only is True
+    assert settings.app.server.host == "0.0.0.0"
+    assert settings.database.url == "sqlite:////app/data/dailycast.db"
+    assert settings.data_dir == Path("/app/data")
+    assert settings.public_dir == Path("/app/public")
+    assert settings.scheduler.enabled is True
+    assert settings.scheduler.cron_expression == "0 6 * * *"
+    assert settings.editorial.enforce_quality_gate is False
+    assert settings.publishing.auto_publish is True
+
+
 def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:
     """Deployments must opt in to Alpha relaxation rather than inherit it silently."""
     assert EditorialSettings().enforce_quality_gate is True
