@@ -125,6 +125,10 @@ def build_lifespan(
                 llm_provider,
                 max_candidates=settings.editorial.max_candidates,
                 max_selected_events=settings.editorial.max_selected_events,
+                max_ai_events=settings.editorial.max_ai_events,
+                min_domestic_events_when_available=(
+                    settings.editorial.min_domestic_events_when_available
+                ),
                 max_sources_per_event=settings.editorial.max_sources_per_event,
                 max_chars_per_source=settings.editorial.max_chars_per_source,
                 max_total_evidence_chars=settings.editorial.max_total_evidence_chars,

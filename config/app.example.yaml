@@ -60,6 +60,9 @@ editorial:
   enforce_quality_gate: false
   max_candidates: 30
   max_selected_events: 8
+  # Preserve room for broad domestic reporting instead of filling each episode with AI news.
+  max_ai_events: 3
+  min_domestic_events_when_available: 2
   max_sources_per_event: 3
   max_chars_per_source: 1200
   max_total_evidence_chars: 24000

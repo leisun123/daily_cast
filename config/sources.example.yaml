@@ -47,6 +47,26 @@ sources:
         - 考试录用
         - 招录
       timezone: Asia/Shanghai
+  # Official general domestic and economic reporting. These two feeds make sure
+  # the daily mix has candidates beyond technology and recruitment notices.
+  - id: chinanews-china-rss
+    name: 中新网时政
+    kind: rss
+    entry_url: https://www.chinanews.com.cn/rss/china.xml
+    priority: 74
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config: {}
+  - id: chinanews-finance-rss
+    name: 中新网财经
+    kind: rss
+    entry_url: https://www.chinanews.com.cn/rss/finance.xml
+    priority: 74
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config: {}
   # Broad Chinese technology, digital-product, and industry news.
   - id: ithome-rss
     name: IT之家

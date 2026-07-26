@@ -143,6 +143,8 @@ class EditorialSettings(BaseModel):
     enforce_quality_gate: bool = True
     max_candidates: int = Field(default=30, ge=1, le=30)
     max_selected_events: int = Field(default=8, ge=1, le=30)
+    max_ai_events: int = Field(default=3, ge=1, le=30)
+    min_domestic_events_when_available: int = Field(default=2, ge=0, le=30)
     max_sources_per_event: int = Field(default=3, ge=1, le=3)
     max_chars_per_source: int = Field(default=1200, ge=1, le=1200)
     max_total_evidence_chars: int = Field(default=24_000, ge=1, le=240_000)
