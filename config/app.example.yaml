@@ -63,6 +63,8 @@ editorial:
   # Preserve room for broad domestic reporting instead of filling each episode with AI news.
   max_ai_events: 3
   min_domestic_events_when_available: 2
+  # Keep one current Changzhou/Jiangsu exam or recruitment notice when available.
+  min_recruitment_events_when_available: 1
   max_sources_per_event: 3
   max_chars_per_source: 1200
   max_total_evidence_chars: 24000
@@ -79,6 +81,10 @@ editorial:
 # Bounded deterministic pre-LLM processing rules.
 processing:
   max_age_hours: 36
+  # Recurring exam and recruitment notices need a longer watch period than breaking news.
+  source_max_age_hours:
+    changzhou-public-recruitment: 336
+    jiangsu-civil-service-notices: 336
   min_content_length: 300
   similarity_threshold: 0.58
 

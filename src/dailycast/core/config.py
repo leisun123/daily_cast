@@ -14,6 +14,7 @@ from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from dailycast.core.errors import ConfigurationError
+from dailycast.news.source_windows import DEFAULT_SOURCE_MAX_AGE_HOURS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.example.yaml"
@@ -145,6 +146,7 @@ class EditorialSettings(BaseModel):
     max_selected_events: int = Field(default=8, ge=1, le=30)
     max_ai_events: int = Field(default=3, ge=1, le=30)
     min_domestic_events_when_available: int = Field(default=2, ge=0, le=30)
+    min_recruitment_events_when_available: int = Field(default=1, ge=0, le=30)
     max_sources_per_event: int = Field(default=3, ge=1, le=3)
     max_chars_per_source: int = Field(default=1200, ge=1, le=1200)
     max_total_evidence_chars: int = Field(default=24_000, ge=1, le=240_000)
@@ -163,6 +165,9 @@ class ProcessingSettings(BaseModel):
     """Deterministic Article-to-NewsEvent processing limits."""
 
     max_age_hours: int = Field(default=36, ge=1, le=720)
+    source_max_age_hours: dict[str, int] = Field(
+        default_factory=lambda: dict(DEFAULT_SOURCE_MAX_AGE_HOURS)
+    )
     min_content_length: int = Field(default=300, ge=1, le=100_000)
     similarity_threshold: float = Field(default=0.58, ge=0.0, le=1.0)
 

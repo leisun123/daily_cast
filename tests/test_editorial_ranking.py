@@ -500,6 +500,106 @@ def test_ranking_caps_ai_stories_when_other_topics_are_available(
     )
 
 
+def test_ranking_reserves_a_recruitment_notice_when_one_is_available(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A current recruitment notice stays in the daily briefing despite lower model scores."""
+    candidates = (
+        create_event(
+            migrated_session_factory,
+            key="top-one",
+            source_id="hacker-news-rss",
+            title="A high-scoring technology story",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="top-two",
+            source_id="ithome-rss",
+            title="另一条高分科技资讯",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="top-three",
+            source_id="oschina-news-rss",
+            title="第三条高分产业动态",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="top-four",
+            source_id="sspai-rss",
+            title="第四条高分数码新闻",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="recruitment",
+            source_id="changzhou-public-recruitment",
+            title="2026年常州市事业单位公开招聘工作人员公告",
+        ),
+    )
+    task_run_id, task_step_id = create_task_provenance(migrated_session_factory)
+    provider = FakeLLMProvider(
+        {
+            "scores": [
+                event_score(candidates[0].id, importance=100, relevance=100),
+                event_score(candidates[1].id, importance=95, relevance=95),
+                event_score(candidates[2].id, importance=90, relevance=90),
+                event_score(candidates[3].id, importance=85, relevance=85),
+                event_score(candidates[4].id, importance=80, relevance=80),
+            ]
+        }
+    )
+
+    result = asyncio.run(
+        AIEditorialService(
+            migrated_session_factory,
+            provider,
+            max_selected_events=4,
+        ).score_events(
+            tuple(candidate.id for candidate in candidates),
+            task_run_id=task_run_id,
+            task_step_id=task_step_id,
+            budget=BudgetController(),
+        )
+    )
+
+    assert result.selected_event_ids == (
+        candidates[0].id,
+        candidates[1].id,
+        candidates[2].id,
+        candidates[4].id,
+    )
+
+
+def test_candidate_cap_keeps_a_recruitment_notice_for_ranking(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A lower-scored notice reaches the ranking stage instead of being cut before selection."""
+    top = create_event(
+        migrated_session_factory,
+        key="candidate-top",
+        deterministic_score=100,
+    )
+    runner_up = create_event(
+        migrated_session_factory,
+        key="candidate-runner-up",
+        deterministic_score=90,
+    )
+    recruitment = create_event(
+        migrated_session_factory,
+        key="candidate-recruitment",
+        source_id="changzhou-public-recruitment",
+        deterministic_score=0,
+    )
+
+    cards = AIEditorialService(
+        migrated_session_factory,
+        FakeLLMProvider({"scores": []}),
+        max_candidates=2,
+    ).build_event_cards((top.id, runner_up.id, recruitment.id))
+
+    assert tuple(card.event_id for card in cards) == (top.id, recruitment.id)
+
+
 def test_score_for_unknown_event_id_is_rejected_before_cache_persistence(
     migrated_session_factory: sessionmaker[Session],
 ) -> None:

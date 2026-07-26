@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,6 +23,7 @@ from dailycast.news.normalization import (
 from dailycast.news.normalization import (
     normalize_url as _normalize_url,
 )
+from dailycast.news.source_windows import DEFAULT_SOURCE_MAX_AGE_HOURS
 from dailycast.sources.contracts import (
     ArticleCandidate,
     CollectionResult,
@@ -241,11 +243,16 @@ class SourceCollectionService:
         article_service: ArticleService,
         *,
         clock: Clock | None = None,
+        source_max_age_hours: Mapping[str, int] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._collectors = collectors
         self._article_service = article_service
         self._clock = clock or Clock()
+        self._source_max_age_hours = {
+            **DEFAULT_SOURCE_MAX_AGE_HOURS,
+            **dict(source_max_age_hours or {}),
+        }
 
     async def collect_enabled_sources(
         self, window: CollectionWindow
@@ -256,7 +263,7 @@ class SourceCollectionService:
         warning_count = 0
         successful_source_count = 0
         for source in sources:
-            result = await self._collect_source(source, window)
+            result = await self._collect_source(source, self._window_for_source(source, window))
             if result.error is not None:
                 warning_count += 1 + len(result.errors)
                 self._record_source_error(source.id, result.error)
@@ -275,6 +282,14 @@ class SourceCollectionService:
             successful_source_count=successful_source_count,
             warning_count=warning_count,
         )
+
+    def _window_for_source(self, source: Source, window: CollectionWindow) -> CollectionWindow:
+        """Extend only explicitly configured recurring-notice sources beyond breaking-news age."""
+        max_age_hours = self._source_max_age_hours.get(source.id)
+        if max_age_hours is None:
+            return window
+        extended_start = window.end - timedelta(hours=max_age_hours)
+        return CollectionWindow(start=min(window.start, extended_start), end=window.end)
 
     async def _collect_source(self, source: Source, window: CollectionWindow) -> CollectionResult:
         """Map an unsupported source type to a source-local warning without stopping the batch."""

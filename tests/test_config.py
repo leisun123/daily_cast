@@ -55,6 +55,10 @@ def test_processing_defaults_are_loaded_from_configuration(app_config_path: Path
     settings = load_settings(config_path=app_config_path)
 
     assert settings.processing.max_age_hours == 36
+    assert settings.processing.source_max_age_hours == {
+        "changzhou-public-recruitment": 336,
+        "jiangsu-civil-service-notices": 336,
+    }
     assert settings.processing.min_content_length == 300
     assert settings.processing.similarity_threshold == 0.58
 
@@ -74,14 +78,15 @@ def test_tts_and_ffmpeg_defaults_are_explicit_configuration(app_config_path: Pat
     assert settings.ffmpeg.bitrate == "64k"
 
 
-def test_alpha_example_unblocks_quality_gated_output_and_auto_publish(tmp_path: Path) -> None:
-    """The shipped Alpha configuration records quality findings without blocking output."""
+def test_alpha_example_keeps_semantic_review_relaxed_and_auto_publish(tmp_path: Path) -> None:
+    """The shipped Alpha configuration stays relaxed for semantic review and auto-publishes."""
     settings = load_settings(
         config_path=Path(__file__).resolve().parents[1] / "config" / "app.example.yaml",
         env_file=tmp_path / "absent.env",
     )
 
     assert settings.editorial.enforce_quality_gate is False
+    assert settings.editorial.min_recruitment_events_when_available == 1
     assert settings.publishing.auto_publish is True
     assert settings.publishing.public_base_url == "http://127.0.0.1:8000"
     assert settings.publishing.feed_title == "DailyCast"

@@ -44,7 +44,7 @@ from dailycast.pipeline.contracts import TaskCommand
 from dailycast.pipeline.executor import InProcessTaskExecutor
 from dailycast.pipeline.orchestrator import PipelineOrchestrator, build_collection_pipeline
 from dailycast.pipeline.submission import TaskSubmissionService
-from dailycast.sources.contracts import ArticleCandidate, CollectionWindow
+from dailycast.sources.contracts import ArticleCandidate, CollectionResult, CollectionWindow
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy, SafeHttpFetcher
 from dailycast.sources.html_list import HTMLListCollector
 from dailycast.sources.rss import RSSCollector
@@ -361,6 +361,58 @@ def test_html_list_collector_discovers_only_matching_public_recruitment_announce
         assert candidate.published_at == datetime(2026, 7, 15, 16, tzinfo=UTC)
         assert candidate.language == "zh-CN"
         assert candidate.metadata == {"list_url": "https://rsj.changzhou.gov.cn/recruitment"}
+
+    asyncio.run(scenario())
+
+
+def test_recruitment_source_uses_the_extended_tracking_window(app_config_path: Path) -> None:
+    """Official recruitment tracking is not limited to the general breaking-news window."""
+
+    class RecordingCollector:
+        """Capture the effective collection window without making a network request."""
+
+        def __init__(self) -> None:
+            self.window: CollectionWindow | None = None
+
+        async def collect(self, source: Source, window: CollectionWindow) -> CollectionResult:
+            self.window = window
+            return CollectionResult(source_id=source.id)
+
+    async def scenario() -> None:
+        engine, factory = upgraded_factory(app_config_path)
+        try:
+            with UnitOfWork(factory) as unit:
+                assert unit.session is not None
+                SourceRepository(unit.session).create(
+                    **(
+                        source_values()
+                        | {
+                            "id": "changzhou-public-recruitment",
+                            "name": "常州市事业单位公开招聘",
+                            "entry_url": "https://rsj.changzhou.gov.cn/recruitment",
+                            "normalized_entry_url": "https://rsj.changzhou.gov.cn/recruitment",
+                        }
+                    )
+                )
+            collector = RecordingCollector()
+            service = SourceCollectionService(
+                factory,
+                {SourceKind.RSS: collector},
+                ArticleService(factory),
+            )
+            await service.collect_enabled_sources(
+                CollectionWindow(
+                    start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+                )
+            )
+
+            assert collector.window == CollectionWindow(
+                start=datetime(2026, 7, 8, 0, 0, tzinfo=UTC),
+                end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+            )
+        finally:
+            engine.dispose()
 
     asyncio.run(scenario())
 

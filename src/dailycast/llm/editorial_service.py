@@ -61,6 +61,7 @@ from dailycast.llm.script_review_editorial import (
 )
 from dailycast.llm.script_schemas import ValidationReport
 from dailycast.llm.script_validation import ScriptValidator
+from dailycast.news.source_windows import RECRUITMENT_SOURCE_IDS
 
 _MAX_SUMMARY_CHARS = 400
 _MAX_EVIDENCE_CHARS = 240
@@ -114,6 +115,7 @@ class AIEditorialService:
         max_selected_events: int = 8,
         max_ai_events: int = 3,
         min_domestic_events_when_available: int = 2,
+        min_recruitment_events_when_available: int = 1,
         max_sources_per_event: int = 3,
         max_chars_per_source: int = 1200,
         max_total_evidence_chars: int = 24_000,
@@ -132,8 +134,8 @@ class AIEditorialService:
         if max_candidates < 1 or max_selected_events < 1 or max_ai_events < 1:
             msg = "editorial candidate and selected-event limits must be positive"
             raise ValueError(msg)
-        if min_domestic_events_when_available < 0:
-            msg = "minimum domestic event count must not be negative"
+        if min_domestic_events_when_available < 0 or min_recruitment_events_when_available < 0:
+            msg = "minimum diversity event counts must not be negative"
             raise ValueError(msg)
         self._session_factory = session_factory
         self._provider = provider
@@ -141,6 +143,7 @@ class AIEditorialService:
         self._max_selected_events = max_selected_events
         self._max_ai_events = max_ai_events
         self._min_domestic_events_when_available = min_domestic_events_when_available
+        self._min_recruitment_events_when_available = min_recruitment_events_when_available
         self._max_sources_per_event = max_sources_per_event
         self._max_chars_per_source = max_chars_per_source
         self._max_total_evidence_chars = max_total_evidence_chars
@@ -200,6 +203,7 @@ class AIEditorialService:
             self._max_selected_events,
             max_ai_events=self._max_ai_events,
             min_domestic_events_when_available=self._min_domestic_events_when_available,
+            min_recruitment_events_when_available=(self._min_recruitment_events_when_available),
         )
         self._persist_scores(
             candidates,
@@ -405,7 +409,7 @@ class AIEditorialService:
             if found_ids != set(unique_ids):
                 msg = "one or more ranking candidate NewsEvents do not exist"
                 raise ValueError(msg)
-            return tuple(sorted(events, key=_candidate_sort_key)[: self._max_candidates])
+            return _bounded_candidate_events(events, self._max_candidates)
 
     def _persist_scores(
         self,
@@ -484,6 +488,20 @@ def _candidate_sort_key(event: NewsEvent) -> tuple[float, int, int, float, int]:
     )
 
 
+def _bounded_candidate_events(
+    events: Sequence[NewsEvent], max_candidates: int
+) -> tuple[NewsEvent, ...]:
+    """Keep one official recruitment tracker event inside the pre-LLM candidate cap."""
+    ranked = tuple(sorted(events, key=_candidate_sort_key))
+    recruitment_events = tuple(event for event in ranked if _is_recruitment_event(event))
+    selected_ids = {recruitment_events[0].id} if recruitment_events else set()
+    for event in ranked:
+        if len(selected_ids) >= max_candidates:
+            break
+        selected_ids.add(event.id)
+    return tuple(event for event in ranked if event.id in selected_ids)
+
+
 def _select_event_ids(
     candidates: Sequence[NewsEvent],
     scores: Sequence[EventScore],
@@ -491,6 +509,7 @@ def _select_event_ids(
     *,
     max_ai_events: int = 3,
     min_domestic_events_when_available: int = 2,
+    min_recruitment_events_when_available: int = 1,
 ) -> tuple[int, ...]:
     """Select a varied hard-capped event set in normal Python, not from an LLM-selected count."""
     events_by_id = {event.id: event for event in candidates}
@@ -504,14 +523,28 @@ def _select_event_ids(
             score.event_id,
         ),
     )
+    recruitment_scores = [
+        score for score in ranked_scores if _is_recruitment_event(events_by_id[score.event_id])
+    ]
+    reserved_recruitment_ids = {
+        score.event_id
+        for score in recruitment_scores[
+            : min(min_recruitment_events_when_available, max_selected_events)
+        ]
+    }
     domestic_scores = [
         score for score in ranked_scores if _is_domestic_event(events_by_id[score.event_id])
     ]
     reserved_domestic_ids = {
         score.event_id
-        for score in domestic_scores[: min(min_domestic_events_when_available, max_selected_events)]
+        for score in domestic_scores[
+            : min(
+                min_domestic_events_when_available,
+                max_selected_events - len(reserved_recruitment_ids),
+            )
+        ]
     }
-    selected_ids = set(reserved_domestic_ids)
+    selected_ids = reserved_recruitment_ids | reserved_domestic_ids
     selected_ai_count = sum(_is_ai_event(events_by_id[event_id]) for event_id in selected_ids)
 
     skipped_ai_scores: list[EventScore] = []
@@ -540,6 +573,11 @@ def _select_event_ids(
 def _is_domestic_event(event: NewsEvent) -> bool:
     """Identify clusters with at least one configured broad domestic-news source."""
     return any(article.source_id in _DOMESTIC_SOURCE_IDS for article in event.articles)
+
+
+def _is_recruitment_event(event: NewsEvent) -> bool:
+    """Identify clusters backed by the user's official exam and recruitment trackers."""
+    return any(article.source_id in RECRUITMENT_SOURCE_IDS for article in event.articles)
 
 
 def _is_ai_event(event: NewsEvent) -> bool:

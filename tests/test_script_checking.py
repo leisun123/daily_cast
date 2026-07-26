@@ -232,10 +232,10 @@ def test_deterministic_blocker_requires_human_review_without_metadata(
         factory.kw["bind"].dispose()
 
 
-def test_relaxed_quality_gate_keeps_short_revise_artifacts_and_generates_metadata(
+def test_relaxed_quality_gate_keeps_short_revise_artifacts_without_metadata(
     app_config_path: Path,
 ) -> None:
-    """Alpha mode records quality findings but still creates metadata for a valid script."""
+    """A too-short script is never allowed to proceed to episode metadata."""
     factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)
     try:
         fixture = create_selected_event(
@@ -256,7 +256,7 @@ def test_relaxed_quality_gate_keeps_short_revise_artifacts_and_generates_metadat
         result = asyncio.run(
             ScriptCheckingService(
                 AIEditorialService(factory, provider),
-                max_automatic_script_revisions=1,
+                max_automatic_script_revisions=0,
                 enforce_quality_gate=False,
             ).check(
                 _script(outline, fixture, dossiers, text="过短的播报稿。"),
@@ -273,9 +273,62 @@ def test_relaxed_quality_gate_keeps_short_revise_artifacts_and_generates_metadat
         assert result.review.verdict == "revise"
         assert any(issue.code == "SCRIPT_TOO_SHORT" for issue in result.validation.issues)
         assert result.automatic_revision_count == 0
-        assert result.metadata is not None
+        assert result.metadata is None
         assert LLMOperation.GENERATE_SCRIPT not in provider.calls_by_operation
         assert provider.calls_by_operation[LLMOperation.REVIEW_SCRIPT] == 1
+        assert LLMOperation.GENERATE_METADATA not in provider.calls_by_operation
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_relaxed_quality_gate_revises_a_short_script_before_metadata(
+    app_config_path: Path,
+) -> None:
+    """Length blockers trigger the single allowed revision even in relaxed Alpha mode."""
+    factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)
+    try:
+        fixture = create_selected_event(
+            factory, key="short-script-revision", content="可信新闻证据。"
+        )
+        outline = build_outline(fixture.event_id)
+        dossiers = build_dossiers(factory, fixture)
+        provider = FakeLLMProvider(
+            {
+                LLMOperation.REVIEW_SCRIPT: [
+                    _review("pass", fixture),
+                    _review("pass", fixture),
+                ],
+                LLMOperation.GENERATE_SCRIPT: [
+                    _revise_payload(fixture, text="修订后的中文播报稿。" * 50)
+                ],
+                LLMOperation.GENERATE_METADATA: [_metadata_payload()],
+            }
+        )
+        task_run_id, task_step_id = create_task_provenance(
+            factory, step_name="checking", step_order=9
+        )
+
+        result = asyncio.run(
+            ScriptCheckingService(
+                AIEditorialService(factory, provider),
+                max_automatic_script_revisions=1,
+                enforce_quality_gate=False,
+            ).check(
+                _script(outline, fixture, dossiers, text="过短的播报稿。"),
+                outline,
+                dossiers,
+                selected_event_titles=["事件 short-script-revision"],
+                task_run_id=task_run_id,
+                task_step_id=task_step_id,
+                budget=BudgetController(),
+            )
+        )
+
+        assert result.automatic_revision_count == 1
+        assert not result.requires_human_review
+        assert result.metadata is not None
+        assert provider.calls_by_operation[LLMOperation.GENERATE_SCRIPT] == 1
+        assert provider.calls_by_operation[LLMOperation.REVIEW_SCRIPT] == 2
         assert provider.calls_by_operation[LLMOperation.GENERATE_METADATA] == 1
     finally:
         factory.kw["bind"].dispose()

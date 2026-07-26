@@ -107,9 +107,11 @@ def build_lifespan(
                     SourceKind.HTML_LIST: HTMLListCollector(fetcher),
                 },
                 article_service,
+                source_max_age_hours=settings.processing.source_max_age_hours,
             )
             processing_policy = ProcessingPolicy(
                 max_age_hours=settings.processing.max_age_hours,
+                source_max_age_hours=settings.processing.source_max_age_hours,
                 min_content_length=settings.processing.min_content_length,
                 similarity_threshold=settings.processing.similarity_threshold,
             )
@@ -128,6 +130,9 @@ def build_lifespan(
                 max_ai_events=settings.editorial.max_ai_events,
                 min_domestic_events_when_available=(
                     settings.editorial.min_domestic_events_when_available
+                ),
+                min_recruitment_events_when_available=(
+                    settings.editorial.min_recruitment_events_when_available
                 ),
                 max_sources_per_event=settings.editorial.max_sources_per_event,
                 max_chars_per_source=settings.editorial.max_chars_per_source,
