@@ -48,6 +48,7 @@ class AppSettings(BaseModel):
     environment: str = "development"
     timezone: str = "Asia/Shanghai"
     public_only: bool = False
+    manual_trigger_token: str | None = Field(default=None, min_length=32, repr=False)
     server: ServerSettings = Field(default_factory=ServerSettings)
 
     @field_validator("timezone")

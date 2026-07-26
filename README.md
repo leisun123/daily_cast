@@ -134,7 +134,18 @@ During deployment, supply the public domain and LLM provider settings. The API k
 password variable and must never be committed. The template enables `app.public_only`, so the
 public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
 `/media/episodes/...` assets plus `/cover.png`. Management pages and `POST /generate` return `404`; production
-generation is driven by the durable scheduler.
+generation is driven by the durable scheduler. To enable one authenticated manual test run,
+create the Zeabur password variable `DAILYCAST_APP__MANUAL_TRIGGER_TOKEN` with a random value
+of at least 32 characters. The public endpoint then accepts only:
+
+```bash
+curl --fail-with-body -X POST https://your-domain/api/v1/manual/generate \
+  -H 'Authorization: Bearer your-secret-token' \
+  -H 'Idempotency-Key: manual-test-20260726-001'
+```
+
+It returns `202` with a durable `task_id`. Reusing the same `Idempotency-Key` is safe; because
+production has `publishing.auto_publish=true`, a successful task generates and publishes its episode.
 
 DailyCast reads LLM configuration only from these four variable names:
 `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`, and the password variable `LLM_API_KEY`.

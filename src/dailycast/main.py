@@ -2,6 +2,7 @@
 
 import json
 import logging
+import secrets
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -33,6 +34,7 @@ from dailycast.db.transactions import UnitOfWork
 logger = logging.getLogger(__name__)
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 PODCAST_COVER_PATH = Path(__file__).resolve().parents[2] / "assets" / "dailycast-cover.png"
+PUBLIC_MANUAL_GENERATE_PATH = "/api/v1/manual/generate"
 
 
 def get_runtime(request: Request) -> AppRuntime:
@@ -192,6 +194,32 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
             },
         )
 
+    @app.post(PUBLIC_MANUAL_GENERATE_PATH, status_code=202, tags=["operator"])
+    async def public_manual_generate(
+        runtime: RuntimeDependency,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+        idempotency_key: Annotated[
+            str | None, Header(alias="Idempotency-Key", max_length=256)
+        ] = None,
+    ) -> JSONResponse:
+        """Queue one daily run through a bearer-token-protected public operator endpoint."""
+        _require_manual_trigger_token(runtime, authorization)
+        _require_ready(runtime)
+        if runtime.submission_service is None:
+            raise InfrastructureError("task submission service is not available")
+        command = build_daily_generation_command(runtime.settings, trigger_type=TriggerType.MANUAL)
+        effective_idempotency_key = idempotency_key or f"manual:{UUIDGenerator().new()}"
+        task_run = runtime.submission_service.submit(
+            replace(command, idempotency_key=effective_idempotency_key)
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "task_id": task_run.id,
+                "status": task_run.status.value,
+            },
+        )
+
     @app.get("/healthz", tags=["system"])
     async def healthz() -> dict[str, str]:
         """Report process liveness without checking external dependencies."""
@@ -276,9 +304,33 @@ app = create_app()
 
 def _is_public_deployment_path(path: str) -> bool:
     """Allow only diagnostics and immutable podcast resources on an unauthenticated domain."""
-    return path in {"/healthz", "/readyz", "/feed.xml", "/cover.png"} or path.startswith(
-        "/media/episodes/"
+    return path in {
+        "/healthz",
+        "/readyz",
+        "/feed.xml",
+        "/cover.png",
+        PUBLIC_MANUAL_GENERATE_PATH,
+    } or path.startswith("/media/episodes/")
+
+
+def _require_manual_trigger_token(runtime: AppRuntime, authorization: str | None) -> None:
+    """Reject public trigger attempts unless a configured bearer token matches exactly."""
+    configured_token = runtime.settings.app.manual_trigger_token
+    if configured_token is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    scheme, separator, supplied_token = (authorization or "").partition(" ")
+    valid = (
+        separator == " "
+        and scheme.casefold() == "bearer"
+        and bool(supplied_token)
+        and secrets.compare_digest(supplied_token, configured_token)
     )
+    if not valid:
+        raise HTTPException(
+            status_code=401,
+            detail="a valid bearer token is required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def _require_ready(runtime: AppRuntime) -> None:
