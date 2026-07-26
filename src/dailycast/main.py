@@ -5,7 +5,7 @@ import logging
 import secrets
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -20,7 +20,7 @@ from dailycast.core.identifiers import UUIDGenerator
 from dailycast.core.lifespan import AppRuntime, build_daily_generation_command, build_lifespan
 from dailycast.core.logging import get_request_id, reset_request_id, set_request_id
 from dailycast.core.readiness import evaluate_readiness
-from dailycast.db.models import EpisodeItem, Publication, TaskRun, TriggerType
+from dailycast.db.models import EpisodeItem, Publication, TaskRun, TaskType, TriggerType
 from dailycast.db.repositories import (
     ArticleRepository,
     EpisodeItemRepository,
@@ -175,21 +175,13 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
     ) -> JSONResponse:
         """Submit a manual run without letting a previous terminal run block a retry."""
         _require_ready(runtime)
-        if runtime.submission_service is None:
-            raise InfrastructureError("task submission service is not available")
-        command = build_daily_generation_command(runtime.settings, trigger_type=TriggerType.MANUAL)
-        # A browser click is a fresh manual attempt. An active task with the same
-        # business key is still reused by TaskSubmissionService, while an explicit
-        # client key preserves ordinary request-replay idempotency.
-        effective_idempotency_key = idempotency_key or f"manual:{UUIDGenerator().new()}"
-        task_run = runtime.submission_service.submit(
-            replace(command, idempotency_key=effective_idempotency_key)
-        )
+        task_run, edition = _submit_manual_generation(runtime, idempotency_key)
         return JSONResponse(
             status_code=202,
             content={
                 "task_id": task_run.id,
                 "status": task_run.status.value,
+                "edition": edition,
                 "task_url": "/tasks/latest",
             },
         )
@@ -205,18 +197,13 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         """Queue one daily run through a bearer-token-protected public operator endpoint."""
         _require_manual_trigger_token(runtime, authorization)
         _require_ready(runtime)
-        if runtime.submission_service is None:
-            raise InfrastructureError("task submission service is not available")
-        command = build_daily_generation_command(runtime.settings, trigger_type=TriggerType.MANUAL)
-        effective_idempotency_key = idempotency_key or f"manual:{UUIDGenerator().new()}"
-        task_run = runtime.submission_service.submit(
-            replace(command, idempotency_key=effective_idempotency_key)
-        )
+        task_run, edition = _submit_manual_generation(runtime, idempotency_key)
         return JSONResponse(
             status_code=202,
             content={
                 "task_id": task_run.id,
                 "status": task_run.status.value,
+                "edition": edition,
             },
         )
 
@@ -331,6 +318,88 @@ def _require_manual_trigger_token(runtime: AppRuntime, authorization: str | None
             detail="a valid bearer token is required",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def _submit_manual_generation(
+    runtime: AppRuntime, idempotency_key: str | None
+) -> tuple[TaskRun, str]:
+    """Queue a manual run with a new edition once that day's daily episode exists."""
+    if runtime.submission_service is None:
+        raise InfrastructureError("task submission service is not available")
+    command = build_daily_generation_command(runtime.settings, trigger_type=TriggerType.MANUAL)
+    episode_date = command.request["episode_date"]
+    if not isinstance(episode_date, str):
+        raise InfrastructureError("manual generation command has no episode date")
+    if idempotency_key is not None:
+        replay = _find_manual_idempotency_replay(runtime, idempotency_key, episode_date)
+        if replay is not None:
+            return replay
+    edition = _next_manual_edition(runtime, episode_date)
+    command = replace(command, request={**command.request, "edition": edition})
+    # A browser click is a fresh manual attempt. An active task with the same
+    # business key is still reused by TaskSubmissionService, while an explicit
+    # client key preserves ordinary request-replay idempotency.
+    effective_idempotency_key = idempotency_key or f"manual:{UUIDGenerator().new()}"
+    return (
+        runtime.submission_service.submit(
+            replace(command, idempotency_key=effective_idempotency_key)
+        ),
+        edition,
+    )
+
+
+def _find_manual_idempotency_replay(
+    runtime: AppRuntime, idempotency_key: str, episode_date: str
+) -> tuple[TaskRun, str] | None:
+    """Return a prior same-day manual request before choosing a newer edition."""
+    with UnitOfWork(runtime.session_factory) as unit:
+        assert unit.session is not None
+        task_run = TaskRunRepository(unit.session).get_by_idempotency_key(idempotency_key)
+    if task_run is None:
+        return None
+
+    try:
+        request = json.loads(task_run.request_json)
+    except json.JSONDecodeError:
+        request = None
+    edition = request.get("edition") if isinstance(request, dict) else None
+    valid_edition = edition == "daily" or (
+        isinstance(edition, str)
+        and edition.startswith("daily-")
+        and edition.removeprefix("daily-").isascii()
+        and edition.removeprefix("daily-").isdigit()
+    )
+    if (
+        task_run.task_type is not TaskType.DAILY_GENERATE
+        or task_run.trigger_type is not TriggerType.MANUAL
+        or not isinstance(request, dict)
+        or request.get("episode_date") != episode_date
+        or not valid_edition
+    ):
+        raise HTTPException(status_code=409, detail="Idempotency-Key belongs to another request")
+    assert isinstance(edition, str)
+    return task_run, edition
+
+
+def _next_manual_edition(runtime: AppRuntime, episode_date: str) -> str:
+    """Return ``daily`` or the next same-day ``daily-N`` edition for a manual run."""
+    business_date = date.fromisoformat(episode_date)
+    with UnitOfWork(runtime.session_factory) as unit:
+        assert unit.session is not None
+        editions = {
+            episode.edition
+            for episode in EpisodeRepository(unit.session).list()
+            if episode.episode_date == business_date
+        }
+    if "daily" not in editions:
+        return "daily"
+
+    highest_suffix = 1
+    for edition in editions:
+        suffix = edition.removeprefix("daily-")
+        if edition.startswith("daily-") and suffix.isascii() and suffix.isdigit():
+            highest_suffix = max(highest_suffix, int(suffix))
+    return f"daily-{highest_suffix + 1}"
 
 
 def _require_ready(runtime: AppRuntime) -> None:

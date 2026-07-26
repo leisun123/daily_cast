@@ -144,8 +144,11 @@ curl --fail-with-body -X POST https://your-domain/api/v1/manual/generate \
   -H 'Idempotency-Key: manual-test-20260726-001'
 ```
 
-It returns `202` with a durable `task_id`. Reusing the same `Idempotency-Key` is safe; because
-production has `publishing.auto_publish=true`, a successful task generates and publishes its episode.
+It returns `202` with a durable `task_id` and `edition`. Reusing the same `Idempotency-Key` is
+safe. The scheduler always publishes the base `daily` edition once per date; a manual trigger
+uses `daily` only if that edition does not exist, otherwise it creates `daily-2`, `daily-3`, and
+so on. Because production has `publishing.auto_publish=true`, each successful manual task
+generates and publishes its own immutable episode.
 
 DailyCast reads LLM configuration only from these four variable names:
 `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`, and the password variable `LLM_API_KEY`.
