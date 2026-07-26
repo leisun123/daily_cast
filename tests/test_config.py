@@ -111,6 +111,7 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.publishing.auto_publish is True
     assert settings.llm.response_format == "json_object"
     assert settings.llm.timeout_seconds == 120
+    assert settings.llm.budget.max_input_tokens == 100_000
     # Let the configured model determine its available output budget. DailyCast
     # must not send a smaller application-level max-output ceiling.
     assert not hasattr(settings.llm, "max_output_tokens")
