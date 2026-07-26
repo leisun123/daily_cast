@@ -20,7 +20,8 @@ from dailycast.db.models import LLMOperation
 from dailycast.llm.budget import BudgetController
 from dailycast.llm.editorial_service import AIEditorialService
 from dailycast.llm.script_checking import ScriptCheckingService
-from dailycast.llm.script_schemas import EpisodeScript
+from dailycast.llm.script_review_editorial import _duration_requirement
+from dailycast.llm.script_schemas import EpisodeScript, ValidationReport
 
 
 def _script(
@@ -95,6 +96,36 @@ def _review(verdict: str, fixture: object, *, blocking: bool = False) -> dict[st
         ),
         "suggested_changes": ["只处理已报告的问题。"] if verdict == "revise" else [],
     }
+
+
+def test_revision_duration_requirement_uses_exact_target_character_count(
+    app_config_path: Path,
+) -> None:
+    """A short-script revision receives a concrete character target, not a vague duration hint."""
+    factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)
+    try:
+        fixture = create_selected_event(
+            factory, key="revision-duration-target", content="可信新闻证据。"
+        )
+        outline = build_outline(fixture.event_id)
+
+        requirement = _duration_requirement(
+            outline,
+            ValidationReport(
+                estimated_duration_seconds=70.25,
+                character_count=281,
+                issues=(),
+            ),
+        )
+
+        assert requirement == {
+            "target_seconds": 120,
+            "current_character_count": 281,
+            "current_estimated_duration_seconds": 70.25,
+            "target_character_count": 480,
+        }
+    finally:
+        factory.kw["bind"].dispose()
 
 
 def test_one_controlled_revision_can_produce_accepted_metadata(app_config_path: Path) -> None:
