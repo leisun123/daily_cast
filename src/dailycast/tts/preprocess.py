@@ -24,6 +24,11 @@ _FINANCIAL_QUANTITY = re.compile(
 )
 _PERCENT = re.compile(r"(?<![A-Za-z0-9])(?P<number>\d+(?:\.\d+)?)%(?![A-Za-z0-9])")
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n+")
+_INVISIBLE_SPOKEN_CHARACTERS = re.compile(r"[\u200B\u200C\u200D\u2060\uFEFF]")
+_HAN_CHARACTER = r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]"
+_CHINESE_INTERNAL_WHITESPACE = re.compile(
+    rf"(?<={_HAN_CHARACTER})(?:[^\S\r\n]+|[^\S\r\n]*(?:\r\n|[\r\n])[^\S\r\n]*)(?={_HAN_CHARACTER})"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +97,12 @@ class FinancialNumberNormalizer:
         )
 
 
+def normalize_spoken_whitespace(text: str) -> str:
+    """Remove invisible marks and whitespace that splits adjacent Chinese characters."""
+    without_invisible_characters = _INVISIBLE_SPOKEN_CHARACTERS.sub("", text)
+    return _CHINESE_INTERNAL_WHITESPACE.sub("", without_invisible_characters)
+
+
 class TTSPreprocessor:
     """Normalize a bounded spoken form and optionally add conservative plain-text pauses."""
 
@@ -110,7 +121,7 @@ class TTSPreprocessor:
             json.dumps(
                 {
                     "dictionary": self._dictionary.semantic_hash,
-                    "implementation": "tts-preprocess-v2-financial-enhanced-text",
+                    "implementation": "tts-preprocess-v3-financial-enhanced-text",
                     "text_mode": self._text_mode,
                 },
                 separators=(",", ":"),
@@ -126,9 +137,11 @@ class TTSPreprocessor:
         pronunciation_hints: Sequence[tuple[str, str]] = (),
     ) -> PreparedSpeech:
         """Return provider input while preserving the persisted Episode script text verbatim."""
-        spoken = FinancialNumberNormalizer().normalize(text.strip())
+        spoken = normalize_spoken_whitespace(text.strip())
+        spoken = FinancialNumberNormalizer().normalize(spoken)
         spoken = _apply_replacements(spoken, pronunciation_hints)
         spoken = _apply_replacements(spoken, self._dictionary.entries)
+        spoken = normalize_spoken_whitespace(spoken)
         provider_text = (
             _to_enhanced_text(spoken, section_role=section_role)
             if self._text_mode == "enhanced_text"
