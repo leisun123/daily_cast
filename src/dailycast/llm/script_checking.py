@@ -133,10 +133,12 @@ class ScriptCheckingService:
             operation_results.extend((revision_result, review_result))
             revision_count = 1
 
-        requires_human_review = (
-            validation.has_blocking_issues
-            or review_result.review.verdict != "pass"
-            or any(issue.severity == "blocking" for issue in review_result.review.issues)
+        requires_human_review = validation.has_blocking_issues or (
+            self._enforce_quality_gate
+            and (
+                review_result.review.verdict != "pass"
+                or any(issue.severity == "blocking" for issue in review_result.review.issues)
+            )
         )
         metadata_result = None
         if not requires_human_review:
