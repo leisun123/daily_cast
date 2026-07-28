@@ -24,6 +24,8 @@ scheduler:
 llm:
   response_format: json_object
   timeout_seconds: 120
+  fallback:
+    response_format: json_object
   # A seven-section Chinese episode plus semantic review and metadata can reserve
   # more than the general 60k default before provider calls are made.
   budget:

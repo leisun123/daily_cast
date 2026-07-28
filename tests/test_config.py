@@ -95,6 +95,17 @@ def test_alpha_example_keeps_semantic_review_relaxed_and_auto_publish(tmp_path: 
     assert settings.resolve_path(settings.tts.pronunciation_dictionary_path).is_file()
 
 
+def test_alpha_example_uses_json_object_for_deepseek_fallback(tmp_path: Path) -> None:
+    """The checked-in DeepSeek fallback must use the response mode its API accepts."""
+    settings = load_settings(
+        config_path=Path(__file__).resolve().parents[1] / "config" / "app.example.yaml",
+        env_file=tmp_path / "absent.env",
+    )
+
+    assert settings.llm.fallback is not None
+    assert settings.llm.fallback.response_format == "json_object"
+
+
 def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environment(
     tmp_path: Path,
 ) -> None:
@@ -121,6 +132,31 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     # must not send a smaller application-level max-output ceiling.
     assert not hasattr(settings.llm, "max_output_tokens")
     assert not hasattr(settings.llm.budget, "max_output_tokens")
+
+
+def test_zeabur_eight_variable_interface_keeps_fallback_in_json_object_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eight dynamic endpoint values combine with the stable DeepSeek response mode."""
+    monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "openai_responses")
+    monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("DAILYCAST_LLM__MODEL", "gpt-5.6-terra")
+    monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "primary-secret")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__PROVIDER", "openai_compatible")
+    monkeypatch.setenv(
+        "DAILYCAST_LLM__FALLBACK__BASE_URL", "https://api.deepseek.example"
+    )
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__API_KEY", "fallback-secret")
+    monkeypatch.delenv("DAILYCAST_LLM__FALLBACK__RESPONSE_FORMAT", raising=False)
+
+    settings = load_settings(
+        config_path=Path(__file__).resolve().parents[1] / "config" / "zeabur.yaml",
+        env_file=tmp_path / "absent.env",
+    )
+
+    assert settings.llm.fallback is not None
+    assert settings.llm.fallback.response_format == "json_object"
 
 
 def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path(

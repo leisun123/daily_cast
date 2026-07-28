@@ -57,7 +57,7 @@ llm:
     top_p: null
     timeout_seconds: 120
     max_retries: 2
-    response_format: json_schema
+    response_format: json_object
   budget:
     max_calls: 12
     max_input_tokens: 60000
