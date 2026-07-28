@@ -12,7 +12,11 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.core.errors import DailyCastError, LLMStructuredOutputUnsupportedError
+from dailycast.core.errors import (
+    DailyCastError,
+    LLMProviderError,
+    LLMStructuredOutputUnsupportedError,
+)
 from dailycast.core.hashes import sha256_text
 from dailycast.db.models import LLMArtifact, LLMOperation
 from dailycast.db.repositories import LLMArtifactRepository
@@ -175,27 +179,29 @@ class LLMArtifactService:
         validation_context: Mapping[str, object] | None = None,
     ) -> StructuredResult:
         """Reuse a prior exact successful result or make and persist one bounded model call."""
-        identity = LLMCacheIdentity(
-            operation=operation,
-            provider=self._provider.provider_name,
-            model=self._provider.model,
-            prompt_version=prompt_version,
-            schema_version=schema_version,
-            generation_config_hash=self._provider.generation_config_hash(model_options),
-            input_hash=_input_hash(messages),
-        )
-        cached = self._get_by_identity(identity)
-        if cached is not None:
-            return self._cached_result(
-                cached, response_schema, validation_context=validation_context
+        for candidate_provider in self._ordered_providers():
+            candidate_identity = self._cache_identity(
+                candidate_provider,
+                operation=operation,
+                messages=messages,
+                prompt_version=prompt_version,
+                schema_version=schema_version,
+                model_options=model_options,
             )
+            cached = self._get_by_identity(candidate_identity)
+            if cached is not None:
+                return self._cached_result(
+                    cached, response_schema, validation_context=validation_context
+                )
 
         effective_options = dict(model_options)
-        generated, usage, provider_call_count = await self._generate_with_fallback(
-            operation=operation,
-            messages=messages,
-            response_schema=response_schema,
-            model_options=effective_options,
+        generated, usage, provider_call_count, selected_provider = (
+            await self._generate_with_fallback(
+                operation=operation,
+                messages=messages,
+                response_schema=response_schema,
+                model_options=effective_options,
+            )
         )
         try:
             content = _validated_content(
@@ -205,17 +211,27 @@ class LLMArtifactService:
             if not error.repairable:
                 raise
             repair_messages = _schema_repair_messages(messages)
-            generated, repair_usage, repair_calls = await self._generate_with_fallback(
-                operation=operation,
-                messages=repair_messages,
-                response_schema=response_schema,
-                model_options=effective_options,
+            generated, repair_usage, repair_calls, selected_provider = (
+                await self._generate_with_fallback(
+                    operation=operation,
+                    messages=repair_messages,
+                    response_schema=response_schema,
+                    model_options=effective_options,
+                )
             )
             usage = _add_usage(usage, repair_usage)
             provider_call_count += repair_calls
             content = _validated_content(
                 response_schema, generated.content, validation_context=validation_context
             )
+        identity = self._cache_identity(
+            selected_provider,
+            operation=operation,
+            messages=messages,
+            prompt_version=prompt_version,
+            schema_version=schema_version,
+            model_options=effective_options,
+        )
         output_json = _canonical_json(content)
         artifact, concurrent_cache_hit = self._insert_or_reuse(
             identity=identity,
@@ -243,38 +259,78 @@ class LLMArtifactService:
         messages: Sequence[LLMMessage],
         response_schema: type[BaseModel],
         model_options: Mapping[str, JSONValue],
-    ) -> tuple[StructuredResult, LLMUsage, int]:
-        """Make every provider invocation visible to the budget before a Responses fallback."""
-        self._reserve_for_call(messages, model_options)
-        try:
-            generated = await self._provider.generate_structured(
-                operation, messages, response_schema, model_options
-            )
-            return generated, generated.usage, generated.provider_call_count
-        except LLMStructuredOutputUnsupportedError:
-            requested_format = model_options.get("response_format", "json_schema")
-            if requested_format != "json_schema" or not getattr(
-                self._provider, "supports_json_object_fallback", False
-            ):
-                raise
-            fallback_options = {**model_options, "response_format": "json_object"}
-            self._reserve_for_call(
-                _json_object_fallback_messages(messages, response_schema), fallback_options
-            )
-            generated = await self._provider.generate_structured(
-                operation, messages, response_schema, fallback_options
-            )
-            return generated, generated.usage, generated.provider_call_count + 1
+    ) -> tuple[StructuredResult, LLMUsage, int, LLMProvider]:
+        """Budget every attempt, preferring one provider before trying its configured fallback."""
+        provider_call_count = 0
+        last_provider_error: LLMProviderError | None = None
+        for provider in self._ordered_providers():
+            try:
+                self._reserve_for_call(provider, messages, model_options)
+                provider_call_count += 1
+                try:
+                    generated = await provider.generate_structured(
+                        operation, messages, response_schema, model_options
+                    )
+                except LLMStructuredOutputUnsupportedError:
+                    requested_format = model_options.get("response_format", "json_schema")
+                    if requested_format != "json_schema" or not getattr(
+                        provider, "supports_json_object_fallback", False
+                    ):
+                        raise
+                    fallback_options = {**model_options, "response_format": "json_object"}
+                    fallback_messages = _json_object_fallback_messages(
+                        messages, response_schema
+                    )
+                    self._reserve_for_call(provider, fallback_messages, fallback_options)
+                    provider_call_count += 1
+                    generated = await provider.generate_structured(
+                        operation, messages, response_schema, fallback_options
+                    )
+                provider_call_count += max(0, generated.provider_call_count - 1)
+                return generated, generated.usage, provider_call_count, provider
+            except LLMProviderError as error:
+                last_provider_error = error
+        assert last_provider_error is not None
+        raise last_provider_error
 
     def _reserve_for_call(
         self,
+        provider: LLMProvider,
         messages: Sequence[LLMMessage],
         model_options: Mapping[str, JSONValue],
     ) -> None:
         """Reserve the complete budget before every real provider invocation."""
         self._budget.reserve(
             input_tokens=estimate_message_input_tokens(messages),
-            output_tokens=_requested_output_tokens(self._provider, model_options),
+            output_tokens=_requested_output_tokens(provider, model_options),
+        )
+
+    def _ordered_providers(self) -> tuple[LLMProvider, ...]:
+        """Return the preferred provider followed by any explicit runtime fallback."""
+        configured = getattr(self._provider, "providers", None)
+        if isinstance(configured, tuple) and configured:
+            return cast(tuple[LLMProvider, ...], configured)
+        return (self._provider,)
+
+    @staticmethod
+    def _cache_identity(
+        provider: LLMProvider,
+        *,
+        operation: LLMOperation,
+        messages: Sequence[LLMMessage],
+        prompt_version: str,
+        schema_version: str,
+        model_options: Mapping[str, JSONValue],
+    ) -> LLMCacheIdentity:
+        """Build cache provenance for the provider that actually produced the final output."""
+        return LLMCacheIdentity(
+            operation=operation,
+            provider=provider.provider_name,
+            model=provider.model,
+            prompt_version=prompt_version,
+            schema_version=schema_version,
+            generation_config_hash=provider.generation_config_hash(model_options),
+            input_hash=_input_hash(messages),
         )
 
     def _get_by_identity(self, identity: LLMCacheIdentity) -> LLMArtifact | None:

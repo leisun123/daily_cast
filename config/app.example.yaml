@@ -37,19 +37,28 @@ scheduler:
 task_execution:
   deadline_seconds: 1800
 
-# Supported direct providers are openai_compatible (Chat Completions) and
-# openai_responses (Responses/Codex). The key deliberately stays out of YAML.
-# Set DAILYCAST_LLM__API_KEY in .env or the deployment environment instead.
+# The OpenAI Responses model is preferred. Provider-level failures route once
+# to the configured DeepSeek fallback. Both keys deliberately stay out of YAML.
 llm:
-  provider: openai_compatible
+  provider: openai_responses
   base_url: https://api.openai.com/v1
-  model: gpt-4o-mini
+  model: gpt-5.6-terra
   temperature: 0.1
   top_p: null
   max_output_tokens: 2000
   timeout_seconds: 30
   max_retries: 2
   response_format: json_schema
+  fallback:
+    provider: openai_compatible
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    temperature: 0.1
+    top_p: null
+    max_output_tokens: 2000
+    timeout_seconds: 120
+    max_retries: 2
+    response_format: json_schema
   budget:
     max_calls: 12
     max_input_tokens: 60000

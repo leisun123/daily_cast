@@ -99,8 +99,8 @@ class LLMBudgetSettings(BaseModel):
     max_output_tokens: int = Field(default=15_000, ge=0)
 
 
-class LLMSettings(BaseModel):
-    """Direct model-provider settings; the key comes only from .env or environment."""
+class LLMProviderSettings(BaseModel):
+    """One direct model endpoint; credentials come only from .env or environment."""
 
     provider: str = "openai_compatible"
     base_url: str = "https://api.openai.com/v1"
@@ -112,7 +112,6 @@ class LLMSettings(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=10)
     response_format: str = "json_schema"
-    budget: LLMBudgetSettings = Field(default_factory=LLMBudgetSettings)
 
     @field_validator("provider")
     @classmethod
@@ -123,6 +122,15 @@ class LLMSettings(BaseModel):
             msg = f"llm.provider must be one of: {', '.join(sorted(supported))}"
             raise ValueError(msg)
         return value
+
+
+class LLMSettings(LLMProviderSettings):
+    """Preferred model endpoint plus an optional ordered provider fallback."""
+
+    provider: str = "openai_responses"
+    model: str = "gpt-5.6-terra"
+    fallback: LLMProviderSettings | None = None
+    budget: LLMBudgetSettings = Field(default_factory=LLMBudgetSettings)
 
 
 class EditorialSettings(BaseModel):

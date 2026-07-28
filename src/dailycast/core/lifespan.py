@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.core.config import Settings, load_settings
+from dailycast.core.config import LLMProviderSettings, Settings, load_settings
 from dailycast.core.logging import configure_logging
 from dailycast.db.models import SourceKind, TaskType, TriggerType
 from dailycast.db.revision import RevisionStatus, inspect_revision
@@ -22,6 +22,7 @@ from dailycast.episodes.service import EpisodeService
 from dailycast.llm.budget import BudgetController
 from dailycast.llm.contracts import LLMProvider
 from dailycast.llm.editorial_service import AIEditorialService
+from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.llm.providers.openai_compatible import OpenAICompatibleLLMProvider
 from dailycast.llm.providers.openai_responses import OpenAIResponsesLLMProvider
 from dailycast.news.service import NewsProcessor
@@ -258,34 +259,47 @@ def build_lifespan(
 
 
 def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) -> LLMProvider:
-    """Select the configured provider without leaking protocol details into editorial flow."""
-    if settings.llm.provider == "openai_compatible":
+    """Build the preferred provider and its optional ordered fallback."""
+    primary = _build_direct_llm_provider(settings.llm, http_client=http_client)
+    if settings.llm.fallback is None:
+        return primary
+    fallback = _build_direct_llm_provider(settings.llm.fallback, http_client=http_client)
+    return FailoverLLMProvider(primary, fallback)
+
+
+def _build_direct_llm_provider(
+    provider_settings: LLMProviderSettings,
+    *,
+    http_client: httpx.AsyncClient,
+) -> LLMProvider:
+    """Select one wire adapter without leaking protocol details into editorial flow."""
+    if provider_settings.provider == "openai_compatible":
         return OpenAICompatibleLLMProvider(
-            base_url=settings.llm.base_url,
-            api_key=settings.llm.api_key,
-            model=settings.llm.model,
-            timeout_seconds=settings.llm.timeout_seconds,
-            temperature=settings.llm.temperature,
-            top_p=settings.llm.top_p,
-            max_output_tokens=settings.llm.max_output_tokens,
-            max_retries=settings.llm.max_retries,
-            response_format=settings.llm.response_format,
+            base_url=provider_settings.base_url,
+            api_key=provider_settings.api_key,
+            model=provider_settings.model,
+            timeout_seconds=provider_settings.timeout_seconds,
+            temperature=provider_settings.temperature,
+            top_p=provider_settings.top_p,
+            max_output_tokens=provider_settings.max_output_tokens,
+            max_retries=provider_settings.max_retries,
+            response_format=provider_settings.response_format,
             http_client=http_client,
         )
-    if settings.llm.provider == "openai_responses":
+    if provider_settings.provider == "openai_responses":
         return OpenAIResponsesLLMProvider(
-            base_url=settings.llm.base_url,
-            api_key=settings.llm.api_key,
-            model=settings.llm.model,
-            timeout_seconds=settings.llm.timeout_seconds,
-            temperature=settings.llm.temperature,
-            top_p=settings.llm.top_p,
-            max_output_tokens=settings.llm.max_output_tokens,
-            max_retries=settings.llm.max_retries,
-            response_format=settings.llm.response_format,
+            base_url=provider_settings.base_url,
+            api_key=provider_settings.api_key,
+            model=provider_settings.model,
+            timeout_seconds=provider_settings.timeout_seconds,
+            temperature=provider_settings.temperature,
+            top_p=provider_settings.top_p,
+            max_output_tokens=provider_settings.max_output_tokens,
+            max_retries=provider_settings.max_retries,
+            response_format=provider_settings.response_format,
             http_client=http_client,
         )
-    msg = f"unsupported configured LLM provider: {settings.llm.provider}"
+    msg = f"unsupported configured LLM provider: {provider_settings.provider}"
     raise RuntimeError(msg)
 
 

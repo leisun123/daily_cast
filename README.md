@@ -58,7 +58,7 @@ cd dailycast
 cp .env.example .env
 ```
 
-Edit `.env` for environment-specific values and review `config/app.example.yaml` and `config/sources.example.yaml`. Set `DAILYCAST_LLM__API_KEY` only in your local `.env` or deployment environment; never put it in YAML or commit it.
+Edit `.env` for environment-specific values and review `config/app.example.yaml` and `config/sources.example.yaml`. DailyCast prefers `gpt-5.6-terra` through the Responses API and routes provider failures to the configured DeepSeek fallback. Set `DAILYCAST_LLM__API_KEY` and `DAILYCAST_LLM__FALLBACK__API_KEY` only in your local `.env` or deployment environment; never put them in YAML or commit them.
 
 Start the service:
 
