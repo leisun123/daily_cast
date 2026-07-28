@@ -59,7 +59,7 @@ cd dailycast
 cp .env.example .env
 ```
 
-Edit `.env` for environment-specific values and review `config/app.example.yaml` and `config/sources.example.yaml`. Set `LLM_API_KEY` only in your local `.env` or deployment environment; never put it in YAML or commit it.
+Edit `.env` for environment-specific values and review `config/app.example.yaml` and `config/sources.example.yaml`. DailyCast prefers `gpt-5.6-terra` through the Responses API and routes provider failures to the configured DeepSeek fallback. Set `DAILYCAST_LLM__API_KEY` and `DAILYCAST_LLM__FALLBACK__API_KEY` only in your local `.env` or deployment environment; never put them in YAML or commit them.
 
 Start the service:
 
@@ -150,11 +150,11 @@ uses `daily` only if that edition does not exist, otherwise it creates `daily-2`
 so on. Because production has `publishing.auto_publish=true`, each successful manual task
 generates and publishes its own immutable episode.
 
-DailyCast reads LLM configuration only from these four variable names:
-`LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`, and the password variable `LLM_API_KEY`.
-The older `DAILYCAST_LLM__*` rows are ignored, including any literal values such as
-`${LLM_BASE_URL}`. They are a historical Zeabur-template error, not values that need to be
-filled in or copied. New deployments create only the canonical `LLM_*` rows.
+DailyCast reads its ordered LLM configuration from exactly eight environment variables:
+`DAILYCAST_LLM__PROVIDER`, `DAILYCAST_LLM__BASE_URL`, `DAILYCAST_LLM__MODEL`,
+`DAILYCAST_LLM__API_KEY`, plus the corresponding four
+`DAILYCAST_LLM__FALLBACK__*` variables. The old unprefixed `LLM_*` variables are ignored;
+new deployments should create only the eight `DAILYCAST_LLM__*` rows.
 
 Deploy into a selected Zeabur project with:
 

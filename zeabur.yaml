@@ -9,22 +9,38 @@ spec:
       type: DOMAIN
       name: Public podcast domain
       description: Public HTTPS domain used by the RSS Feed and immutable MP3 URLs.
-    - key: LLM_PROVIDER
+    - key: DAILYCAST_LLM__PROVIDER
       type: STRING
-      name: LLM provider
-      description: Application provider name, such as openai_responses or openai_compatible.
-    - key: LLM_BASE_URL
+      name: Primary LLM provider
+      description: Preferred provider protocol; use openai_responses for GPT-5.6 Terra.
+    - key: DAILYCAST_LLM__BASE_URL
       type: STRING
-      name: LLM base URL
-      description: Application endpoint without embedded credentials.
-    - key: LLM_MODEL
+      name: Primary LLM base URL
+      description: Preferred endpoint without embedded credentials.
+    - key: DAILYCAST_LLM__MODEL
       type: STRING
-      name: LLM model
-      description: Model identifier supported by the configured endpoint.
-    - key: LLM_API_KEY
+      name: Primary LLM model
+      description: Preferred model identifier, such as gpt-5.6-terra.
+    - key: DAILYCAST_LLM__API_KEY
       type: PASSWORD
-      name: LLM API key
-      description: Secret API key stored only in Zeabur environment configuration.
+      name: Primary LLM API key
+      description: Preferred endpoint secret stored only in Zeabur environment configuration.
+    - key: DAILYCAST_LLM__FALLBACK__PROVIDER
+      type: STRING
+      name: Fallback LLM provider
+      description: Fallback provider protocol; use openai_compatible for DeepSeek.
+    - key: DAILYCAST_LLM__FALLBACK__BASE_URL
+      type: STRING
+      name: Fallback LLM base URL
+      description: Fallback endpoint without embedded credentials.
+    - key: DAILYCAST_LLM__FALLBACK__MODEL
+      type: STRING
+      name: Fallback LLM model
+      description: Fallback model identifier, such as deepseek-chat.
+    - key: DAILYCAST_LLM__FALLBACK__API_KEY
+      type: PASSWORD
+      name: Fallback LLM API key
+      description: Fallback endpoint secret stored only in Zeabur environment configuration.
   tags:
     - AI
     - Tool

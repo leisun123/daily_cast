@@ -137,65 +137,90 @@ def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path
     assert settings.scheduler.enabled is True
 
 
-def test_llm_settings_use_canonical_llm_names_when_dailycast_values_are_placeholders(
+def test_dailycast_llm_primary_and_fallback_environment_override_yaml(
     app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The canonical LLM variables keep a service working through the broken old rows."""
-    monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "${LLM_PROVIDER}")
-    monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "${LLM_BASE_URL}")
-    monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "${LLM_API_KEY}")
-    monkeypatch.setenv("LLM_PROVIDER", "openai_responses")
-    monkeypatch.setenv("LLM_BASE_URL", "https://gateway.example/v1")
-    monkeypatch.setenv("LLM_API_KEY", "existing-secret")
+    """The explicit eight-variable interface configures both ordered endpoints."""
+    monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "openai_responses")
+    monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("DAILYCAST_LLM__MODEL", "gpt-5.6-terra")
+    monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "primary-secret")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__PROVIDER", "openai_compatible")
+    monkeypatch.setenv(
+        "DAILYCAST_LLM__FALLBACK__BASE_URL", "https://api.deepseek.example"
+    )
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__MODEL", "deepseek-test")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__API_KEY", "fallback-secret")
 
     settings = load_settings(config_path=app_config_path, env_file=tmp_path / "absent.env")
 
     assert settings.llm.provider == "openai_responses"
     assert settings.llm.base_url == "https://gateway.example/v1"
-    assert settings.llm.api_key == "existing-secret"
+    assert settings.llm.api_key == "primary-secret"
+    assert settings.llm.fallback is not None
+    assert settings.llm.fallback.provider == "openai_compatible"
+    assert settings.llm.fallback.base_url == "https://api.deepseek.example"
+    assert settings.llm.fallback.model == "deepseek-test"
+    assert settings.llm.fallback.api_key == "fallback-secret"
 
 
-def test_llm_settings_load_canonical_names_from_dotenv(
+def test_llm_settings_load_primary_and_fallback_from_dotenv(
     app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Local .env files use the same LLM_* interface as deployment environment variables."""
+    """Local .env files use the same eight-variable interface as deployments."""
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
             (
-                "LLM_PROVIDER=openai_compatible",
-                "LLM_BASE_URL=https://api.deepseek.example",
-                "LLM_MODEL=deepseek-test",
-                "LLM_API_KEY=test-secret",
+                "DAILYCAST_LLM__PROVIDER=openai_responses",
+                "DAILYCAST_LLM__BASE_URL=https://gateway.example/v1",
+                "DAILYCAST_LLM__MODEL=gpt-5.6-terra",
+                "DAILYCAST_LLM__API_KEY=primary-secret",
+                "DAILYCAST_LLM__FALLBACK__PROVIDER=openai_compatible",
+                "DAILYCAST_LLM__FALLBACK__BASE_URL=https://api.deepseek.example",
+                "DAILYCAST_LLM__FALLBACK__MODEL=deepseek-test",
+                "DAILYCAST_LLM__FALLBACK__API_KEY=fallback-secret",
                 "",
             )
         ),
         encoding="utf-8",
     )
-    for name in ("LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY"):
+    for name in (
+        "DAILYCAST_LLM__PROVIDER",
+        "DAILYCAST_LLM__BASE_URL",
+        "DAILYCAST_LLM__MODEL",
+        "DAILYCAST_LLM__API_KEY",
+        "DAILYCAST_LLM__FALLBACK__PROVIDER",
+        "DAILYCAST_LLM__FALLBACK__BASE_URL",
+        "DAILYCAST_LLM__FALLBACK__MODEL",
+        "DAILYCAST_LLM__FALLBACK__API_KEY",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     settings = load_settings(config_path=app_config_path, env_file=env_file)
 
-    assert settings.llm.provider == "openai_compatible"
-    assert settings.llm.base_url == "https://api.deepseek.example"
-    assert settings.llm.model == "deepseek-test"
-    assert settings.llm.api_key == "test-secret"
+    assert settings.llm.provider == "openai_responses"
+    assert settings.llm.base_url == "https://gateway.example/v1"
+    assert settings.llm.model == "gpt-5.6-terra"
+    assert settings.llm.api_key == "primary-secret"
+    assert settings.llm.fallback is not None
+    assert settings.llm.fallback.provider == "openai_compatible"
+    assert settings.llm.fallback.base_url == "https://api.deepseek.example"
+    assert settings.llm.fallback.model == "deepseek-test"
+    assert settings.llm.fallback.api_key == "fallback-secret"
 
 
-def test_dailycast_llm_values_are_ignored_in_favor_of_canonical_llm_names(
+def test_legacy_llm_environment_values_do_not_override_dailycast_settings(
     app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only LLM_* is a supported environment interface for model configuration."""
-    monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "openai_compatible")
-    monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "https://native.example/v1")
-    monkeypatch.setenv("LLM_PROVIDER", "openai_responses")
+    """Unprefixed legacy process variables are outside the supported interface."""
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
     monkeypatch.setenv("LLM_BASE_URL", "https://legacy.example/v1")
 
     settings = load_settings(config_path=app_config_path, env_file=tmp_path / "absent.env")
 
     assert settings.llm.provider == "openai_responses"
-    assert settings.llm.base_url == "https://legacy.example/v1"
+    assert settings.llm.base_url == "https://api.openai.com/v1"
 
 
 def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:

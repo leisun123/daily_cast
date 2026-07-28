@@ -18,7 +18,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from dailycast.core.config import LLMSettings, load_settings
 from dailycast.core.errors import (
     AIBudgetExceededError,
+    ConfigurationError,
     LLMProviderAuthenticationError,
+    LLMProviderError,
     LLMProviderResponseError,
     LLMStructuredOutputUnsupportedError,
 )
@@ -131,6 +133,53 @@ class SequencedFakeLLMProvider:
         )
 
 
+class FailingFakeLLMProvider(FakeLLMProvider):
+    """Raise a provider error so failover behavior can be exercised without external I/O."""
+
+    async def generate_structured(
+        self,
+        operation: LLMOperation,
+        messages: tuple[LLMMessage, ...],
+        response_schema: type[BaseModel],
+        model_options: Mapping[str, object],
+    ) -> StructuredResult:
+        """Count the attempted provider call before reporting a safe provider failure."""
+        del operation, messages, response_schema, model_options
+        self.calls += 1
+        raise LLMProviderError()
+
+
+class FakeFailoverLLMProvider:
+    """Expose ordered providers using the runtime router contract expected by artifacts."""
+
+    def __init__(self, primary: FakeLLMProvider, fallback: FakeLLMProvider) -> None:
+        self.providers = (primary, fallback)
+        self.provider_name = primary.provider_name
+        self.model = primary.model
+        self.max_output_tokens = primary.max_output_tokens
+
+    def generation_config_hash(self, model_options: Mapping[str, object]) -> str:
+        """Use the preferred provider identity until a fallback is actually selected."""
+        return self.providers[0].generation_config_hash(model_options)
+
+    async def generate_structured(
+        self,
+        operation: LLMOperation,
+        messages: tuple[LLMMessage, ...],
+        response_schema: type[BaseModel],
+        model_options: Mapping[str, object],
+    ) -> StructuredResult:
+        """Provide direct-call failover while artifact tests verify budget-aware routing."""
+        try:
+            return await self.providers[0].generate_structured(
+                operation, messages, response_schema, model_options
+            )
+        except LLMProviderError:
+            return await self.providers[1].generate_structured(
+                operation, messages, response_schema, model_options
+            )
+
+
 @pytest.fixture
 def migrated_session_factory(app_config_path: Path) -> sessionmaker[Session]:
     """Build an isolated full V1 schema through the application migration path."""
@@ -211,7 +260,8 @@ def test_llm_settings_have_explicit_safe_defaults(app_config_path: Path) -> None
         env_file=app_config_path.with_suffix(".env"),
     )
 
-    assert settings.llm.provider == "openai_compatible"
+    assert settings.llm.provider == "openai_responses"
+    assert settings.llm.model == "gpt-5.6-terra"
     assert settings.llm.temperature == 0.1
     assert settings.llm.budget.max_calls == 12
     assert settings.llm.budget.max_input_tokens == 60_000
@@ -276,17 +326,125 @@ def test_llm_settings_allow_only_supported_wire_protocols() -> None:
         LLMSettings(provider="unknown")
 
 
-def test_runtime_selects_responses_provider(app_config_path: Path) -> None:
-    """Lifespan wiring selects the Responses adapter without changing editorial code."""
+def test_legacy_llm_environment_variables_are_not_accepted(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """Only the explicit DAILYCAST_LLM__FALLBACK__ namespace configures failover."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "LLM_PROVIDER=openai_compatible",
+                "LLM_BASE_URL=https://api.deepseek.com",
+                "LLM_API_KEY=fallback-key",
+                "LLM_MODEL=deepseek-v4-pro",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError):
+        load_settings(config_path=app_config_path, env_file=env_file)
+
+
+def test_runtime_builds_responses_primary_with_deepseek_fallback(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """Lifespan wiring preserves provider protocols and their preferred order."""
 
     async def scenario() -> None:
-        settings = load_settings(config_path=app_config_path)
-        settings.llm.provider = "openai_responses"
-        async with httpx.AsyncClient() as client:
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "DAILYCAST_LLM__PROVIDER=openai_responses",
+                    "DAILYCAST_LLM__BASE_URL=https://models.example/v1",
+                    "DAILYCAST_LLM__API_KEY=primary-key",
+                    "DAILYCAST_LLM__MODEL=gpt-5.6-terra",
+                    "DAILYCAST_LLM__FALLBACK__PROVIDER=openai_compatible",
+                    "DAILYCAST_LLM__FALLBACK__BASE_URL=https://api.deepseek.com",
+                    "DAILYCAST_LLM__FALLBACK__API_KEY=fallback-key",
+                    "DAILYCAST_LLM__FALLBACK__MODEL=deepseek-v4-pro",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        settings = load_settings(config_path=app_config_path, env_file=env_file)
+        async with httpx.AsyncClient(trust_env=False) as client:
             provider = build_llm_provider(settings, http_client=client)
-        assert isinstance(provider, OpenAIResponsesLLMProvider)
+        assert type(provider).__name__ == "FailoverLLMProvider"
+        assert isinstance(provider.providers[0], OpenAIResponsesLLMProvider)
+        assert provider.providers[0].model == "gpt-5.6-terra"
+        assert isinstance(provider.providers[1], OpenAICompatibleLLMProvider)
+        assert provider.providers[1].model == "deepseek-v4-pro"
 
     asyncio.run(scenario())
+
+
+def test_provider_failover_reserves_budget_and_persists_fallback_identity(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A failed primary and successful fallback are two calls with DeepSeek provenance."""
+    task_run_id, task_step_id = create_task_provenance(migrated_session_factory)
+    primary = FailingFakeLLMProvider({"score": 0}, generation_marker="primary")
+    primary.provider_name = "openai_responses"
+    primary.model = "gpt-5.6-terra"
+    fallback = FakeLLMProvider({"score": 7}, generation_marker="fallback")
+    fallback.provider_name = "openai_compatible"
+    fallback.model = "deepseek-v4-pro"
+    provider = FakeFailoverLLMProvider(primary, fallback)
+    service = LLMArtifactService(
+        migrated_session_factory,
+        provider,
+        BudgetController(max_calls=2, max_input_tokens=1_000, max_output_tokens=100),
+    )
+
+    result = asyncio.run(
+        service.generate_structured(**request_kwargs(task_run_id, task_step_id))
+    )
+
+    assert primary.calls == 1
+    assert fallback.calls == 1
+    assert result.model == "deepseek-v4-pro"
+    assert result.provider_call_count == 2
+    with UnitOfWork(migrated_session_factory) as unit:
+        assert unit.session is not None
+        artifact = unit.session.scalar(select(LLMArtifact))
+        assert artifact is not None
+        assert artifact.provider == "openai_compatible"
+        assert artifact.model == "deepseek-v4-pro"
+
+    cached = asyncio.run(
+        service.generate_structured(**request_kwargs(task_run_id, task_step_id))
+    )
+
+    assert cached.cache_hit is True
+    assert cached.model == "deepseek-v4-pro"
+    assert cached.provider_call_count == 0
+    assert primary.calls == 1
+    assert fallback.calls == 1
+
+
+def test_provider_failover_cannot_bypass_max_calls_budget(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """Fallback is rejected before its network call when the primary exhausted max_calls."""
+    task_run_id, task_step_id = create_task_provenance(migrated_session_factory)
+    primary = FailingFakeLLMProvider({"score": 0}, generation_marker="primary")
+    fallback = FakeLLMProvider({"score": 7}, generation_marker="fallback")
+    service = LLMArtifactService(
+        migrated_session_factory,
+        FakeFailoverLLMProvider(primary, fallback),
+        BudgetController(max_calls=1, max_input_tokens=1_000, max_output_tokens=100),
+    )
+
+    with pytest.raises(AIBudgetExceededError):
+        asyncio.run(service.generate_structured(**request_kwargs(task_run_id, task_step_id)))
+
+    assert primary.calls == 1
+    assert fallback.calls == 0
 
 
 def test_artifact_service_validates_and_persists_success(

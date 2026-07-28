@@ -1,7 +1,6 @@
 """Pydantic Settings loader with YAML, .env, and environment overrides."""
 
 import os
-from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal
@@ -23,17 +22,6 @@ _yaml_path_context: ContextVar[Path] = ContextVar(
     "dailycast_yaml_path", default=DEFAULT_CONFIG_PATH
 )
 _env_file_context: ContextVar[Path | None] = ContextVar("dailycast_env_file_path", default=None)
-
-_LLM_ENVIRONMENT_NAMES = {
-    "LLM_PROVIDER": "provider",
-    "LLM_BASE_URL": "base_url",
-    "LLM_MODEL": "model",
-    "LLM_API_KEY": "api_key",
-}
-_CANONICAL_LLM_DOTENV_KEYS = frozenset(
-    f"llm_{field_name}" for field_name in _LLM_ENVIRONMENT_NAMES.values()
-)
-
 
 class ServerSettings(BaseModel):
     """HTTP bind settings."""
@@ -113,8 +101,8 @@ class LLMBudgetSettings(BaseModel):
     max_input_tokens: int = Field(default=60_000, ge=0)
 
 
-class LLMSettings(BaseModel):
-    """Direct model-provider settings; the key comes only from .env or environment."""
+class LLMProviderSettings(BaseModel):
+    """One direct model endpoint; credentials come only from .env or environment."""
 
     provider: str = "openai_compatible"
     base_url: str = "https://api.openai.com/v1"
@@ -125,7 +113,6 @@ class LLMSettings(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=10)
     response_format: str = "json_schema"
-    budget: LLMBudgetSettings = Field(default_factory=LLMBudgetSettings)
 
     @field_validator("provider")
     @classmethod
@@ -136,6 +123,15 @@ class LLMSettings(BaseModel):
             msg = f"llm.provider must be one of: {', '.join(sorted(supported))}"
             raise ValueError(msg)
         return value
+
+
+class LLMSettings(LLMProviderSettings):
+    """Preferred model endpoint plus an optional ordered provider fallback."""
+
+    provider: str = "openai_responses"
+    model: str = "gpt-5.6-terra"
+    fallback: LLMProviderSettings | None = None
+    budget: LLMBudgetSettings = Field(default_factory=LLMBudgetSettings)
 
 
 class EditorialSettings(BaseModel):
@@ -282,57 +278,6 @@ class DirectStoragePathSettingsSource(PydanticBaseSettingsSource):
         return self._values
 
 
-class DailyCastWithoutLLMSettingsSource(PydanticBaseSettingsSource):
-    """Preserve DAILYCAST_* settings while reserving LLM configuration for LLM_* names."""
-
-    def __init__(
-        self,
-        settings_cls: type[BaseSettings],
-        delegate: PydanticBaseSettingsSource,
-    ) -> None:
-        super().__init__(settings_cls)
-        self._delegate = delegate
-
-    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
-        """Delegate normal Pydantic field loading to the wrapped source."""
-        return self._delegate.get_field_value(field, field_name)
-
-    def __call__(self) -> dict[str, Any]:
-        """Remove every nested `llm` value from the DAILYCAST_* source."""
-        values = self._delegate()
-        sanitized_values = dict(values)
-        sanitized_values.pop("llm", None)
-        for key in _CANONICAL_LLM_DOTENV_KEYS:
-            sanitized_values.pop(key, None)
-        return sanitized_values
-
-
-class CanonicalLLMSettingsSource(PydanticBaseSettingsSource):
-    """Load the only supported model-provider environment interface: LLM_*."""
-
-    def __init__(
-        self,
-        settings_cls: type[BaseSettings],
-        values: Mapping[str, str | None],
-    ) -> None:
-        super().__init__(settings_cls)
-        llm_values = {
-            setting_name: raw_value
-            for environment_name, setting_name in _LLM_ENVIRONMENT_NAMES.items()
-            if (raw_value := values.get(environment_name)) is not None
-        }
-        self._values: dict[str, Any] = {"llm": llm_values} if llm_values else {}
-
-    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
-        """Return legacy values through Pydantic's normal field preparation."""
-        del field
-        return self._values.get(field_name), field_name, False
-
-    def __call__(self) -> dict[str, Any]:
-        """Provide canonical model settings at normal environment precedence."""
-        return self._values
-
-
 class Settings(BaseSettings):
     """Immutable application configuration after source precedence is resolved."""
 
@@ -368,15 +313,11 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Apply explicit values, environment, .env, then YAML defaults in that order."""
-        dotenv_path = _env_file_context.get()
-        dotenv_values_map = dotenv_values(dotenv_path) if dotenv_path is not None else {}
         return (
             init_settings,
-            DailyCastWithoutLLMSettingsSource(settings_cls, env_settings),
-            CanonicalLLMSettingsSource(settings_cls, os.environ),
+            env_settings,
             DirectStoragePathSettingsSource(settings_cls),
-            DailyCastWithoutLLMSettingsSource(settings_cls, dotenv_settings),
-            CanonicalLLMSettingsSource(settings_cls, dotenv_values_map),
+            dotenv_settings,
             YamlSettingsSource(settings_cls, _yaml_path_context.get()),
             file_secret_settings,
         )
