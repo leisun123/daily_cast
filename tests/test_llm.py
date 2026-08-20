@@ -351,9 +351,7 @@ def test_provider_failover_reserves_budget_and_persists_fallback_identity(
         BudgetController(max_calls=2, max_input_tokens=1_000, max_output_tokens=100),
     )
 
-    result = asyncio.run(
-        service.generate_structured(**request_kwargs(task_run_id, task_step_id))
-    )
+    result = asyncio.run(service.generate_structured(**request_kwargs(task_run_id, task_step_id)))
 
     assert primary.calls == 1
     assert fallback.calls == 1
@@ -366,9 +364,7 @@ def test_provider_failover_reserves_budget_and_persists_fallback_identity(
         assert artifact.provider == "openai_compatible"
         assert artifact.model == "deepseek-v4-pro"
 
-    cached = asyncio.run(
-        service.generate_structured(**request_kwargs(task_run_id, task_step_id))
-    )
+    cached = asyncio.run(service.generate_structured(**request_kwargs(task_run_id, task_step_id)))
 
     assert cached.cache_hit is True
     assert cached.model == "deepseek-v4-pro"
