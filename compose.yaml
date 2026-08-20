@@ -18,7 +18,8 @@ services:
       # Keep the management API host-local unless an explicit deployment changes this.
       - "${DAILYCAST_HOST_ADDRESS:-127.0.0.1}:${DAILYCAST_HOST_PORT:-8000}:8000"
     volumes:
-      # SQLite/task artifacts are private; public contains only generated Feed/media assets.
+      # SQLite, task artifacts, and the private persistent NetEase browser profile live in data.
+      # public contains only generated Feed/media assets.
       - "${DAILYCAST_DATA_DIR:-./data}:/app/data"
       - "${DAILYCAST_PUBLIC_DIR:-./public}:/app/public"
     healthcheck:

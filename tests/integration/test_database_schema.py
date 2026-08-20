@@ -15,6 +15,9 @@ from dailycast.db.models import (
     Episode,
     LLMArtifact,
     NewsEvent,
+    PublicationPlatform,
+    PublicationTarget,
+    PublicationTargetStatus,
     Source,
     TaskRun,
     TaskStep,
@@ -94,6 +97,7 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             "llm_artifacts",
             "audio_segments",
             "publications",
+            "publication_targets",
         }.issubset({name for (name,) in tables})
         revision = inspect_revision(
             engine=engine,
@@ -101,7 +105,7 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             database_url=database_url,
         )
         assert revision.is_current is True
-        assert revision.current == ("0006_backfill_episode_news_count",)
+        assert revision.current == ("0007_publication_targets",)
     finally:
         engine.dispose()
 
@@ -181,6 +185,29 @@ def test_unique_constraints_reject_duplicate_v1_identities(app_config_path: Path
             session.flush()
         session.rollback()
 
+        session.add(
+            PublicationTarget(
+                episode_id=episode.id,
+                platform=PublicationPlatform.RSS,
+                status=PublicationTargetStatus.PENDING,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
+        session.commit()
+        session.add(
+            PublicationTarget(
+                episode_id=episode.id,
+                platform=PublicationPlatform.RSS,
+                status=PublicationTargetStatus.PENDING,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.flush()
+        session.rollback()
+
         task_run = TaskRun(
             id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             task_type="daily_generate",
@@ -244,6 +271,19 @@ def test_foreign_keys_json_checks_and_tts_hash_checks_are_enforced(app_config_pa
     timestamp = now()
     try:
         session.add(create_article("missing-source", "a" * 64))
+        with pytest.raises(IntegrityError):
+            session.flush()
+        session.rollback()
+
+        session.add(
+            PublicationTarget(
+                episode_id=999_999,
+                platform=PublicationPlatform.NETEASE,
+                status=PublicationTargetStatus.PENDING,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
         with pytest.raises(IntegrityError):
             session.flush()
         session.rollback()
@@ -341,8 +381,7 @@ def test_reliability_migration_adds_nonnegative_task_step_tts_usage(
             assert "tts_character_count" in columns
             with pytest.raises(IntegrityError):
                 connection.execute(
-                    text(
-                        """
+                    text("""
                         INSERT INTO task_runs (
                             id, task_type, business_key, idempotency_key, trigger_type, status,
                             pipeline_version, config_fingerprint, config_snapshot_json,
@@ -351,20 +390,15 @@ def test_reliability_migration_adds_nonnegative_task_step_tts_usage(
                             'tts-check-task', 'daily_generate', 'tts-check', 'tts-check-key',
                             'manual', 'queued', 'test', :fingerprint, '{}', '{}', :created, :updated
                         )
-                        """
-                    ),
+                        """),
                     {"fingerprint": "a" * 64, "created": now(), "updated": now()},
                 )
-                connection.execute(
-                    text(
-                        """
+                connection.execute(text("""
                         INSERT INTO task_steps (
                             task_run_id, step_name, step_order, attempt, status, details_json,
                             tts_character_count
                         ) VALUES ('tts-check-task', 'tts', 1, 1, 'succeeded', '{}', -1)
-                        """
-                    )
-                )
+                        """))
     finally:
         engine.dispose()
 

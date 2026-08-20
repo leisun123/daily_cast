@@ -550,11 +550,11 @@ stateDiagram-v2
 | `state_conflict` | 重复任务、错误 Episode 状态 | 返回已有对象或 409 |
 | `storage` | 磁盘满、权限、checksum 不匹配 | 终止相关步骤，修复后续跑 |
 | `tooling` | FFmpeg 缺失、编码失败 | readiness 失败或步骤终止 |
-| `future_rpa_human_action` | 未来 RPA 阶段的验证码/风控；非 V1 错误类别 | 未来扩展的 Publication `needs_attention`；V1 不产生该状态 |
+| `rpa_human_action` | 网易云登录失效、验证码、风控或页面选择器失配 | 对应 PublicationTarget=`needs_attention`；保留 RSS 和 Episode 结果 |
 
 所有错误进入统一 `DailyCastError` 映射，包含稳定错误码、用户可读摘要、retryable、公开细节和仅日志可见的 cause。日志不保存密钥或完整供应商响应。
 
-V1 Publication 状态严格只有 `pending`、`publishing`、`published`、`failed`。上表的 RPA 人工处理类别仅说明未来边界，不进入 V1 初始状态机、DDL、API 或实现。
+原有 RSS `Publication` 状态保持 `pending`、`publishing`、`published`、`failed`，用于其原子 Feed 生命周期。Sprint 10 的独立 `PublicationTarget` 增加 `needs_attention`，仅代表一个外部分发目标需要人工操作，不改变 Episode 或 RSS Publication 的已完成状态。
 
 ### 12.2 局部失败门槛
 
@@ -591,6 +591,7 @@ V1 Publication 状态严格只有 `pending`、`publishing`、`published`、`fail
 | AudioSegment | Episode 修订内 `(episode_id, script_revision, segment_index)` 唯一；跨修订只用包含 `provider_config_hash` 的完整 cache_key 复用 |
 | 草稿 MP3 | 保存于私有 `DATA_DIR/audio/drafts/{episode_id}/revision-{script_revision}.mp3`，原子替换当前 draft 引用，绝不写入 `PUBLIC_DIR` |
 | Publication | `(episode_id, publisher_type, target_key)` 唯一；重复调用先 reconcile |
+| PublicationTarget | `(episode_id, platform)` 唯一；每个平台独立重试、reconcile 或人工 resume |
 | Feed item | Episode `public_id` 作为稳定 GUID；按 GUID upsert，不 append 重复项 |
 
 ### 13.3 从失败步骤恢复
@@ -655,11 +656,11 @@ SQLite 保存可查询、需要事务和关系约束的数据：Source、Article
 10. 已发布 item 的 GUID、元数据和音频 URL 在 V1 中均视为不可变。需要修正元数据或音频时创建新 edition/new item；旧 enclosure 继续保留，避免不同播客客户端看到互相矛盾的缓存。
 11. FastAPI 可在个人规模下提供静态文件；公网长期运行建议由 Caddy/Nginx 直接服务 `public/`，但不是 Compose 必需组件。
 
-## 16. 未来 Publisher 与 RPA 策略
+## 16. Publisher 与受控 RPA 策略
 
 ### 16.1 Publisher 接口
 
-`RSSPublisher`、未来 `PodbeanAPIPublisher` 和 `NetEasePlaywrightPublisher` 都实现：
+`PublicationDispatcher` 先执行 RSS，再独立执行每个已启用目标。`RSSDistributionPublisher`、`NetEasePlaywrightPublisher` 和未来 API Publisher 都实现：
 
 ```text
 validate(approved_episode, immutable_asset)
@@ -675,7 +676,7 @@ Publisher 只接收已批准节目、标题简介、来源摘要和最终音频�
 
 ### 16.3 网易云 Playwright 失败处理
 
-未来适配器使用独立、非仓库内的持久化 browser profile 或加密 secret mount。状态处理如下：
+当前 adapter 使用 `DATA_DIR/netease/profile` 下独立、非仓库内的持久化 browser profile。状态处理如下：
 
 - 登录失效：停止自动发布，Publication 进入 `needs_attention/auth_expired`，引导用户人工重新登录；
 - 验证码或风控：不绕过，保存脱敏截图、trace 和当前步骤，进入 `needs_attention/challenge`；
@@ -683,9 +684,7 @@ Publisher 只接收已批准节目、标题简介、来源摘要和最终音频�
 - 上传已提交但结果未知：不得直接重传，先通过页面草稿/节目列表 reconcile；
 - 人工处理后从安全检查点继续，复用同一 Publication idempotency key。
 
-Cookie、账号和密码绝不写入代码、YAML、日志、截图文件名或数据库配置快照。Playwright 作为 RPA 阶段的可选依赖，不进入 V1 默认镜像。
-
-`needs_attention` 和 `human_action_code` 是未来 RPA 阶段的 Publication 扩展，不属于 V1 初始 schema；实现 NetEase Publisher 时必须通过新的 Alembic revision 增加，不能提前把 Podbean/网易云能力写入 V1 目录树或初始 migration。
+Cookie、账号和密码绝不写入代码、YAML、日志、截图文件名或数据库配置快照。Playwright Chromium 由 Docker 镜像安装，浏览器 profile 仅存于持久化的私有 `DATA_DIR`；`PublicationTarget` 通过 Alembic revision 管理，不修改 RSS Publication 的原子状态机。
 
 ## 17. 配置与密钥管理
 

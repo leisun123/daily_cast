@@ -35,7 +35,7 @@ from dailycast.pipeline.steps.outlining import OutliningStep
 from dailycast.pipeline.steps.publish import PublishStep
 from dailycast.pipeline.steps.ranking import RankingStep
 from dailycast.pipeline.steps.scripting import ScriptingStep
-from dailycast.publishing.service import PublicationService
+from dailycast.publishing.dispatcher import PublicationDispatcher
 from dailycast.sources.extraction import ContentExtractor
 from dailycast.sources.service import ArticleService, SourceCollectionService
 from dailycast.tts.service import AudioGenerationService
@@ -559,7 +559,7 @@ def build_collection_pipeline(
     editorial_service: AIEditorialService,
     episode_service: EpisodeService,
     audio_service: AudioGenerationService,
-    publication_service: PublicationService,
+    publication_dispatcher: PublicationDispatcher,
     budget_factory: Callable[[], BudgetController],
     *,
     data_dir: Path,
@@ -595,6 +595,6 @@ def build_collection_pipeline(
                 enforce_quality_gate=enforce_quality_gate,
             ),
             GenerateAudioStep(audio_service),
-            PublishStep(episode_service, publication_service, auto_publish=auto_publish),
+            PublishStep(episode_service, publication_dispatcher, auto_publish=auto_publish),
         ),
     )

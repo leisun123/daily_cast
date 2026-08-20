@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from dailycast.tts import preprocess
@@ -109,3 +111,15 @@ def test_pronunciation_dictionary_identity_changes_when_replacements_change() ->
     changed = PronunciationDictionary.from_mapping({"AI": {"replacement": "A I"}})
 
     assert first.semantic_hash != changed.semantic_hash
+
+
+def test_shipped_dictionary_handles_product_names_and_compound_terms() -> None:
+    """Production pronunciation policy keeps common names and Chinese compounds speakable."""
+    dictionary_path = Path(__file__).resolve().parents[1] / "config" / "pronunciation.yaml"
+    dictionary = PronunciationDictionary.from_yaml(dictionary_path)
+
+    prepared = TTSPreprocessor(dictionary=dictionary, text_mode="plain").prepare(
+        "claude opus 改进了日常运维。", section_role="body"
+    )
+
+    assert prepared.text == "克劳德，欧普斯改进了日常的运维。"

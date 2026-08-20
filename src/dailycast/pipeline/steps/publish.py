@@ -9,7 +9,8 @@ from dailycast.db.models import EpisodeStatus
 from dailycast.episodes.service import EpisodeService
 from dailycast.pipeline.context import PipelineContext
 from dailycast.pipeline.contracts import JSONValue, StepResult
-from dailycast.publishing.service import PublicationPreconditionError, PublicationService
+from dailycast.publishing.dispatcher import PublicationDispatcher
+from dailycast.publishing.service import PublicationPreconditionError
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,7 +18,7 @@ class PublishStep:
     """Publish only after explicit human approval or the configured auto-publish handoff."""
 
     episode_service: EpisodeService
-    publication_service: PublicationService
+    publication_dispatcher: PublicationDispatcher
     auto_publish: bool
     name: str = "publish"
 
@@ -39,26 +40,34 @@ class PublishStep:
         elif episode.status is not EpisodeStatus.APPROVED:
             return _skipped_result(episode_id, "EPISODE_NOT_REVIEWABLE")
         try:
-            publication = self.publication_service.publish(episode_id)
+            distribution = await self.publication_dispatcher.publish(episode_id)
         except PublicationPreconditionError:
             return _skipped_result(episode_id, "EPISODE_NOT_APPROVED")
-        response_summary = json.loads(publication.response_summary_json or "{}")
+        publication = distribution.rss_publication
+        response_summary = (
+            json.loads(publication.response_summary_json or "{}") if publication else {}
+        )
+        target_statuses: dict[str, JSONValue] = {
+            platform: status for platform, status in distribution.target_statuses.items()
+        }
         details: dict[str, JSONValue] = {
-            "asset_path": publication.public_asset_path,
+            "asset_path": publication.public_asset_path if publication else None,
             "asset_reused": response_summary.get("asset_reused", False),
             "auto_approved": auto_approved,
             "episode_id": episode_id,
             "feed_version": response_summary.get("feed_version"),
-            "feed_guid": publication.feed_guid,
-            "publication_id": publication.id,
-            "publication_status": publication.status.value,
+            "feed_guid": publication.feed_guid if publication else None,
+            "publication_id": publication.id if publication else None,
+            "publication_status": publication.status.value if publication else None,
+            "target_statuses": target_statuses,
         }
         return StepResult(
             input_count=1,
             output_count=1,
+            warning_count=distribution.warning_count,
             checkpoint_json=json.dumps(details, separators=(",", ":"), sort_keys=True),
             details=details,
-            artifact_path=publication.public_asset_path,
+            artifact_path=publication.public_asset_path if publication else None,
         )
 
 

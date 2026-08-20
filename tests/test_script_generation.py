@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from dailycast.db.models import LLMOperation
 from dailycast.llm.budget import BudgetController
 from dailycast.llm.editorial_service import AIEditorialService
-from dailycast.llm.prompts.generate_script_v3 import GENERATE_SCRIPT_V3
+from dailycast.llm.prompts.generate_script_v4 import GENERATE_SCRIPT_V4
 from dailycast.llm.script_editorial import _script_messages
 
 
@@ -81,15 +81,19 @@ def test_script_request_exposes_exact_reference_allowlists_for_json_only_provide
     outline = build_outline(fixture.event_id)
     dossiers = build_dossiers(migrated_session_factory, fixture)
 
-    messages = _script_messages(outline, dossiers, GENERATE_SCRIPT_V3)
+    messages = _script_messages(outline, dossiers, GENERATE_SCRIPT_V4)
     payload = json.loads(messages[1].content)
     constraints = payload["output_constraints"]
 
-    assert GENERATE_SCRIPT_V3.version == "generate_script_v4"
+    assert GENERATE_SCRIPT_V4.version == "generate_script_v4"
     assert "DailyCast" in messages[0].content
     assert "varies wording from episode to episode" in messages[0].content
     assert "大家好，欢迎收听DailyCast。" not in messages[0].content
     assert "为什么值得关注" in messages[0].content
+    assert "one idea at a time" in messages[0].content
+    assert "a listener can absorb" in messages[0].content
+    assert "do not stack several independent facts" in messages[0].content
+    assert "Separate each paragraph with a blank line" in messages[0].content
     assert "target_seconds" in messages[0].content
     assert "每个 section 的 seconds" in messages[0].content
     assert constraints["required_section_ids"] == [

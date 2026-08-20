@@ -4,7 +4,6 @@ app:
   name: DailyCast
   environment: development
   timezone: Asia/Shanghai
-  public_only: false
   server:
     host: 127.0.0.1
     port: 8000
@@ -46,6 +45,7 @@ llm:
   model: gpt-5.6-terra
   temperature: 0.1
   top_p: null
+  max_output_tokens: 2000
   timeout_seconds: 30
   max_retries: 2
   response_format: json_schema
@@ -58,10 +58,11 @@ llm:
     max_output_tokens: 2000
     timeout_seconds: 120
     max_retries: 2
-    response_format: json_object
+    response_format: json_schema
   budget:
     max_calls: 12
     max_input_tokens: 60000
+    max_output_tokens: 15000
 
 editorial:
   # Alpha records deterministic/LLM quality findings but does not block output.
@@ -69,11 +70,6 @@ editorial:
   enforce_quality_gate: false
   max_candidates: 30
   max_selected_events: 8
-  # Preserve room for broad domestic reporting instead of filling each episode with AI news.
-  max_ai_events: 3
-  min_domestic_events_when_available: 2
-  # Keep one current Changzhou/Jiangsu exam or recruitment notice when available.
-  min_recruitment_events_when_available: 1
   max_sources_per_event: 3
   max_chars_per_source: 1200
   max_total_evidence_chars: 24000
@@ -90,10 +86,6 @@ editorial:
 # Bounded deterministic pre-LLM processing rules.
 processing:
   max_age_hours: 36
-  # Recurring exam and recruitment notices need a longer watch period than breaking news.
-  source_max_age_hours:
-    changzhou-public-recruitment: 336
-    jiangsu-civil-service-notices: 336
   min_content_length: 300
   similarity_threshold: 0.58
 
@@ -152,16 +144,19 @@ publishing:
 logging:
   level: INFO
 
-# Optional daily telecom + AI text briefing pushed to a webhook target
-# (WeCom group bot by default), independent of the podcast pipeline. Set the
-# webhook URL via DAILYCAST_BRIEFING__WEBHOOK_URL in the environment.
+# Daily telecom + AI text briefing pushed to a webhook target. This flow is
+# independent of the podcast pipeline: it collects only sources seeded with a
+# briefing_category, summarizes them with the LLM into two Chinese markdown
+# briefings, and pushes them to the configured webhook (a WeCom group bot by
+# default). The webhook URL stays in the environment
+# (DAILYCAST_BRIEFING__WEBHOOK_URL), never in YAML.
 briefing:
-  enabled: false
+  enabled: true
   sources_config_path: ./config/briefing.sources.yaml
   cron_expression: "30 7 * * *"
   window_hours: 24
   max_items_per_category: 10
   max_evidence_chars_per_article: 800
-  webhook_enabled: false
+  webhook_enabled: true
   # wecom_markdown | generic_json ({"text": ...}, Slack-style targets)
   webhook_format: wecom_markdown

@@ -8,10 +8,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+from dailycast.briefing.webhook import WebhookFormat
 from dailycast.core.errors import ConfigurationError
 from dailycast.news.source_windows import DEFAULT_SOURCE_MAX_AGE_HOURS
 
@@ -22,6 +23,7 @@ _yaml_path_context: ContextVar[Path] = ContextVar(
     "dailycast_yaml_path", default=DEFAULT_CONFIG_PATH
 )
 _env_file_context: ContextVar[Path | None] = ContextVar("dailycast_env_file_path", default=None)
+
 
 class ServerSettings(BaseModel):
     """HTTP bind settings."""
@@ -88,6 +90,28 @@ class SchedulerSettings(BaseModel):
     cron_expression: str = "0 8 * * *"
 
 
+class BriefingSettings(BaseModel):
+    """Independent daily text-briefing settings; disabled until a deployment opts in."""
+
+    enabled: bool = False
+    sources_config_path: Path = Path("config/briefing.sources.yaml")
+    cron_expression: str = "30 7 * * *"
+    window_hours: int = Field(default=24, ge=1, le=168)
+    max_items_per_category: int = Field(default=10, ge=1, le=20)
+    max_evidence_chars_per_article: int = Field(default=800, ge=1, le=8000)
+    webhook_enabled: bool = False
+    webhook_url: str | None = None
+    webhook_format: WebhookFormat = "wecom_markdown"
+
+    @model_validator(mode="after")
+    def require_webhook_url_when_webhook_enabled(self) -> "BriefingSettings":
+        """A webhook push target without a URL must fail at configuration load."""
+        if self.webhook_enabled and not self.webhook_url:
+            msg = "briefing.webhook_url is required when briefing.webhook_enabled=true"
+            raise ValueError(msg)
+        return self
+
+
 class TaskExecutionSettings(BaseModel):
     """Bound the lifetime of one local pipeline request without adding a worker service."""
 
@@ -99,6 +123,7 @@ class LLMBudgetSettings(BaseModel):
 
     max_calls: int = Field(default=12, ge=0)
     max_input_tokens: int = Field(default=60_000, ge=0)
+    max_output_tokens: int = Field(default=15_000, ge=0)
 
 
 class LLMProviderSettings(BaseModel):
@@ -112,6 +137,7 @@ class LLMProviderSettings(BaseModel):
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=10)
+    max_output_tokens: int = Field(default=2000, ge=1)
     response_format: str = "json_schema"
 
     @field_validator("provider")
@@ -191,8 +217,31 @@ class FFmpegSettings(BaseModel):
     bitrate: str = "64k"
 
 
+class RSSPublishingSettings(BaseModel):
+    """Settings for the durable self-hosted RSS target."""
+
+    enabled: bool = True
+
+
+class NetEasePublishingSettings(BaseModel):
+    """Settings for the optional persistent-browser NetEase distribution target."""
+
+    enabled: bool = False
+    profile_dir: Path = Path("netease/profile")
+    headless: bool = True
+    creator_url: str = "https://music.163.com/creatorcenter"
+    cover_path: Path | None = None
+    category: str = "资讯"
+
+
+class XiaoyuzhouPublishingSettings(BaseModel):
+    """Reserved configuration for a future RSS-based Xiaoyuzhou handoff."""
+
+    enabled: bool = False
+
+
 class PublishingSettings(BaseModel):
-    """Self-hosted RSS publication configuration without changing management API exposure."""
+    """Self-hosted RSS plus independently enabled external distribution targets."""
 
     auto_publish: bool = False
     public_base_url: str = "http://127.0.0.1:8000"
@@ -200,6 +249,18 @@ class PublishingSettings(BaseModel):
     feed_description: str = "A personal AI news podcast."
     language: str = "zh-CN"
     author: str = "DailyCast"
+    rss: RSSPublishingSettings = Field(default_factory=RSSPublishingSettings)
+    netease: NetEasePublishingSettings = Field(default_factory=NetEasePublishingSettings)
+    xiaoyuzhou: XiaoyuzhouPublishingSettings = Field(default_factory=XiaoyuzhouPublishingSettings)
+
+    @model_validator(mode="after")
+    def require_rss_for_external_distribution(self) -> "PublishingSettings":
+        """External targets always upload the immutable asset first promoted by RSS."""
+        if not self.rss.enabled and (self.netease.enabled or self.xiaoyuzhou.enabled):
+            raise ValueError(
+                "external distribution requires publishing.rss.enabled=true as the source of truth"
+            )
+        return self
 
     @field_validator("public_base_url")
     @classmethod
@@ -289,11 +350,17 @@ class Settings(BaseSettings):
         frozen=True,
     )
 
+    # DAILYCAST_CONFIG_PATH points the loader at the YAML file and is consumed before
+    # Settings exists; this field only absorbs the variable so the dotenv and
+    # environment sources do not fail the extra="forbid" validation.
+    config_path: Path | None = None
+
     app: AppSettings = Field(default_factory=AppSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     sources: SourcesSettings = Field(default_factory=SourcesSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
+    briefing: BriefingSettings = Field(default_factory=BriefingSettings)
     task_execution: TaskExecutionSettings = Field(default_factory=TaskExecutionSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     editorial: EditorialSettings = Field(default_factory=EditorialSettings)

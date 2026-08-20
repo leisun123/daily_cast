@@ -88,11 +88,36 @@ def test_alpha_example_keeps_semantic_review_relaxed_and_auto_publish(tmp_path: 
     assert settings.editorial.enforce_quality_gate is False
     assert settings.editorial.min_recruitment_events_when_available == 1
     assert settings.publishing.auto_publish is True
+
+
+def test_publication_platforms_default_to_rss_only_and_keep_netease_profile_private(
+    app_config_path: Path,
+) -> None:
+    """Distribution defaults preserve RSS while leaving browser automation explicitly disabled."""
+    settings = load_settings(config_path=app_config_path)
+
+    assert settings.publishing.rss.enabled is True
+    assert settings.publishing.netease.enabled is False
+    assert settings.publishing.netease.profile_dir == Path("netease/profile")
+    assert settings.publishing.netease.creator_url == "https://music.163.com/creatorcenter"
+    assert settings.publishing.netease.cover_path is None
+    assert settings.publishing.xiaoyuzhou.enabled is False
     assert settings.publishing.public_base_url == "http://127.0.0.1:8000"
     assert settings.publishing.feed_title == "DailyCast"
     assert settings.llm.model == "gpt-5.6-terra"
     assert settings.tts.text_mode == "enhanced_text"
     assert settings.resolve_path(settings.tts.pronunciation_dictionary_path).is_file()
+
+
+def test_external_distribution_requires_the_rss_source_of_truth() -> None:
+    """NetEase and Xiaoyuzhou must not run without the immutable RSS asset publisher."""
+    with pytest.raises(ValueError, match="requires publishing.rss.enabled=true"):
+        PublishingSettings.model_validate(
+            {
+                "rss": {"enabled": False},
+                "netease": {"enabled": True},
+            }
+        )
 
 
 def test_alpha_example_uses_json_object_for_deepseek_fallback(tmp_path: Path) -> None:
@@ -128,10 +153,10 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.llm.response_format == "json_object"
     assert settings.llm.timeout_seconds == 120
     assert settings.llm.budget.max_input_tokens == 100_000
-    # Let the configured model determine its available output budget. DailyCast
-    # must not send a smaller application-level max-output ceiling.
-    assert not hasattr(settings.llm, "max_output_tokens")
-    assert not hasattr(settings.llm.budget, "max_output_tokens")
+    # The briefing budget work reintroduced explicit per-provider and per-run
+    # output ceilings so BudgetReservingLLMProvider can reserve per attempt.
+    assert settings.llm.max_output_tokens == 2000
+    assert settings.llm.budget.max_output_tokens == 15_000
 
 
 def test_zeabur_eight_variable_interface_keeps_fallback_in_json_object_mode(
@@ -143,9 +168,7 @@ def test_zeabur_eight_variable_interface_keeps_fallback_in_json_object_mode(
     monkeypatch.setenv("DAILYCAST_LLM__MODEL", "gpt-5.6-terra")
     monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "primary-secret")
     monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__PROVIDER", "openai_compatible")
-    monkeypatch.setenv(
-        "DAILYCAST_LLM__FALLBACK__BASE_URL", "https://api.deepseek.example"
-    )
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__BASE_URL", "https://api.deepseek.example")
     monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__API_KEY", "fallback-secret")
     monkeypatch.delenv("DAILYCAST_LLM__FALLBACK__RESPONSE_FORMAT", raising=False)
@@ -182,9 +205,7 @@ def test_dailycast_llm_primary_and_fallback_environment_override_yaml(
     monkeypatch.setenv("DAILYCAST_LLM__MODEL", "gpt-5.6-terra")
     monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "primary-secret")
     monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__PROVIDER", "openai_compatible")
-    monkeypatch.setenv(
-        "DAILYCAST_LLM__FALLBACK__BASE_URL", "https://api.deepseek.example"
-    )
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__BASE_URL", "https://api.deepseek.example")
     monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__MODEL", "deepseek-test")
     monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__API_KEY", "fallback-secret")
 

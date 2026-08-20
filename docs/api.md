@@ -606,7 +606,7 @@ V1 不提供直接手工改聚类的 API；若实际使用证明需要，再设�
 }
 ```
 
-V1 只允许已配置的 RSS target。Publisher 类型由 target 配置确定，不允许请求任意类名或 URL。
+RSS target 始终由配置确定；启用网易云时，发布 dispatcher 会在 RSS 原子发布成功后自动尝试已配置的 NetEase target。请求不允许传入任意类名、URL、账号、Cookie 或浏览器 profile。
 
 - 返回：`202` + publish TaskRun；重复相同请求返回已有 TaskRun/Publication。
 - 执行语义：RSSPublisher 创建或复用 `Publication(publishing)`，提升并校验不可变 MP3，读取既有 `published` Publications，再把当前已验证的 `publishing` Publication 作为候选 item 显式注入内存 Feed；校验并原子替换 `feed.xml` 后，最后在短事务中同时标记 Publication/Episode=`published`。Feed 的稳定状态只包含成功发布节目，过渡 candidate 不能依赖 published 查询获得。
@@ -618,7 +618,7 @@ V1 只允许已配置的 RSS target。Publisher 类型由 target 配置确定，
 
 - 方法/路径：`GET /api/v1/publications/{publication_id}`
 - 参数：无。
-- 返回：status、target、attempt_count、公开/远端 URL、asset sha256/字节数、last_verified_at 和脱敏错误。V1 status 只可能是 `pending`、`publishing`、`published`、`failed`，不返回未来 RPA 的 `needs_attention` 或 `human_action_code`。
+- 返回：RSS `Publication` 的 status、target、attempt_count、公开 URL、asset sha256/字节数、last_verified_at 和脱敏错误。RSS `Publication.status` 仍只可能是 `pending`、`publishing`、`published`、`failed`；独立 `PublicationTarget` 记录外部 target 的 `needs_attention`，供后续显式 resume 用例读取，不能通过该接口写入登录凭证。
 - 常见错误：`404 PUBLICATION_NOT_FOUND`。
 - 幂等键：不需要。
 
@@ -680,5 +680,74 @@ HTMX 表单遇到业务错误时可返回相同错误码并渲染局部错误片
 - 任意 URL 代理或网页截图；
 - 直接调用供应商、编辑 Prompt、修改数据库状态；
 - 直接查询、编辑或删除 LLMArtifact；该表是内部只读缓存，只能由通过 schema 校验的 LLM 服务写入，并按保留策略清理；
-- 网易云、Podbean 或 Dify 的运行接口；
+- 直接传入网易云账号、Cookie、验证码、任意 Playwright selector，或使用非官方逆向接口的运行接口；
 - WebSocket 实时推送。管理页使用有界轮询，任务终态后停止。
+
+## 13. 每日文字简报（Briefing，已实现）
+
+本节接口已随简报功能落地，独立于上述 `/api/v1` 设计（不带前缀、不走 TaskRun）。简报流程从带 `briefing_category` 标签的来源采集近 24 小时新闻，按类目（`telecom` 通信行业日报、`ai` AI 动态日报）生成中文 markdown 并推送 webhook 目标（默认企业微信群机器人，也可对接任意接受 JSON 的 webhook，如 Slack 风格 `{"text": ...}`）；与播客流水线互不共享任务与来源池。
+
+启用方式：
+
+- YAML 增加 `briefing:` 段：`enabled: true`、`sources_config_path`（简报源种子，默认 `config/briefing.sources.yaml`）、`cron_expression`（默认 `30 7 * * *`，应用时区）、`window_hours`、`webhook_enabled`、`webhook_format`（`wecom_markdown`（默认）或 `generic_json`）。
+- webhook 凭据只从环境变量注入：`DAILYCAST_BRIEFING__WEBHOOK_URL`；`webhook_enabled=true` 时必填，缺失则配置加载失败。
+- `config/app.yaml` 为启用示例（配合 `.env` 的 `DAILYCAST_CONFIG_PATH=config/app.yaml`）；默认 `config/app.example.yaml` 中 `briefing.enabled=false`，功能完全关闭。
+
+### 13.1 手动触发简报生成
+
+- 方法/路径：`POST /briefing/generate`
+- 查询参数：`force:boolean=false`。`force=true` 忽略当日各类目完成标记，重新生成并推送。
+- 返回：`202`，`{"status":"accepted"}`；实际生成在后台任务中执行。
+- 幂等语义：同一应用时区日期内，每个类目完成（生成成功且推送已发送或未启用）后写入 `data/work/briefings/YYYY-MM-DD-{category}.done` 标记；非 force 的重复触发对已完成类目直接跳过（report 中 `status=skipped`、`reason=already_completed`），不重复调用 LLM、不重复推送。推送失败不写标记，下次运行自动补推。全进程同时只允许一个简报 run。
+- 常见错误：`409 {"detail":"briefing is not enabled"}`（功能未启用）；`409 {"detail":"briefing run already in progress"}`（已有运行中的简报任务）。
+- 幂等键：不需要；按日按类目完成标记 + 单运行互斥提供等效保护。
+
+### 13.2 手动测试推送通道
+
+- 方法/路径：`POST /briefing/test-push`
+- 参数：无。
+- 返回：`200`，`{"status":"sent"}`。接口**同步**发送一条固定的测试 markdown（标题「DailyCast 简报推送测试」，含触发时间与已配置类目）到当前配置的 webhook，用于在不触发完整简报运行（不采集、不调 LLM）的情况下调试推送通道；在目标群里看到这条消息即代表通道可用。
+- 常见错误：`409 {"detail":"briefing is not enabled"}`（简报功能未启用）；`409 {"detail":"briefing webhook is not enabled"}`（简报启用但未配置 `webhook_enabled=true`）；`502 {"detail":"webhook push failed: ..."}`（webhook 不可达或拒绝消息，错误信息含 HTTP 状态码 / `errcode` 等，重试一次后仍失败才返回）。
+- 幂等键：不需要；仅用于调试，无落盘副作用。
+
+### 13.3 读取最近一期简报
+
+- 方法/路径：`GET /briefing/latest`
+- 参数：无。
+- 返回：`200`：
+
+```json
+{
+  "date": "2026-08-20",
+  "briefings": {
+    "telecom": "# 通信行业日报 8月20日\n...",
+    "ai": "# AI 动态日报 8月20日\n..."
+  }
+}
+```
+
+- `date` 为最近一个已落盘简报的业务日期；`briefings` 只包含该日已落盘的类目 markdown。当日简报尚未生成时（例如午夜后、`cron_expression` 触发前），返回最近一个有简报的日期，而不是 404。
+- 常见错误：`404`（从未生成过任何简报）。
+- 幂等键：不需要。
+
+## 14. 分发目标手动恢复（Distribution resume，已实现）
+
+多平台分发（RSS / NetEase / Xiaoyuzhou）为每个 Episode × platform 维护独立的 `publication_targets` 状态行。外部目标进入 `needs_attention`（如 NetEase 登录过期、验证码、缺少封面）后，需要人工完成对应操作，再通过本接口恢复该目标；恢复只重放该平台的上传，不重新生成节目。
+
+### 14.1 恢复一个 needs_attention 目标
+
+- 方法/路径：`POST /distribution/episodes/{episode_id}/targets/{platform}/resume`
+- 路径参数：`episode_id:integer`；`platform:string`（`rss` | `netease` | `xiaoyuzhou`）。
+- 返回：`200`：
+
+```json
+{
+  "episode_id": 42,
+  "target_statuses": {"netease": "published"},
+  "warning_count": 0
+}
+```
+
+- 语义：仅当目标处于 `needs_attention` 时重放上传；其他状态直接返回当前状态（`pending`/`publishing`/`published`/`failed`）。RSS 是不可变媒体的 source of truth：其恢复失败在持久化 FAILED 目标行后以原始错误抛出（映射为对应 HTTP 错误码），不会降级为 warning。
+- 常见错误：`404 {"detail":"publisher netease is not enabled"}`（该平台未启用）；`404 {"detail":"Episode 999 does not exist"}`；`422`（未知 platform）；`409 {"detail":"distribution is not ready"}`（数据库 revision 不安全）。
+- 幂等键：不需要；`(episode_id, platform)` 唯一目标行 + 目标状态机提供等效保护。

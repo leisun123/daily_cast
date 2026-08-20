@@ -20,6 +20,16 @@ class FailoverLLMProvider:
         self.model = primary.model
         self.max_output_tokens = primary.max_output_tokens
 
+    @property
+    def primary(self) -> LLMProvider:
+        """Expose the preferred provider for per-attempt wrappers without rerouting."""
+        return self.providers[0]
+
+    @property
+    def fallback(self) -> LLMProvider:
+        """Expose the secondary provider for per-attempt wrappers without rerouting."""
+        return self.providers[1]
+
     def generation_config_hash(self, model_options: Mapping[str, JSONValue]) -> str:
         """Expose the preferred provider identity to direct protocol consumers."""
         return self.providers[0].generation_config_hash(model_options)

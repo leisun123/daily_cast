@@ -35,6 +35,7 @@ from dailycast.pipeline.editorial_artifacts import EditorialArtifactStore
 from dailycast.pipeline.steps.create_episode import CreateEpisodeStep
 from dailycast.pipeline.steps.generate_audio import GenerateAudioStep
 from dailycast.pipeline.steps.publish import PublishStep
+from dailycast.publishing.dispatcher import PublicationDispatcher, RSSDistributionPublisher
 from dailycast.publishing.rss import RSSPublisher, RSSSettings
 from dailycast.publishing.service import PublicationService
 from dailycast.tts.providers.fake import FakeTTSProvider
@@ -313,17 +314,24 @@ def test_short_script_artifacts_never_create_an_episode(
         publication_result = asyncio.run(
             PublishStep(
                 EpisodeService(factory),
-                PublicationService(
+                PublicationDispatcher(
                     factory,
-                    RSSPublisher(
-                        data_dir=tmp_path / "audio-data",
-                        public_dir=tmp_path / "public",
-                        settings=RSSSettings(
-                            public_base_url="http://127.0.0.1:8000",
-                            feed_title="DailyCast Alpha",
-                            feed_description="Alpha output test.",
-                            language="zh-CN",
-                            author="DailyCast",
+                    (
+                        RSSDistributionPublisher(
+                            PublicationService(
+                                factory,
+                                RSSPublisher(
+                                    data_dir=tmp_path / "audio-data",
+                                    public_dir=tmp_path / "public",
+                                    settings=RSSSettings(
+                                        public_base_url="http://127.0.0.1:8000",
+                                        feed_title="DailyCast Alpha",
+                                        feed_description="Alpha output test.",
+                                        language="zh-CN",
+                                        author="DailyCast",
+                                    ),
+                                ),
+                            )
                         ),
                     ),
                 ),

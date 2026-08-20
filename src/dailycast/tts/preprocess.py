@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -24,6 +24,7 @@ _FINANCIAL_QUANTITY = re.compile(
 )
 _PERCENT = re.compile(r"(?<![A-Za-z0-9])(?P<number>\d+(?:\.\d+)?)%(?![A-Za-z0-9])")
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n+")
+_ASCII_SPOKEN_TERM = re.compile(r"[A-Za-z0-9]+(?:[ ._-][A-Za-z0-9]+)*")
 _INVISIBLE_SPOKEN_CHARACTERS = re.compile(r"[\u200B\u200C\u200D\u2060\uFEFF]")
 _HAN_CHARACTER = r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]"
 _CHINESE_INTERNAL_WHITESPACE = re.compile(
@@ -223,11 +224,25 @@ def _apply_replacements(text: str, replacements: Sequence[tuple[str, str]]) -> s
     """Apply longer terms first while avoiding accidental substitutions inside English words."""
     rendered = text
     for term, replacement in sorted(replacements, key=lambda item: (-len(item[0]), item[0])):
-        if re.fullmatch(r"[A-Za-z0-9]+", term):
+        if _ASCII_SPOKEN_TERM.fullmatch(term):
             suffix = r"(?![A-Za-z0-9])"
             if term == "GPT":
                 suffix = rf"(?![A-Za-z0-9]|-\d|\s*[{''.join(_HAN_NUMBERS)}])"
-            rendered = re.sub(rf"(?<![A-Za-z0-9]){re.escape(term)}{suffix}", replacement, rendered)
+            rendered = re.sub(
+                rf"(?<![A-Za-z0-9]){re.escape(term)}{suffix}",
+                _literal_replacement(replacement),
+                rendered,
+                flags=re.IGNORECASE,
+            )
         else:
             rendered = rendered.replace(term, replacement)
     return rendered
+
+
+def _literal_replacement(value: str) -> Callable[[re.Match[str]], str]:
+    """Keep configured pronunciation text literal when passing it to ``re.sub``."""
+
+    def replace(_: re.Match[str]) -> str:
+        return value
+
+    return replace

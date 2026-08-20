@@ -278,9 +278,7 @@ class LLMArtifactService:
                     ):
                         raise
                     fallback_options = {**model_options, "response_format": "json_object"}
-                    fallback_messages = _json_object_fallback_messages(
-                        messages, response_schema
-                    )
+                    fallback_messages = _json_object_fallback_messages(messages, response_schema)
                     self._reserve_for_call(provider, fallback_messages, fallback_options)
                     provider_call_count += 1
                     generated = await provider.generate_structured(

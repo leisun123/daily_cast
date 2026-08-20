@@ -25,7 +25,7 @@ from dailycast.main import create_app
 from dailycast.pipeline.context import PipelineContext
 from dailycast.pipeline.contracts import canonical_json
 from dailycast.pipeline.steps.publish import PublishStep
-from dailycast.publishing.service import PublicationService
+from dailycast.publishing.dispatcher import PublicationDispatcher
 
 
 def _factory(app_config_path: Path) -> sessionmaker[Session]:
@@ -76,6 +76,10 @@ def test_episode_page_renders_public_audio_script_items_and_source_count(
         assert "适合中文播报" in response.text
         assert "事件 web" in response.text
         assert "来源数：1" in response.text
+        assert "来源与原文" in response.text
+        assert "Source web" in response.text
+        assert "事件 web" in response.text
+        assert 'href="https://news.example.test/web"' in response.text
         assert "节目时长：0:00:03" in response.text
         assert "收录新闻：1 条" in response.text
         assert "生成时间：" in response.text
@@ -282,18 +286,22 @@ def test_generate_retries_after_terminal_run_and_honors_explicit_idempotency_key
 def test_auto_publish_enabled_invokes_existing_publish_step(app_config_path: Path) -> None:
     """The configured auto-publish flag drives the existing publisher checkpoint."""
 
-    class RecordingPublicationService:
+    class RecordingPublicationDispatcher:
         def __init__(self) -> None:
             self.published_episode_ids: list[int] = []
 
-        def publish(self, episode_id: int) -> SimpleNamespace:
+        async def publish(self, episode_id: int) -> SimpleNamespace:
             self.published_episode_ids.append(episode_id)
             return SimpleNamespace(
-                id=7,
-                status=SimpleNamespace(value="published"),
-                public_asset_path="media/episodes/episode/asset.mp3",
-                feed_guid="episode",
-                response_summary_json='{"asset_reused":false,"feed_version":"v1"}',
+                rss_publication=SimpleNamespace(
+                    id=7,
+                    status=SimpleNamespace(value="published"),
+                    public_asset_path="media/episodes/episode/asset.mp3",
+                    feed_guid="episode",
+                    response_summary_json='{"asset_reused":false,"feed_version":"v1"}',
+                ),
+                target_statuses={"rss": "published"},
+                warning_count=0,
             )
 
     class RecordingEpisodeService:
@@ -315,7 +323,7 @@ def test_auto_publish_enabled_invokes_existing_publish_step(app_config_path: Pat
             encoding="utf-8",
         )
         settings = load_settings(config_path=app_config_path)
-        service = RecordingPublicationService()
+        service = RecordingPublicationDispatcher()
         episode_service = RecordingEpisodeService()
         context = PipelineContext(
             task_run_id="web-auto-publish",
@@ -328,7 +336,7 @@ def test_auto_publish_enabled_invokes_existing_publish_step(app_config_path: Pat
         result = asyncio.run(
             PublishStep(
                 cast(EpisodeService, episode_service),
-                cast(PublicationService, service),
+                cast(PublicationDispatcher, service),
                 auto_publish=settings.publishing.auto_publish,
             ).run(context)
         )

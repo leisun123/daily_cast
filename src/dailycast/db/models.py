@@ -135,13 +135,14 @@ class TaskStepStatus(StrEnum):
 
 
 class LLMOperation(StrEnum):
-    """V1 structured LLM operations eligible for artifact caching."""
+    """Structured LLM operations; briefing generation bypasses artifact caching."""
 
     SCORE_EVENTS = "score_events"
     GENERATE_OUTLINE = "generate_outline"
     GENERATE_SCRIPT = "generate_script"
     GENERATE_METADATA = "generate_metadata"
     REVIEW_SCRIPT = "review_script"
+    GENERATE_BRIEFING = "generate_briefing"
 
 
 class AudioSegmentStatus(StrEnum):
@@ -166,6 +167,24 @@ class PublicationStatus(StrEnum):
     PENDING = "pending"
     PUBLISHING = "publishing"
     PUBLISHED = "published"
+    FAILED = "failed"
+
+
+class PublicationPlatform(StrEnum):
+    """Configured distribution destinations for one generated episode."""
+
+    RSS = "rss"
+    NETEASE = "netease"
+    XIAOYUZHOU = "xiaoyuzhou"
+
+
+class PublicationTargetStatus(StrEnum):
+    """Per-platform lifecycle without changing the Episode generation lifecycle."""
+
+    PENDING = "pending"
+    PUBLISHING = "publishing"
+    PUBLISHED = "published"
+    NEEDS_ATTENTION = "needs_attention"
     FAILED = "failed"
 
 
@@ -467,6 +486,9 @@ class Episode(Base):
     )
     task_runs: Mapped[list[TaskRun]] = relationship(back_populates="episode")
     publications: Mapped[list[Publication]] = relationship(back_populates="episode")
+    publication_targets: Mapped[list[PublicationTarget]] = relationship(
+        back_populates="episode", cascade="all, delete-orphan"
+    )
 
 
 class EpisodeItem(Base):
@@ -885,3 +907,41 @@ class Publication(Base):
     )
 
     episode: Mapped[Episode] = relationship(back_populates="publications")
+
+
+class PublicationTarget(Base):
+    """One independent external distribution state for an Episode and platform."""
+
+    __tablename__ = "publication_targets"
+    __table_args__ = (
+        CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+        UniqueConstraint("episode_id", "platform", name="uq_publication_targets_episode_platform"),
+        Index("ix_publication_targets_status", "status"),
+        Index("ix_publication_targets_platform", "platform"),
+        Index("ix_publication_targets_remote", "remote_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    episode_id: Mapped[int] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[PublicationPlatform] = mapped_column(
+        enum_column(PublicationPlatform), nullable=False
+    )
+    status: Mapped[PublicationTargetStatus] = mapped_column(
+        enum_column(PublicationTargetStatus), nullable=False
+    )
+    remote_id: Mapped[str | None] = mapped_column(Text)
+    remote_url: Mapped[str | None] = mapped_column(Text)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sql_text("0")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    episode: Mapped[Episode] = relationship(back_populates="publication_targets")

@@ -265,8 +265,9 @@ def test_llm_settings_have_explicit_safe_defaults(app_config_path: Path) -> None
     assert settings.llm.temperature == 0.1
     assert settings.llm.budget.max_calls == 12
     assert settings.llm.budget.max_input_tokens == 60_000
-    assert not hasattr(settings.llm, "max_output_tokens")
-    assert not hasattr(settings.llm.budget, "max_output_tokens")
+    # Explicit output ceilings reserve the per-attempt budget for the briefing flow.
+    assert settings.llm.max_output_tokens == 2000
+    assert settings.llm.budget.max_output_tokens == 15_000
 
 
 def test_unbounded_providers_omit_application_output_token_ceiling() -> None:
@@ -401,9 +402,7 @@ def test_provider_failover_reserves_budget_and_persists_fallback_identity(
         BudgetController(max_calls=2, max_input_tokens=1_000, max_output_tokens=100),
     )
 
-    result = asyncio.run(
-        service.generate_structured(**request_kwargs(task_run_id, task_step_id))
-    )
+    result = asyncio.run(service.generate_structured(**request_kwargs(task_run_id, task_step_id)))
 
     assert primary.calls == 1
     assert fallback.calls == 1
@@ -416,9 +415,7 @@ def test_provider_failover_reserves_budget_and_persists_fallback_identity(
         assert artifact.provider == "openai_compatible"
         assert artifact.model == "deepseek-v4-pro"
 
-    cached = asyncio.run(
-        service.generate_structured(**request_kwargs(task_run_id, task_step_id))
-    )
+    cached = asyncio.run(service.generate_structured(**request_kwargs(task_run_id, task_step_id)))
 
     assert cached.cache_hit is True
     assert cached.model == "deepseek-v4-pro"

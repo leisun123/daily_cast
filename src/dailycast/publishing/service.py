@@ -152,6 +152,21 @@ class PublicationService:
                 pass
         return recovered
 
+    def rss_publication_for_episode(self, episode_id: int) -> Publication | None:
+        """Return the durable local-RSS row without exposing the mutable draft audio path."""
+        with UnitOfWork(self._session_factory) as unit:
+            assert unit.session is not None
+            return PublicationRepository(unit.session).get_by_target(
+                episode_id, PublisherType.RSS.value, self._publisher.target_key
+            )
+
+    def public_asset_for_episode(self, episode_id: int) -> PublicAsset | None:
+        """Return a verified immutable RSS asset that other targets may safely upload."""
+        publication = self.rss_publication_for_episode(episode_id)
+        if publication is None or publication.status is not PublicationStatus.PUBLISHED:
+            return None
+        return self._asset_if_valid(publication)
+
     def _begin_publish(self, publication_id: int) -> _PublicationSnapshot:
         """Persist publishing before file/Feed effects and increment the retry attempt."""
         with UnitOfWork(self._session_factory) as unit:
