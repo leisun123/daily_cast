@@ -155,7 +155,7 @@ briefing:
   sources_config_path: ./config/briefing.sources.yaml
   cron_expression: "30 8 * * mon-fri"
   window_hours: 24
-  max_items_per_category: 10
+  max_items_per_category: 5
   max_evidence_chars_per_article: 800
   webhook_enabled: true
   # wecom_markdown | generic_json ({"text": ...}, Slack-style targets)

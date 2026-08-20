@@ -35,10 +35,11 @@ def build_briefing_messages(
         + f"\n\n请从以上证据中挑选最重要、最有信息量的新闻（最多 {MAX_BRIEFING_ITEMS} 条），"
         f"生成今日「{category_title}」文字简报。要求：\n"
         "- overview：用 2-3 句话概括当天该类目的整体动态。\n"
-        "- 每条 item 包含：headline（一句话标题）、summary（2-3 句通俗摘要）、"
-        "source_name（照抄对应证据的「来源」）、source_url（必须原样照抄对应证据的"
-        "「原文链接」，不得修改、拼接或编造）。\n"
+        "- 每条 item 包含：headline（一句话标题，不超过 25 字）、summary（1-2 句通俗摘要，"
+        "总共不超过 60 字）、source_name（照抄对应证据的「来源」）、"
+        "source_url（必须原样照抄对应证据的「原文链接」，不得修改、拼接或编造）。\n"
         "- 同一事件只报道一次；证据不足时不要硬凑条数。\n"
+        "- 尽量覆盖不同来源的证据，避免简报全部来自单一媒体。\n"
     )
     return (
         LLMMessage(role="system", content=_SYSTEM_PROMPT),

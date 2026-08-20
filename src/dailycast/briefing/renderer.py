@@ -43,10 +43,12 @@ def render_briefing(
             continue
         seen_urls.add(url)
         number += 1
-        lines.append(
-            f"{number}. **{item.headline.strip()}** — {item.summary.strip()} "
-            f"[{item.source_name.strip()}]({url})"
-        )
+        # One item per block: WeCom renders each line separately, so a single
+        # long "headline — summary — link" line becomes an unreadable wall.
+        lines.append(f"**{number}. {item.headline.strip()}**")
+        lines.append(item.summary.strip())
+        lines.append(f"[{item.source_name.strip()}]({url})")
+        lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"
 
 

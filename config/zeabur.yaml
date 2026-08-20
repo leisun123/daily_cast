@@ -42,6 +42,7 @@ briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
   cron_expression: "30 8 * * mon-fri"
+  max_items_per_category: 5
   webhook_enabled: true
   webhook_format: wecom_markdown
 
