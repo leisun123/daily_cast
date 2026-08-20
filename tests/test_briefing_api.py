@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from editorial_test_support import upgraded_session_factory
 from fastapi.testclient import TestClient
 
@@ -55,10 +56,46 @@ def test_briefing_generate_conflicts_when_disabled(app_config_path: Path) -> Non
 
     with TestClient(create_app(config_path=app_config_path)) as client:
         generate_response = client.post("/briefing/generate")
+        push_response = client.post("/briefing/test-push")
         latest_response = client.get("/briefing/latest")
 
     assert generate_response.status_code == 409
+    assert push_response.status_code == 409
+    assert push_response.json() == {"detail": "briefing is not enabled"}
     assert latest_response.status_code == 404
+
+
+def test_briefing_test_push_conflicts_when_webhook_is_disabled(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """The manual push trigger names the missing webhook instead of sending nothing."""
+    _enable_briefing(app_config_path, tmp_path)
+    upgraded_session_factory(app_config_path)
+
+    with TestClient(create_app(config_path=app_config_path)) as client:
+        response = client.post("/briefing/test-push")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "briefing webhook is not enabled"}
+
+
+def test_briefing_test_push_reports_webhook_delivery_failures(
+    app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable webhook turns into a 502 carrying the push error for debugging."""
+    _enable_briefing(app_config_path, tmp_path)
+    app_config_path.write_text(
+        app_config_path.read_text(encoding="utf-8") + "  webhook_enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DAILYCAST_BRIEFING__WEBHOOK_URL", "https://briefing-push.invalid/hook")
+    upgraded_session_factory(app_config_path)
+
+    with TestClient(create_app(config_path=app_config_path)) as client:
+        response = client.post("/briefing/test-push")
+
+    assert response.status_code == 502
+    assert response.json()["detail"].startswith("webhook push failed")
 
 
 def test_briefing_generate_returns_409_while_a_run_is_in_progress(

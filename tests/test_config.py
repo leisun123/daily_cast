@@ -77,10 +77,35 @@ def test_alpha_example_unblocks_quality_gated_output_and_auto_publish(tmp_path: 
 
     assert settings.editorial.enforce_quality_gate is False
     assert settings.publishing.auto_publish is True
+
+
+def test_publication_platforms_default_to_rss_only_and_keep_netease_profile_private(
+    app_config_path: Path,
+) -> None:
+    """Distribution defaults preserve RSS while leaving browser automation explicitly disabled."""
+    settings = load_settings(config_path=app_config_path)
+
+    assert settings.publishing.rss.enabled is True
+    assert settings.publishing.netease.enabled is False
+    assert settings.publishing.netease.profile_dir == Path("netease/profile")
+    assert settings.publishing.netease.creator_url == "https://music.163.com/creatorcenter"
+    assert settings.publishing.netease.cover_path is None
+    assert settings.publishing.xiaoyuzhou.enabled is False
     assert settings.publishing.public_base_url == "http://127.0.0.1:8000"
     assert settings.publishing.feed_title == "DailyCast"
     assert settings.tts.text_mode == "enhanced_text"
     assert settings.resolve_path(settings.tts.pronunciation_dictionary_path).is_file()
+
+
+def test_external_distribution_requires_the_rss_source_of_truth() -> None:
+    """NetEase and Xiaoyuzhou must not run without the immutable RSS asset publisher."""
+    with pytest.raises(ValueError, match="requires publishing.rss.enabled=true"):
+        PublishingSettings.model_validate(
+            {
+                "rss": {"enabled": False},
+                "netease": {"enabled": True},
+            }
+        )
 
 
 def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:

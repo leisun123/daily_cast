@@ -28,7 +28,7 @@ from dailycast.llm.outline_editorial import (
 from dailycast.llm.prompts import PromptTemplate
 from dailycast.llm.prompts.generate_metadata_v1 import GENERATE_METADATA_V1
 from dailycast.llm.prompts.generate_outline_v2 import GENERATE_OUTLINE_V2
-from dailycast.llm.prompts.generate_script_v3 import GENERATE_SCRIPT_V3
+from dailycast.llm.prompts.generate_script_v4 import GENERATE_SCRIPT_V4
 from dailycast.llm.prompts.review_script_v1 import REVIEW_SCRIPT_V1
 from dailycast.llm.prompts.revise_script_v1 import REVISE_SCRIPT_V1
 from dailycast.llm.prompts.score_events_v2 import SCORE_EVENTS_V2
@@ -96,7 +96,7 @@ class AIEditorialService:
         duration_tolerance_seconds: int = 60,
         max_outline_sections: int = 12,
         outline_prompt: PromptTemplate = GENERATE_OUTLINE_V2,
-        script_prompt: PromptTemplate = GENERATE_SCRIPT_V3,
+        script_prompt: PromptTemplate = GENERATE_SCRIPT_V4,
         estimated_chars_per_second: float = 4.0,
         script_duration_tolerance_ratio: float = 0.20,
         max_script_chars: int = 12_000,

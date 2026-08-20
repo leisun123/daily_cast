@@ -23,6 +23,24 @@
     </ol>
   </section>
   <section>
+    <h2>来源与原文</h2>
+    <p class="muted">以下链接对应本期选中的新闻素材。</p>
+    <ul>
+      {% for source_link in source_links %}
+        <li>
+          <strong>{{ source_link.source_name }}</strong>：
+          {% if source_link.url %}
+            <a href="{{ source_link.url }}" target="_blank" rel="noopener noreferrer">{{ source_link.title }}</a>
+          {% else %}
+            {{ source_link.title }}
+          {% endif %}
+        </li>
+      {% else %}
+        <li class="muted">本节目没有可公开展示的来源链接。</li>
+      {% endfor %}
+    </ul>
+  </section>
+  <section>
     <h2>播客稿</h2>
     <pre>{{ episode.script_text or "暂无播客稿。" }}</pre>
   </section>

@@ -144,11 +144,12 @@ publishing:
 logging:
   level: INFO
 
-# Daily telecom + AI text briefing pushed to a WeCom group bot. This flow is
+# Daily telecom + AI text briefing pushed to a webhook target. This flow is
 # independent of the podcast pipeline: it collects only sources seeded with a
 # briefing_category, summarizes them with the LLM into two Chinese markdown
-# briefings, and pushes them to WeCom. The bot webhook URL stays in the
-# environment (DAILYCAST_BRIEFING__WECOM_WEBHOOK_URL), never in YAML.
+# briefings, and pushes them to the configured webhook (a WeCom group bot by
+# default). The webhook URL stays in the environment
+# (DAILYCAST_BRIEFING__WEBHOOK_URL), never in YAML.
 briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
@@ -156,4 +157,6 @@ briefing:
   window_hours: 24
   max_items_per_category: 10
   max_evidence_chars_per_article: 800
-  wecom_enabled: true
+  webhook_enabled: true
+  # wecom_markdown | generic_json ({"text": ...}, Slack-style targets)
+  webhook_format: wecom_markdown

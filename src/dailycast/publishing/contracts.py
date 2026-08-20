@@ -7,7 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from dailycast.db.models import Episode, Publication
+from dailycast.db.models import (
+    Episode,
+    Publication,
+    PublicationPlatform,
+    PublicationTarget,
+    PublicationTargetStatus,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,23 +50,68 @@ class FeedWriteResult:
     item_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class PlatformPublishResult:
+    """One adapter's externally verified publication outcome."""
+
+    status: PublicationTargetStatus
+    remote_id: str | None = None
+    remote_url: str | None = None
+    last_error: str | None = None
+    asset: PublicAsset | None = None
+    rss_publication: Publication | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DistributionResult:
+    """Aggregate target states without treating one platform failure as episode failure."""
+
+    rss_publication: Publication | None
+    target_statuses: dict[str, str]
+    warning_count: int
+
+
 class Publisher(Protocol):
-    """Isolate publication lifecycle code from the local RSS filesystem implementation."""
+    """One independently recoverable external distribution destination."""
+
+    @property
+    def platform_name(self) -> PublicationPlatform:
+        """Return the immutable platform identity owned by this adapter."""
+
+    async def validate(
+        self, episode: Episode, target: PublicationTarget, asset: PublicAsset | None
+    ) -> None:
+        """Reject a target operation before it causes a platform side effect."""
+
+    async def publish(
+        self, episode: Episode, target: PublicationTarget, asset: PublicAsset | None
+    ) -> PlatformPublishResult:
+        """Publish one target and return only its independently durable outcome."""
+
+    async def check_status(
+        self, episode: Episode, target: PublicationTarget, asset: PublicAsset | None
+    ) -> PlatformPublishResult:
+        """Reconcile target state after a restart or an ambiguous platform response."""
+
+    async def resume(
+        self, episode: Episode, target: PublicationTarget, asset: PublicAsset | None
+    ) -> PlatformPublishResult:
+        """Continue the same target row after an explicit human action has resolved."""
+
+
+class RSSPublicationTarget(Protocol):
+    """RSS-specific target capabilities used by the V1 immutable-media service."""
 
     target_key: str
 
     def validate(self, episode: Episode, asset: PublicAsset) -> None:
-        """Reject an Episode or asset that is unsafe to publish to this target."""
+        """Validate an immutable asset before it can enter the RSS Feed."""
 
     def publish(self, items: tuple[RSSFeedItem, ...]) -> FeedWriteResult:
-        """Atomically write a validated target representation for the supplied Feed items."""
+        """Atomically write and verify the complete RSS Feed projection."""
 
     def reconcile(self, publication: Publication, episode: Episode) -> bool:
-        """Return whether durable target state already proves Publication completion."""
-
-
-class RSSPublicationTarget(Publisher, Protocol):
-    """RSS-specific target capabilities used by the V1 immutable-media service."""
+        """Verify a durable publication has its exact immutable Feed item."""
 
     @property
     def feed_path(self) -> Path:

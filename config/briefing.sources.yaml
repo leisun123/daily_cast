@@ -1,5 +1,5 @@
 # Briefing-only source seeds for the daily telecom + AI text briefing pushed to
-# WeCom. Each entry carries `config.briefing_category` ("telecom" | "ai"); RSS
+# a webhook target. Each entry carries `config.briefing_category` ("telecom" | "ai"); RSS
 # collectors ignore that key, so these rows are safe to also exist for the
 # podcast pipeline. Seeding is idempotent: existing database rows stay
 # authoritative.

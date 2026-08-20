@@ -493,7 +493,7 @@ erDiagram
 
 ### 12.1 职责
 
-记录某 Episode 向 V1 RSS 目标的幂等发布状态、公开资产和验证信息。未来外部平台字段和人工处理状态通过对应阶段的 Alembic revision 增加。
+记录某 Episode 向 RSS 目标的原子发布状态、公开资产和 Feed 验证信息。外部平台的独立生命周期保存在 `PublicationTarget`，不改变这张 RSS source-of-truth 表。
 
 ### 12.2 字段
 
@@ -501,7 +501,7 @@ erDiagram
 |---|---|---:|---|---|
 | `id` | INTEGER | 是 | PK autoincrement |  |
 | `episode_id` | INTEGER | 是 | FK Episode，RESTRICT |  |
-| `publisher_type` | TEXT | 是 | V1 仅 `rss` | 目标实现；未来类型需 migration |
+| `publisher_type` | TEXT | 是 | 当前仅 `rss` | RSS 原子发布实现 |
 | `target_key` | TEXT | 是 |  | 目标配置 slug |
 | `status` | TEXT | 是 | 状态枚举 | 见下方 |
 | `idempotency_key` | TEXT | 是 | 唯一 | 目标发布键 |
@@ -522,7 +522,7 @@ erDiagram
 | `created_at` | DATETIME | 是 |  |  |
 | `updated_at` | DATETIME | 是 |  |  |
 
-V1 `status`：`pending`、`publishing`、`published`、`failed`。未来实现 RPA 时再通过 migration 增加 `needs_attention` 和 `human_action_code`。
+RSS `Publication.status`：`pending`、`publishing`、`published`、`failed`。RPA 人工处理状态不混入这张表。
 
 ### 12.3 约束、索引与生命周期
 
@@ -530,8 +530,33 @@ V1 `status`：`pending`、`publishing`、`published`、`failed`。未来实现 R
 - 索引：`status`、`publisher_type`、`remote_id`、`published_at DESC`。
 - 重试先 reconcile 当前行和目标状态，再增加 attempt；不能通过新增行规避不确定发布结果。发布顺序固定为：创建/复用 `publishing` 行，提升并校验不可变 MP3，读取既有 published 行，把当前 publishing 行作为已验证 candidate 显式注入内存 Feed，校验并原子替换 Feed，最后短事务标记 Publication/Episode=`published`。
 - 若 Feed 已包含该 `feed_guid` 且 enclosure、MIME、长度和公开文件 checksum 正确，而数据库仍为 `publishing`，reconcile 补写两个 published 状态；按 GUID upsert，不重复 item，不重复复制或覆盖已存在的不可变音频。稳定状态 Feed 只包含成功 published 节目。
-- RSS published 后公开资产默认永久保留。V1 不创建 Podbean 或网易云 Publication。
+- RSS published 后公开资产默认永久保留；网易云等外部状态由 `PublicationTarget` 保存。
 - 关系：属于一个 Episode。
+
+### 12.4 PublicationTarget
+
+#### 职责
+
+记录一个 Episode 向一个独立分发平台的结果。RSS、网易云和小宇宙互不阻塞：RSS 成功且网易云需要人工登录时，Episode 和 RSS 仍然有效。
+
+#### 字段与生命周期
+
+| 字段 | 类型 | 必填 | 约束/默认 | 说明 |
+|---|---|---:|---|---|
+| `id` | INTEGER | 是 | PK autoincrement |  |
+| `episode_id` | INTEGER | 是 | FK Episode，CASCADE |  |
+| `platform` | TEXT | 是 | `rss` / `netease` / `xiaoyuzhou` | 分发平台 |
+| `status` | TEXT | 是 | `pending` | `pending`、`publishing`、`published`、`needs_attention`、`failed` |
+| `remote_id` | TEXT | 否 | 索引 | 远端节目身份 |
+| `remote_url` | TEXT | 否 |  | 已验证远端 URL |
+| `last_error` | TEXT | 否 | 最长 1,000 字符 | 脱敏错误码与摘要 |
+| `attempt_count` | INTEGER | 是 | 默认 0，非负 | 本平台尝试次数 |
+| `created_at` / `updated_at` | DATETIME | 是 |  | 生命周期审计 |
+
+- 唯一：`(episode_id, platform)`；同一平台恢复时复用行，不复制 Episode、稿件或音频。
+- 索引：`status`、`platform`、`remote_id`。
+- 仅 `publishing` 行会在启动时调用 `check_status`。`published` 不会因普通重跑重新上传；`needs_attention` 只经显式 `resume(platform)` 重试。
+- 网易云的登录失效、验证码、上传异常和页面失配写入 `needs_attention`，不保存 Cookie、账号、密码或浏览器页面内容。
 
 ## 13. 建议 SQLite 表结构
 
@@ -852,6 +877,23 @@ CREATE INDEX ix_publications_status ON publications(status);
 CREATE INDEX ix_publications_type ON publications(publisher_type);
 CREATE INDEX ix_publications_remote ON publications(remote_id);
 CREATE INDEX ix_publications_published ON publications(published_at DESC);
+
+CREATE TABLE publication_targets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL CHECK (platform IN ('rss','netease','xiaoyuzhou')),
+  status TEXT NOT NULL CHECK (status IN ('pending','publishing','published','needs_attention','failed')),
+  remote_id TEXT,
+  remote_url TEXT,
+  last_error TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  UNIQUE (episode_id, platform)
+);
+CREATE INDEX ix_publication_targets_status ON publication_targets(status);
+CREATE INDEX ix_publication_targets_platform ON publication_targets(platform);
+CREATE INDEX ix_publication_targets_remote ON publication_targets(remote_id);
 ```
 
 ### 13.1 关于循环外键
@@ -862,9 +904,9 @@ CREATE INDEX ix_publications_published ON publications(published_at DESC);
 
 V1 用 TaskRun/TaskStep 保存可查询摘要，用每任务 JSONL 保存高频日志。为每条日志创建 SQLite 行会增加写锁和数据库体积，却不提供 V1 必需查询能力。若未来需要跨任务全文检索，再从结构化日志导出，而不是现在引入 Elasticsearch。
 
-### 13.3 初始 migration 验证要求
+### 13.3 migration 验证要求
 
-从空 SQLite 文件执行 `alembic upgrade head` 后，集成测试必须验证 `foreign_keys=ON`、活动 TaskRun partial unique index、所有 JSON `json_valid` CHECK、Article/NewsEvent 循环外键插入流程，以及 LLMArtifact 包含 `generation_config_hash` 的七字段唯一键。还需验证 AudioSegment 的 `provider_config_hash/cache_key` 长度约束和复合缓存查询索引存在、TaskStep 的 `tts_character_count >= 0` CHECK 生效；相同六个旧身份字段但 generation config 不同的两条成功 Artifact 必须可共存，而完整七字段重复必须被唯一约束拒绝。
+从空 SQLite 文件执行 `alembic upgrade head` 后，集成测试必须验证 `foreign_keys=ON`、活动 TaskRun partial unique index、所有 JSON `json_valid` CHECK、Article/NewsEvent 循环外键插入流程、PublicationTarget 外键/平台唯一约束，以及 LLMArtifact 包含 `generation_config_hash` 的七字段唯一键。还需验证 AudioSegment 的 `provider_config_hash/cache_key` 长度约束和复合缓存查询索引存在、TaskStep 的 `tts_character_count >= 0` CHECK 生效；相同六个旧身份字段但 generation config 不同的两条成功 Artifact 必须可共存，而完整七字段重复必须被唯一约束拒绝。
 
 ## 14. 数据保留与删除规则
 

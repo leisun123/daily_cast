@@ -13,7 +13,8 @@ import pytest
 from dailycast.briefing.prompt import build_briefing_messages
 from dailycast.briefing.renderer import RENDER_BYTE_BUDGET, render_briefing, truncate_markdown
 from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
-from dailycast.briefing.wecom import WeComNotifier, WeComPushError
+from dailycast.briefing.service import latest_briefing_date
+from dailycast.briefing.webhook import WebhookNotifier, WebhookPushError
 from dailycast.core.config import BriefingSettings, load_settings
 
 WEBHOOK_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key"
@@ -154,6 +155,21 @@ def test_truncate_markdown_respects_the_utf8_byte_budget() -> None:
     assert truncated.endswith("…（内容过长，已截断）")
 
 
+def test_latest_briefing_date_falls_back_to_the_most_recent_persisted_day(
+    tmp_path: Path,
+) -> None:
+    """The latest read survives the window after midnight before today's run happens."""
+    output_dir = tmp_path / "briefings"
+    output_dir.mkdir()
+    (output_dir / "2026-08-19-telecom.md").write_text("# 通信行业日报", encoding="utf-8")
+    (output_dir / "2026-08-19-telecom.done").write_text("done\n", encoding="utf-8")
+    # Completion markers and partial temporary files must never count as a briefing day.
+    (output_dir / ".2026-08-20-ai.md.tmp").write_text("partial", encoding="utf-8")
+
+    assert latest_briefing_date(output_dir) == date(2026, 8, 19)
+    assert latest_briefing_date(tmp_path / "empty") is None
+
+
 def test_prompt_carries_bounded_evidence_and_forbids_invented_urls() -> None:
     """The prompt is the only evidence channel, so it must pin links to the evidence."""
     messages = build_briefing_messages("通信行业日报", [_evidence()])
@@ -165,7 +181,7 @@ def test_prompt_carries_bounded_evidence_and_forbids_invented_urls() -> None:
     assert "不得修改、拼接或编造" in user_content
 
 
-def test_wecom_notifier_posts_the_markdown_payload_shape() -> None:
+def test_webhook_notifier_posts_the_wecom_markdown_envelope() -> None:
     """WeCom group robots accept only the documented markdown message envelope."""
     requests: list[dict[str, object]] = []
 
@@ -174,14 +190,30 @@ def test_wecom_notifier_posts_the_markdown_payload_shape() -> None:
         return httpx.Response(200, json={"errcode": 0, "errmsg": "ok"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    notifier = WeComNotifier(WEBHOOK_URL, client=client)
+    notifier = WebhookNotifier(WEBHOOK_URL, client=client)
 
     asyncio.run(notifier.push("# 日报"))
 
     assert requests == [{"msgtype": "markdown", "markdown": {"content": "# 日报"}}]
 
 
-def test_wecom_notifier_raises_on_a_non_zero_errcode() -> None:
+def test_webhook_notifier_generic_json_posts_text_and_owns_the_response_body() -> None:
+    """generic_json targets get a plain text payload; any HTTP 200 means delivered."""
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, text="ok")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    notifier = WebhookNotifier(WEBHOOK_URL, payload_format="generic_json", client=client)
+
+    asyncio.run(notifier.push("# 日报"))
+
+    assert requests == [{"text": "# 日报"}]
+
+
+def test_webhook_notifier_raises_on_a_non_zero_errcode() -> None:
     """A rejected webhook message must surface as a push failure, not silent loss."""
     attempts = 0
 
@@ -191,14 +223,14 @@ def test_wecom_notifier_raises_on_a_non_zero_errcode() -> None:
         return httpx.Response(200, json={"errcode": 93000, "errmsg": "invalid webhook"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    notifier = WeComNotifier(WEBHOOK_URL, client=client)
+    notifier = WebhookNotifier(WEBHOOK_URL, client=client)
 
-    with pytest.raises(WeComPushError, match="errcode=93000"):
+    with pytest.raises(WebhookPushError, match="errcode=93000"):
         asyncio.run(notifier.push("# 日报"))
     assert attempts == 2
 
 
-def test_wecom_notifier_retries_once_and_then_succeeds() -> None:
+def test_webhook_notifier_retries_once_and_then_succeeds() -> None:
     """One transient failure must not lose the whole briefing push."""
     attempts = 0
 
@@ -210,7 +242,7 @@ def test_wecom_notifier_retries_once_and_then_succeeds() -> None:
         return httpx.Response(200, json={"errcode": 0, "errmsg": "ok"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    notifier = WeComNotifier(WEBHOOK_URL, client=client)
+    notifier = WebhookNotifier(WEBHOOK_URL, client=client)
 
     asyncio.run(notifier.push("# 日报"))
 
@@ -222,17 +254,18 @@ def test_briefing_settings_default_to_disabled() -> None:
     settings = BriefingSettings()
 
     assert settings.enabled is False
-    assert settings.wecom_enabled is False
+    assert settings.webhook_enabled is False
+    assert settings.webhook_format == "wecom_markdown"
     assert settings.window_hours == 24
     assert settings.cron_expression == "30 7 * * *"
 
 
-def test_wecom_enabled_requires_a_webhook_url() -> None:
-    """A WeCom target without a webhook URL must fail at configuration load."""
-    with pytest.raises(ValueError, match="wecom_webhook_url"):
-        BriefingSettings(wecom_enabled=True)
-    with pytest.raises(ValueError, match="wecom_webhook_url"):
-        BriefingSettings(wecom_enabled=True, wecom_webhook_url="")
+def test_webhook_enabled_requires_a_webhook_url() -> None:
+    """A webhook target without a URL must fail at configuration load."""
+    with pytest.raises(ValueError, match="webhook_url"):
+        BriefingSettings(webhook_enabled=True)
+    with pytest.raises(ValueError, match="webhook_url"):
+        BriefingSettings(webhook_enabled=True, webhook_url="")
 
 
 def test_briefing_settings_load_from_yaml(app_config_path: Path, tmp_path: Path) -> None:
@@ -242,8 +275,9 @@ def test_briefing_settings_load_from_yaml(app_config_path: Path, tmp_path: Path)
         + "briefing:\n"
         + "  enabled: true\n"
         + "  window_hours: 12\n"
-        + "  wecom_enabled: true\n"
-        + f"  wecom_webhook_url: {WEBHOOK_URL}\n",
+        + "  webhook_enabled: true\n"
+        + "  webhook_format: generic_json\n"
+        + f"  webhook_url: {WEBHOOK_URL}\n",
         encoding="utf-8",
     )
 
@@ -251,4 +285,6 @@ def test_briefing_settings_load_from_yaml(app_config_path: Path, tmp_path: Path)
 
     assert settings.briefing.enabled is True
     assert settings.briefing.window_hours == 12
-    assert settings.briefing.wecom_webhook_url == WEBHOOK_URL
+    assert settings.briefing.webhook_enabled is True
+    assert settings.briefing.webhook_format == "generic_json"
+    assert settings.briefing.webhook_url == WEBHOOK_URL

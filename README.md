@@ -2,7 +2,7 @@
 
 An autonomous AI podcast generation platform that collects information sources, performs AI editorial workflows, generates audio, and publishes podcasts automatically.
 
-DailyCast is a self-hosted, single-process Python application for producing a review-gated personal news podcast. It keeps task state in SQLite, media on the filesystem, and publishes approved episodes through a self-hosted RSS feed.
+DailyCast is a self-hosted, single-process Python application for producing a review-gated personal news podcast. It keeps task state in SQLite, media on the filesystem, publishes immutable assets through a self-hosted RSS feed, and can optionally distribute that final asset to NetEase through a controlled Playwright adapter.
 
 ## Features
 
@@ -14,17 +14,20 @@ DailyCast is a self-hosted, single-process Python application for producing a re
 - Configurable TTS generation with resumable audio-segment caching
 - FFmpeg audio assembly into a checksum-verified draft MP3
 - Immutable public audio assets and self-hosted RSS podcast publishing
+- Optional NetEase creator-backend distribution through a persistent Playwright profile; login, CAPTCHA, and page-drift stop safely for manual recovery
 - Docker Compose deployment with SQLite migrations and health checks
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    S["RSS Sources and Article Pages"] --> N["News Processing\nExtract · Filter · Deduplicate · Cluster"]
+    S["RSS and Official Announcement Sources"] --> N["News Processing\nExtract · Filter · Deduplicate · Cluster"]
     N --> E["Editorial Pipeline\nRank · Evidence · Outline · Script · Check"]
     E --> EP["Episode\nReview-gated Draft"]
     EP --> T["TTS\nSegment Cache · FFmpeg Merge"]
-    T --> P["RSS Publisher\nImmutable Media"]
+    T --> D["Publication Dispatcher"]
+    D --> P["RSS Publisher\nImmutable Media"]
+    D --> N["NetEase Playwright\nOptional"]
     P --> F["RSS Feed"]
 ```
 
@@ -40,6 +43,7 @@ Completed:
 - [x] Script generation
 - [x] TTS generation
 - [x] RSS publishing
+- [x] Optional NetEase Playwright distribution
 - [x] Docker deployment
 
 The Alpha example configuration records every validation/review finding while setting
@@ -103,6 +107,8 @@ key, so repeated ticks and restarts do not create a duplicate daily TaskRun or E
 
 For a non-loopback public Feed, configure an explicit HTTPS `DAILYCAST_PUBLISHING__PUBLIC_BASE_URL` and expose only the intended Feed/media paths through your reverse proxy or static hosting setup.
 
+To enable NetEase distribution, keep RSS enabled, set `publishing.netease.enabled: true`, provide a readable `cover_path`, and complete the creator-center login once in the persistent `DATA_DIR/netease/profile` directory. Set `headless: false` for that initial manual login, then switch it back to `true` for unattended runs. No username, password, API token, or Cookie belongs in YAML, `.env`, logs, or Git. A login expiry, CAPTCHA, upload problem, or page change records `needs_attention`; it never bypasses platform security and never regenerates the episode or its MP3.
+
 ## Development
 
 Requirements: Python 3.12 and Poetry.
@@ -134,10 +140,10 @@ DAILYCAST_RUN_DOCKER_TEST=1 poetry run pytest -q tests/integration/test_docker_s
 - [ ] Zeabur one-click deployment
 - [ ] Dify workflow provider
 - [ ] n8n integration
-- [ ] RPA publisher
+- [x] Optional NetEase RPA publisher
 - [ ] Multi-model support
 
-The Alpha does not include a web dashboard, Dify, n8n, RPA publishing, multi-user accounts, or SaaS functionality.
+The Alpha does not include a full web dashboard, Dify, n8n, non-official reverse-engineered platform APIs, multi-user accounts, or SaaS functionality. Xiaoyuzhou remains an RSS-oriented prepared adapter, not a browser automation implementation.
 
 ## License
 

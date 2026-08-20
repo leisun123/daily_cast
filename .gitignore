@@ -28,6 +28,8 @@ public/*
 *.wav
 *.tmp
 *.part
+# Local deployment configuration derived from app.example.yaml; secrets stay in .env.
+config/app.yaml
 # Editor and operating-system metadata.
 .idea/
 .vscode/

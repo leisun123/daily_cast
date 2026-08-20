@@ -56,10 +56,10 @@ from dailycast.sources.service import (
 from dailycast.tts.service import AudioGenerationResult
 
 
-class FakePublicationService:
+class FakePublicationDispatcher:
     """Test double kept unused when review-gated auto publication is disabled for the daily flow."""
 
-    def publish(self, episode_id: int) -> object:
+    async def publish(self, episode_id: int) -> object:
         """Fail loudly if a collection test bypasses the review-gated configuration."""
         raise AssertionError(f"unexpected auto publish for Episode {episode_id}")
 
@@ -585,7 +585,7 @@ def test_collection_pipeline_persists_articles_and_continues_after_one_extractio
                     AIEditorialService(factory, FakeRankingProvider()),
                     EpisodeService(factory),
                     FakeAudioGenerationService(),
-                    FakePublicationService(),
+                    FakePublicationDispatcher(),
                     BudgetController,
                     data_dir=app_config_path.parent / "work",
                     collection_window_hours=36,

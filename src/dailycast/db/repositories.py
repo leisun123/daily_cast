@@ -19,7 +19,10 @@ from dailycast.db.models import (
     LLMArtifact,
     NewsEvent,
     Publication,
+    PublicationPlatform,
     PublicationStatus,
+    PublicationTarget,
+    PublicationTargetStatus,
     Source,
     TaskRun,
     TaskRunStatus,
@@ -646,3 +649,50 @@ class PublicationRepository:
         publication.updated_at = utc_now()
         self._session.flush()
         return publication
+
+
+class PublicationTargetRepository:
+    """Persistence operations for one independent distribution destination per Episode."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, **values: Any) -> PublicationTarget:
+        """Create and flush a target row inside the caller-owned transaction."""
+        target = PublicationTarget(**values)
+        self._session.add(target)
+        self._session.flush()
+        return target
+
+    def get(self, target_id: int) -> PublicationTarget | None:
+        """Return a target by durable database identifier."""
+        return self._session.get(PublicationTarget, target_id)
+
+    def get_by_platform(
+        self, episode_id: int, platform: PublicationPlatform | str
+    ) -> PublicationTarget | None:
+        """Return the one idempotent target row for an Episode and platform."""
+        return self._session.scalar(
+            select(PublicationTarget).where(
+                PublicationTarget.episode_id == episode_id,
+                PublicationTarget.platform == platform,
+            )
+        )
+
+    def list_by_status(self, *statuses: PublicationTargetStatus) -> list[PublicationTarget]:
+        """List durable recovery candidates in deterministic creation order."""
+        if not statuses:
+            return []
+        statement = (
+            select(PublicationTarget)
+            .where(PublicationTarget.status.in_(statuses))
+            .order_by(PublicationTarget.created_at, PublicationTarget.id)
+        )
+        return list(self._session.scalars(statement))
+
+    def update(self, target: PublicationTarget, **changes: Any) -> PublicationTarget:
+        """Persist a target lifecycle transition or verified remote identity."""
+        _apply_changes(target, changes)
+        target.updated_at = utc_now()
+        self._session.flush()
+        return target

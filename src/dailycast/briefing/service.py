@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -16,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from dailycast.briefing.prompt import build_briefing_messages
 from dailycast.briefing.renderer import render_briefing, truncate_markdown
 from dailycast.briefing.schemas import BriefingEvidence, BriefingResult
-from dailycast.briefing.wecom import WeComNotifier
+from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.time import Clock
 from dailycast.db.models import LLMOperation, Source
 from dailycast.db.repositories import ArticleRepository, SourceRepository
@@ -80,7 +81,7 @@ class BriefingService:
         extractor: ContentExtractor,
         news_processor: NewsProcessor,
         llm_provider: LLMProvider,
-        notifier: WeComNotifier | None,
+        notifier: WebhookNotifier | None,
         *,
         window_hours: int = 24,
         max_items_per_category: int = 10,
@@ -307,6 +308,25 @@ class BriefingService:
         """Locate the per-day per-category completion marker beside the markdown file."""
         return self._output_dir / f"{briefing_date.isoformat()}-{category}.done"
 
+    async def push_test(self) -> str:
+        """Push one fixed timestamped markdown so the webhook channel can be debugged.
+
+        Unlike a real run this touches neither sources nor the LLM; it exercises
+        only the push path, and push failures propagate to the caller instead of
+        being folded into a category report.
+        """
+        if self._notifier is None:
+            return "disabled"
+        triggered_at = self._clock.now().astimezone(self._timezone)
+        markdown = truncate_markdown(
+            "# DailyCast 简报推送测试\n\n"
+            "收到这条消息，说明当前配置的简报推送通道可用。\n\n"
+            f"- 触发时间：{triggered_at.isoformat(timespec='seconds')}\n"
+            f"- 类目：{'、'.join(CATEGORY_TITLES.values())}\n"
+        )
+        await self._notifier.push(markdown)
+        return "sent"
+
     async def _push(self, markdown: str) -> str:
         """Push one rendered briefing without turning a push failure into a lost file."""
         if self._notifier is None:
@@ -314,7 +334,7 @@ class BriefingService:
         try:
             await self._notifier.push(markdown)
         except Exception:
-            logger.exception("briefing wecom push failed")
+            logger.exception("briefing webhook push failed")
             return "failed"
         return "sent"
 
@@ -327,6 +347,29 @@ def read_briefings_for_date(output_dir: Path, briefing_date: date) -> dict[str, 
         if path.is_file():
             briefings[category] = path.read_text(encoding="utf-8")
     return briefings
+
+
+_BRIEFING_FILE_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})-[a-z0-9_]+\.md$")
+
+
+def latest_briefing_date(output_dir: Path) -> date | None:
+    """Return the most recent business date that has at least one persisted briefing.
+
+    Reading "latest" must survive the window after midnight in which today's run has
+    not happened yet: the previous day's briefings are still the latest available.
+    """
+    dates: set[date] = set()
+    if not output_dir.is_dir():
+        return None
+    for path in output_dir.glob("*.md"):
+        match = _BRIEFING_FILE_DATE.match(path.name)
+        if match is None:
+            continue
+        try:
+            dates.add(date.fromisoformat(match.group(1)))
+        except ValueError:
+            continue
+    return max(dates) if dates else None
 
 
 def _budgeted_provider(provider: LLMProvider, budget: BudgetController) -> LLMProvider:

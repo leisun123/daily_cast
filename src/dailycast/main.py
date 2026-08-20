@@ -4,11 +4,10 @@ import asyncio
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
-from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -19,14 +18,23 @@ from starlette.responses import Response
 from dailycast.briefing.service import (
     BriefingRunInProgressError,
     BriefingRunReport,
+    latest_briefing_date,
     read_briefings_for_date,
 )
+from dailycast.briefing.webhook import WebhookPushError
 from dailycast.core.errors import DailyCastError, InfrastructureError
 from dailycast.core.identifiers import UUIDGenerator
 from dailycast.core.lifespan import AppRuntime, build_daily_generation_command, build_lifespan
 from dailycast.core.logging import get_request_id, reset_request_id, set_request_id
 from dailycast.core.readiness import evaluate_readiness
-from dailycast.db.models import EpisodeItem, Publication, TaskRun, TriggerType
+from dailycast.db.models import (
+    Article,
+    EpisodeItem,
+    Publication,
+    PublicationPlatform,
+    TaskRun,
+    TriggerType,
+)
 from dailycast.db.repositories import (
     ArticleRepository,
     EpisodeItemRepository,
@@ -39,6 +47,15 @@ from dailycast.db.transactions import UnitOfWork
 
 logger = logging.getLogger(__name__)
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeSourceLink:
+    """One safe, display-ready source article retained by an Episode item."""
+
+    source_name: str
+    title: str
+    url: str | None
 
 
 def get_runtime(request: Request) -> AppRuntime:
@@ -126,6 +143,7 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
             articles = ArticleRepository(unit.session).list_by_ids(article_ids)
             publication = PublicationRepository(unit.session).get_published_for_episode(episode.id)
             source_count = len({article.source_id for article in articles})
+            source_links = _episode_source_links(articles)
         return TEMPLATES.TemplateResponse(
             request=request,
             name="episode.html",
@@ -133,6 +151,7 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
                 "episode": episode,
                 "items": items,
                 "source_count": source_count,
+                "source_links": source_links,
                 "audio_url": _public_audio_url(publication),
                 "duration": _format_audio_duration(episode.actual_duration_ms),
                 "generated_at": _format_generated_at(episode.created_at),
@@ -204,17 +223,63 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         task.add_done_callback(_log_briefing_task_result)
         return JSONResponse(status_code=202, content={"status": "accepted"})
 
+    @app.post("/briefing/test-push", tags=["briefing"])
+    async def test_briefing_push(runtime: RuntimeDependency) -> JSONResponse:
+        """Push one fixed test markdown through the configured webhook, synchronously.
+
+        Meant for debugging the push channel: the response reports the delivery
+        outcome directly instead of hiding it in a background run report.
+        """
+        _require_ready(runtime)
+        if runtime.briefing_service is None:
+            raise HTTPException(status_code=409, detail="briefing is not enabled")
+        try:
+            push_status = await runtime.briefing_service.push_test()
+        except WebhookPushError as error:
+            raise HTTPException(status_code=502, detail=f"webhook push failed: {error}") from None
+        if push_status == "disabled":
+            raise HTTPException(status_code=409, detail="briefing webhook is not enabled")
+        return JSONResponse(content={"status": push_status})
+
     @app.get("/briefing/latest", tags=["briefing"])
     async def latest_briefing(runtime: RuntimeDependency) -> dict[str, object]:
-        """Return today's persisted briefing markdown for local acceptance checks."""
+        """Return the most recent persisted briefing markdown for local acceptance checks."""
         _require_ready(runtime)
-        briefing_date = datetime.now(ZoneInfo(runtime.settings.app.timezone)).date()
-        briefings = read_briefings_for_date(
-            runtime.settings.data_dir / "work" / "briefings", briefing_date
-        )
+        briefings_dir = runtime.settings.data_dir / "work" / "briefings"
+        briefing_date = latest_briefing_date(briefings_dir)
+        if briefing_date is None:
+            raise HTTPException(status_code=404, detail="no briefing has been generated yet")
+        briefings = read_briefings_for_date(briefings_dir, briefing_date)
         if not briefings:
-            raise HTTPException(status_code=404, detail="no briefing was generated today")
+            raise HTTPException(status_code=404, detail="no briefing was generated")
         return {"date": briefing_date.isoformat(), "briefings": briefings}
+
+    @app.post(
+        "/distribution/episodes/{episode_id}/targets/{platform}/resume", tags=["distribution"]
+    )
+    async def resume_distribution_target(
+        episode_id: int, platform: str, runtime: RuntimeDependency
+    ) -> JSONResponse:
+        """Resume one needs-attention target after its human action has been completed."""
+        _require_ready(runtime)
+        dispatcher = runtime.publication_dispatcher
+        if dispatcher is None:
+            raise HTTPException(status_code=409, detail="distribution is not ready")
+        try:
+            parsed_platform = PublicationPlatform(platform)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"unknown platform: {platform}") from None
+        try:
+            distribution = await dispatcher.resume(episode_id, parsed_platform)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from None
+        return JSONResponse(
+            content={
+                "episode_id": episode_id,
+                "target_statuses": distribution.target_statuses,
+                "warning_count": distribution.warning_count,
+            }
+        )
 
     @app.get("/healthz", tags=["system"])
     async def healthz() -> dict[str, str]:
@@ -319,6 +384,17 @@ def _article_ids_from_items(items: Sequence[EpisodeItem]) -> tuple[int, ...]:
         if isinstance(values, list):
             article_ids.update(value for value in values if isinstance(value, int))
     return tuple(sorted(article_ids))
+
+
+def _episode_source_links(articles: Sequence[Article]) -> tuple[EpisodeSourceLink, ...]:
+    """Project only safe public provenance fields before the database session closes."""
+    references: list[EpisodeSourceLink] = []
+    for article in articles:
+        url = article.url if article.url.startswith(("https://", "http://")) else None
+        references.append(
+            EpisodeSourceLink(source_name=article.source.name, title=article.title, url=url)
+        )
+    return tuple(references)
 
 
 def _public_audio_url(publication: Publication | None) -> str | None:

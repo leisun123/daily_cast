@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.scheduler import BriefingScheduler
 from dailycast.briefing.service import BriefingService
-from dailycast.briefing.wecom import WeComNotifier
+from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.config import LLMProviderSettings, Settings, load_settings
 from dailycast.core.logging import configure_logging
 from dailycast.db.models import SourceKind, TaskType, TriggerType
@@ -35,8 +35,17 @@ from dailycast.pipeline.executor import InProcessTaskExecutor
 from dailycast.pipeline.orchestrator import PipelineOrchestrator, build_collection_pipeline
 from dailycast.pipeline.recovery import RecoveryService
 from dailycast.pipeline.submission import TaskSubmissionService
+from dailycast.publishing.contracts import Publisher
+from dailycast.publishing.dispatcher import PublicationDispatcher, RSSDistributionPublisher
+from dailycast.publishing.netease import (
+    NetEasePlaywrightPublisher,
+)
+from dailycast.publishing.netease import (
+    NetEasePublishingSettings as NetEasePublisherSettings,
+)
 from dailycast.publishing.rss import RSSPublisher, RSSSettings
 from dailycast.publishing.service import PublicationService
+from dailycast.publishing.xiaoyuzhou import XiaoyuzhouPublisher
 from dailycast.scheduler.service import SchedulerService
 from dailycast.sources.bootstrap import seed_missing_sources
 from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
@@ -50,6 +59,43 @@ from dailycast.tts.service import AudioGenerationService, TTSGenerationSettings
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def build_distribution_publishers(
+    settings: Settings, publication_service: PublicationService
+) -> tuple[Publisher, ...]:
+    """Build enabled target adapters with browser state rooted in private DATA_DIR."""
+    publishers: list[Publisher] = []
+    if settings.publishing.rss.enabled:
+        publishers.append(RSSDistributionPublisher(publication_service))
+    if settings.publishing.netease.enabled:
+        configured_profile_dir = settings.publishing.netease.profile_dir
+        profile_dir = (
+            configured_profile_dir
+            if configured_profile_dir.is_absolute()
+            else settings.data_dir / configured_profile_dir
+        )
+        configured_cover_path = settings.publishing.netease.cover_path
+        cover_path = (
+            settings.resolve_path(configured_cover_path)
+            if configured_cover_path is not None
+            else None
+        )
+        netease_settings = settings.publishing.netease
+        publishers.append(
+            NetEasePlaywrightPublisher(
+                NetEasePublisherSettings(
+                    creator_url=netease_settings.creator_url,
+                    profile_dir=profile_dir,
+                    headless=netease_settings.headless,
+                    cover_path=cover_path,
+                    category=netease_settings.category,
+                )
+            )
+        )
+    if settings.publishing.xiaoyuzhou.enabled:
+        publishers.append(XiaoyuzhouPublisher())
+    return tuple(publishers)
 
 
 @dataclass(frozen=True)
@@ -66,6 +112,7 @@ class AppRuntime:
     scheduler: SchedulerService | None
     briefing_service: BriefingService | None = None
     briefing_scheduler: BriefingScheduler | None = None
+    publication_dispatcher: PublicationDispatcher | None = None
 
 
 def build_lifespan(
@@ -97,6 +144,7 @@ def build_lifespan(
         scheduler: SchedulerService | None = None
         briefing_service: BriefingService | None = None
         briefing_scheduler: BriefingScheduler | None = None
+        publication_dispatcher: PublicationDispatcher | None = None
         llm_client: httpx.AsyncClient | None = None
         if startup_revision_status is not None and startup_revision_status.is_current:
             created_source_count = seed_missing_sources(
@@ -190,6 +238,10 @@ def build_lifespan(
                     ),
                 ),
             )
+            publication_dispatcher = PublicationDispatcher(
+                session_factory,
+                build_distribution_publishers(settings, publication_service),
+            )
             orchestrator = PipelineOrchestrator(
                 session_factory,
                 build_collection_pipeline(
@@ -200,7 +252,7 @@ def build_lifespan(
                     editorial_service,
                     EpisodeService(session_factory),
                     audio_service,
-                    publication_service,
+                    publication_dispatcher,
                     lambda: BudgetController(
                         max_calls=settings.llm.budget.max_calls,
                         max_input_tokens=settings.llm.budget.max_input_tokens,
@@ -216,7 +268,11 @@ def build_lifespan(
                 artifact_roots=(settings.data_dir, settings.public_dir),
             )
             executor = InProcessTaskExecutor(session_factory, orchestrator)
+            # The RSS service stays the source of truth even when no target row is
+            # mid-publish: verifying published feed items on every startup keeps a
+            # lost or recreated public volume self-healing before the next episode.
             publication_service.reconcile()
+            await publication_dispatcher.reconcile()
             submission_service = TaskSubmissionService(session_factory, executor)
             await executor.start()
             await RecoveryService(session_factory, submission_service).recover()
@@ -259,6 +315,7 @@ def build_lifespan(
             scheduler=scheduler,
             briefing_service=briefing_service,
             briefing_scheduler=briefing_scheduler,
+            publication_dispatcher=publication_dispatcher,
         )
         app.state.runtime = runtime
         logger.info("application_started")
@@ -296,10 +353,13 @@ def _build_briefing_runtime(
     logger.info(
         "briefing_source_seed_completed", extra={"created_source_count": created_source_count}
     )
-    notifier: WeComNotifier | None = None
-    if settings.briefing.wecom_enabled:
-        assert settings.briefing.wecom_webhook_url is not None
-        notifier = WeComNotifier(settings.briefing.wecom_webhook_url)
+    notifier: WebhookNotifier | None = None
+    if settings.briefing.webhook_enabled:
+        assert settings.briefing.webhook_url is not None
+        notifier = WebhookNotifier(
+            settings.briefing.webhook_url,
+            payload_format=settings.briefing.webhook_format,
+        )
     briefing_service = BriefingService(
         session_factory,
         collection_service,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -24,6 +24,12 @@ _FINANCIAL_QUANTITY = re.compile(
 )
 _PERCENT = re.compile(r"(?<![A-Za-z0-9])(?P<number>\d+(?:\.\d+)?)%(?![A-Za-z0-9])")
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n+")
+_ASCII_SPOKEN_TERM = re.compile(r"[A-Za-z0-9]+(?:[ ._-][A-Za-z0-9]+)*")
+_INVISIBLE_SPOKEN_CHARACTERS = re.compile(r"[\u200B\u200C\u200D\u2060\uFEFF]")
+_HAN_CHARACTER = r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]"
+_CHINESE_INTERNAL_WHITESPACE = re.compile(
+    rf"(?<={_HAN_CHARACTER})(?:[^\S\r\n]+|[^\S\r\n]*(?:\r\n|[\r\n])[^\S\r\n]*)(?={_HAN_CHARACTER})"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +98,12 @@ class FinancialNumberNormalizer:
         )
 
 
+def normalize_spoken_whitespace(text: str) -> str:
+    """Remove invisible marks and whitespace that splits adjacent Chinese characters."""
+    without_invisible_characters = _INVISIBLE_SPOKEN_CHARACTERS.sub("", text)
+    return _CHINESE_INTERNAL_WHITESPACE.sub("", without_invisible_characters)
+
+
 class TTSPreprocessor:
     """Normalize a bounded spoken form and optionally add conservative plain-text pauses."""
 
@@ -110,7 +122,7 @@ class TTSPreprocessor:
             json.dumps(
                 {
                     "dictionary": self._dictionary.semantic_hash,
-                    "implementation": "tts-preprocess-v2-financial-enhanced-text",
+                    "implementation": "tts-preprocess-v3-financial-enhanced-text",
                     "text_mode": self._text_mode,
                 },
                 separators=(",", ":"),
@@ -126,9 +138,11 @@ class TTSPreprocessor:
         pronunciation_hints: Sequence[tuple[str, str]] = (),
     ) -> PreparedSpeech:
         """Return provider input while preserving the persisted Episode script text verbatim."""
-        spoken = FinancialNumberNormalizer().normalize(text.strip())
+        spoken = normalize_spoken_whitespace(text.strip())
+        spoken = FinancialNumberNormalizer().normalize(spoken)
         spoken = _apply_replacements(spoken, pronunciation_hints)
         spoken = _apply_replacements(spoken, self._dictionary.entries)
+        spoken = normalize_spoken_whitespace(spoken)
         provider_text = (
             _to_enhanced_text(spoken, section_role=section_role)
             if self._text_mode == "enhanced_text"
@@ -210,11 +224,25 @@ def _apply_replacements(text: str, replacements: Sequence[tuple[str, str]]) -> s
     """Apply longer terms first while avoiding accidental substitutions inside English words."""
     rendered = text
     for term, replacement in sorted(replacements, key=lambda item: (-len(item[0]), item[0])):
-        if re.fullmatch(r"[A-Za-z0-9]+", term):
+        if _ASCII_SPOKEN_TERM.fullmatch(term):
             suffix = r"(?![A-Za-z0-9])"
             if term == "GPT":
                 suffix = rf"(?![A-Za-z0-9]|-\d|\s*[{''.join(_HAN_NUMBERS)}])"
-            rendered = re.sub(rf"(?<![A-Za-z0-9]){re.escape(term)}{suffix}", replacement, rendered)
+            rendered = re.sub(
+                rf"(?<![A-Za-z0-9]){re.escape(term)}{suffix}",
+                _literal_replacement(replacement),
+                rendered,
+                flags=re.IGNORECASE,
+            )
         else:
             rendered = rendered.replace(term, replacement)
     return rendered
+
+
+def _literal_replacement(value: str) -> Callable[[re.Match[str]], str]:
+    """Keep configured pronunciation text literal when passing it to ``re.sub``."""
+
+    def replace(_: re.Match[str]) -> str:
+        return value
+
+    return replace

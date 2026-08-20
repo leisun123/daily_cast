@@ -265,7 +265,7 @@ V1 明确不做：
 - 多 Agent 协作、向量知识库、向量数据库和复杂数据分析；
 - Redis、Celery、Kafka、Elasticsearch、Kubernetes 或微服务拆分；
 - 大量站点专用抓取器、绕过反爬或非官方逆向接口；
-- 自动发布网易云、Playwright RPA 发布和验证码自动绕过；
+- 验证码自动绕过、非官方逆向发布接口，以及除受控网易云 Playwright adapter 以外的自动化平台发布；
 - 把 Dify 作为 V1 运行时、调度器、数据库或音频处理器；
 - 在同一实例并行生成多期重型任务，或提供商业级高可用。
 
@@ -313,6 +313,7 @@ V1 明确不做：
 - 只有 `approved` 节目能发布；发布后可通过稳定 URL 获取 MP3 和 `feed.xml`。
 - Feed 通过项目内 RSS 结构校验，并保留历史节目。
 - 重跑发布不会产生重复 item，历史 enclosure URL 和 GUID 不改变；测试覆盖当前 `publishing` candidate 被写入新 Feed，以及 Feed 已替换但数据库尚未提交时由 reconcile 补写 `published` 状态。
+- 启用网易云目标后，RSS 先完成不可变资产与 Feed，再由独立 `PublicationTarget` 尝试 Playwright 上传；登录、验证码、上传或页面失配写为 `needs_attention`，不回滚 Episode/RSS，也不重新生成新闻、稿件或音频。
 
 ### AC-7 审计与安全
 
@@ -341,8 +342,8 @@ V1 明确不做：
 - 实现 `PodbeanAPIPublisher` 或其他有官方 API 的 Publisher。
 - Publication 保存远端节目 ID、发布 URL、请求幂等键和脱敏响应摘要。
 
-### V2.1：受控 RPA 发布
+### V2.1：更多受控平台发布
 
-- 实现 `NetEasePlaywrightPublisher`，使用独立持久化浏览器配置目录和人工登录。
-- 登录失效、验证码、风控或页面选择器失配时进入 `needs_attention`，保存脱敏截图和 trace，等待人工处理；不尝试绕过安全机制。
+- 保持 RSS 为不可变媒体的源头；为具备稳定官方 API 的平台优先增加 API Publisher。
+- 网易云 adapter 已使用独立持久化浏览器配置目录和人工登录；登录失效、验证码、风控或页面选择器失配时进入 `needs_attention`，不尝试绕过安全机制。
 - RPA 仍只消费已批准的 Episode 和最终音频，不参与新闻理解或内容生成。

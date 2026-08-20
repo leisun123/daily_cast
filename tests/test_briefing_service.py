@@ -19,7 +19,7 @@ from dailycast.briefing.service import (
     BriefingService,
     read_briefings_for_date,
 )
-from dailycast.briefing.wecom import WeComNotifier
+from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.errors import LLMProviderError
 from dailycast.db.models import LLMOperation, Source, SourceKind
 from dailycast.db.repositories import SourceRepository
@@ -116,18 +116,18 @@ class FakeBriefingLLM:
         raise AssertionError("no fake LLM result matched the briefing prompt")
 
 
-class RecordingNotifier(WeComNotifier):
+class RecordingNotifier(WebhookNotifier):
     """Capture pushed markdown without a webhook."""
 
     def __init__(self) -> None:
         self.pushed: list[str] = []
 
     async def push(self, markdown: str) -> None:
-        """Record the exact markdown that would have been sent to WeCom."""
+        """Record the exact markdown that would have been sent to the webhook."""
         self.pushed.append(markdown)
 
 
-class FailingNotifier(WeComNotifier):
+class FailingNotifier(WebhookNotifier):
     """Fail every push so completion markers must stay absent."""
 
     def __init__(self) -> None:
@@ -191,7 +191,7 @@ def _build_service(
     *,
     collector: FakeRSSCollector,
     llm: LLMProvider,
-    notifier: WeComNotifier | None,
+    notifier: WebhookNotifier | None,
     budget_factory: Callable[[], BudgetController] = BudgetController,
 ) -> BriefingService:
     article_service = ArticleService(factory)
@@ -405,6 +405,66 @@ def test_failed_push_leaves_no_marker_so_the_next_run_retries(
     assert all(entry.status == "generated" for entry in second_report.categories)
     assert len(llm.operations) == 4
     assert notifier.attempts == 4
+
+
+def test_push_test_sends_one_timestamped_markdown_without_running_the_pipeline(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The manual test trigger exercises only the push channel, never sources or the LLM."""
+    llm = FakeBriefingLLM({})
+    notifier = RecordingNotifier()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector({}),
+        llm=llm,
+        notifier=notifier,
+    )
+
+    push_status = asyncio.run(service.push_test())
+
+    assert push_status == "sent"
+    assert len(notifier.pushed) == 1
+    markdown = notifier.pushed[0]
+    assert markdown.startswith("# DailyCast 简报推送测试")
+    assert "触发时间：" in markdown
+    assert "通信行业日报" in markdown
+    assert "AI 动态日报" in markdown
+    assert llm.operations == []
+    assert not (tmp_path / "briefings").exists()
+
+
+def test_push_test_reports_disabled_without_a_configured_webhook(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A deployment without a push target answers disabled instead of failing."""
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector({}),
+        llm=FakeBriefingLLM({}),
+        notifier=None,
+    )
+
+    assert asyncio.run(service.push_test()) == "disabled"
+
+
+def test_push_test_propagates_push_failures_for_direct_debugging(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A broken webhook surfaces its error from the test trigger instead of a report."""
+    notifier = FailingNotifier()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector({}),
+        llm=FakeBriefingLLM({}),
+        notifier=notifier,
+    )
+
+    with pytest.raises(RuntimeError, match="webhook down"):
+        asyncio.run(service.push_test())
+    assert notifier.attempts == 1
 
 
 def test_concurrent_run_raises_briefing_run_in_progress(

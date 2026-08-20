@@ -1,1 +1,1 @@
-"""Daily text briefing flow: collect, generate, render, and push to WeCom."""
+"""Daily text briefing flow: collect, generate, render, and push to a webhook."""

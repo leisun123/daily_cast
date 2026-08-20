@@ -6,7 +6,13 @@ from pathlib import Path
 from alembic import command
 
 from dailycast.core.config import load_settings
-from dailycast.db.models import ArticleStatus, EpisodeStatus, TaskRunStatus
+from dailycast.db.models import (
+    ArticleStatus,
+    EpisodeStatus,
+    PublicationPlatform,
+    PublicationTargetStatus,
+    TaskRunStatus,
+)
 from dailycast.db.repositories import (
     ArticleRepository,
     AudioSegmentRepository,
@@ -14,6 +20,7 @@ from dailycast.db.repositories import (
     LLMArtifactRepository,
     NewsEventRepository,
     PublicationRepository,
+    PublicationTargetRepository,
     SourceRepository,
     TaskRunRepository,
     TaskStepRepository,
@@ -187,10 +194,34 @@ def test_repositories_create_and_query_v1_records(app_config_path: Path) -> None
             )
             assert publications.get_by_target(episode.id, "rss", "self-hosted") is publication
 
+            publication_targets = PublicationTargetRepository(uow.session)
+            target = publication_targets.create(
+                episode_id=episode.id,
+                platform=PublicationPlatform.RSS,
+                status=PublicationTargetStatus.PENDING,
+            )
+            assert (
+                publication_targets.get_by_platform(episode.id, PublicationPlatform.RSS) is target
+            )
+            publication_targets.update(
+                target,
+                status=PublicationTargetStatus.PUBLISHING,
+                attempt_count=1,
+            )
+            assert publication_targets.list_by_status(PublicationTargetStatus.PUBLISHING) == [
+                target
+            ]
+
         with UnitOfWork(factory) as uow:
             assert uow.session is not None
             segments = AudioSegmentRepository(uow.session)
             assert segments.get_by_cache_key("2" * 64, "3" * 64, "4" * 64) is not None
+            assert (
+                PublicationTargetRepository(uow.session).get_by_platform(
+                    episode.id, PublicationPlatform.RSS
+                )
+                is not None
+            )
     finally:
         engine.dispose()
 

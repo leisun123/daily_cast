@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+from dailycast.briefing.webhook import WebhookFormat
 from dailycast.core.errors import ConfigurationError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -94,14 +95,15 @@ class BriefingSettings(BaseModel):
     window_hours: int = Field(default=24, ge=1, le=168)
     max_items_per_category: int = Field(default=10, ge=1, le=20)
     max_evidence_chars_per_article: int = Field(default=800, ge=1, le=8000)
-    wecom_enabled: bool = False
-    wecom_webhook_url: str | None = None
+    webhook_enabled: bool = False
+    webhook_url: str | None = None
+    webhook_format: WebhookFormat = "wecom_markdown"
 
     @model_validator(mode="after")
-    def require_webhook_url_when_wecom_enabled(self) -> "BriefingSettings":
-        """A WeCom push target without a webhook URL must fail at configuration load."""
-        if self.wecom_enabled and not self.wecom_webhook_url:
-            msg = "briefing.wecom_webhook_url is required when briefing.wecom_enabled=true"
+    def require_webhook_url_when_webhook_enabled(self) -> "BriefingSettings":
+        """A webhook push target without a URL must fail at configuration load."""
+        if self.webhook_enabled and not self.webhook_url:
+            msg = "briefing.webhook_url is required when briefing.webhook_enabled=true"
             raise ValueError(msg)
         return self
 
@@ -205,8 +207,31 @@ class FFmpegSettings(BaseModel):
     bitrate: str = "64k"
 
 
+class RSSPublishingSettings(BaseModel):
+    """Settings for the durable self-hosted RSS target."""
+
+    enabled: bool = True
+
+
+class NetEasePublishingSettings(BaseModel):
+    """Settings for the optional persistent-browser NetEase distribution target."""
+
+    enabled: bool = False
+    profile_dir: Path = Path("netease/profile")
+    headless: bool = True
+    creator_url: str = "https://music.163.com/creatorcenter"
+    cover_path: Path | None = None
+    category: str = "资讯"
+
+
+class XiaoyuzhouPublishingSettings(BaseModel):
+    """Reserved configuration for a future RSS-based Xiaoyuzhou handoff."""
+
+    enabled: bool = False
+
+
 class PublishingSettings(BaseModel):
-    """Self-hosted RSS publication configuration without changing management API exposure."""
+    """Self-hosted RSS plus independently enabled external distribution targets."""
 
     auto_publish: bool = False
     public_base_url: str = "http://127.0.0.1:8000"
@@ -214,6 +239,18 @@ class PublishingSettings(BaseModel):
     feed_description: str = "A personal AI news podcast."
     language: str = "zh-CN"
     author: str = "DailyCast"
+    rss: RSSPublishingSettings = Field(default_factory=RSSPublishingSettings)
+    netease: NetEasePublishingSettings = Field(default_factory=NetEasePublishingSettings)
+    xiaoyuzhou: XiaoyuzhouPublishingSettings = Field(default_factory=XiaoyuzhouPublishingSettings)
+
+    @model_validator(mode="after")
+    def require_rss_for_external_distribution(self) -> "PublishingSettings":
+        """External targets always upload the immutable asset first promoted by RSS."""
+        if not self.rss.enabled and (self.netease.enabled or self.xiaoyuzhou.enabled):
+            raise ValueError(
+                "external distribution requires publishing.rss.enabled=true as the source of truth"
+            )
+        return self
 
     @field_validator("public_base_url")
     @classmethod

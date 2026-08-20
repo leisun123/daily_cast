@@ -18,18 +18,14 @@ depends_on = None
 
 def upgrade() -> None:
     """Derive historical counts from immutable EpisodeItem rows without changing editorial data."""
-    op.get_bind().execute(
-        sa.text(
-            """
+    op.get_bind().execute(sa.text("""
             UPDATE episodes
             SET news_count = (
                 SELECT COUNT(*)
                 FROM episode_items
                 WHERE episode_items.episode_id = episodes.id
             )
-            """
-        )
-    )
+            """))
 
 
 def downgrade() -> None:
