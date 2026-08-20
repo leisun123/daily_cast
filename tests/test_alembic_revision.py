@@ -43,14 +43,19 @@ def test_production_metrics_migration_backfills_existing_episode_news_count(
     engine = create_sqlite_engine(settings.database)
     try:
         with engine.begin() as connection:
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     INSERT INTO sources (id, name, kind, entry_url, normalized_entry_url,
                                          config_json, created_at, updated_at)
                     VALUES ('metric-source', 'Metric source', 'rss', 'https://example.test/rss',
                             'https://example.test/rss', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    """))
+                    """
+                )
+            )
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO articles (source_id, url, normalized_url, url_hash, title,
                                               normalized_title, title_hash, discovered_at, status,
                                               metadata_json, created_at, updated_at)
@@ -58,12 +63,14 @@ def test_production_metrics_migration_backfills_existing_episode_news_count(
                             'https://example.test/article', :url_hash, 'Metric article',
                                 'metric article', :title_hash, CURRENT_TIMESTAMP, 'extracted', '{}',
                                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    """),
+                    """
+                ),
                 {"url_hash": "a" * 64, "title_hash": "b" * 64},
             )
             article_id = connection.execute(text("SELECT id FROM articles")).scalar_one()
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO news_events (event_key, event_date, representative_article_id,
                                              title, status, article_count, source_count,
                                              deterministic_score, risk_flags_json,
@@ -73,28 +80,35 @@ def test_production_metrics_migration_backfills_existing_episode_news_count(
                     VALUES ('metric-event', '2026-07-22', :article_id, 'Metric event', 'selected',
                             1, 1, 0, '[]', 'tfidf_char', 'test-v1', 0.58, :cluster_signature,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    """),
+                    """
+                ),
                 {"article_id": article_id, "cluster_signature": "c" * 64},
             )
             event_id = connection.execute(text("SELECT id FROM news_events")).scalar_one()
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     INSERT INTO episodes (public_id, episode_date, edition, status,
                                           script_revision, audio_version, lock_version,
                                           created_at, updated_at)
                     VALUES ('metric-episode', '2026-07-22', 'daily', 'published',
                             1, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    """))
+                    """
+                )
+            )
             episode_id = connection.execute(text("SELECT id FROM episodes")).scalar_one()
             for position in (1,):
                 connection.execute(
-                    text("""
+                    text(
+                        """
                         INSERT INTO episode_items (episode_id, news_event_id, position,
                                                    event_title_snapshot, selection_reason_snapshot,
                                                    score_snapshot_json, source_article_ids_json,
                                                    created_at, updated_at)
                         VALUES (:episode_id, :event_id, :position, 'Metric event', 'Selected',
                                 '{}', '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                        """),
+                        """
+                    ),
                     {"episode_id": episode_id, "event_id": event_id, "position": position},
                 )
     finally:
@@ -126,7 +140,9 @@ def test_publication_targets_migration_projects_existing_rss_publications(
     engine = create_sqlite_engine(settings.database)
     try:
         with engine.begin() as connection:
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                     INSERT INTO episodes (
                         public_id, episode_date, edition, status, script_revision, audio_version,
                         lock_version, created_at, updated_at
@@ -134,12 +150,15 @@ def test_publication_targets_migration_projects_existing_rss_publications(
                         'target-backfill-episode', '2026-07-24', 'daily', 'published', 1, 1,
                         1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
-                    """))
+                    """
+                )
+            )
             episode_id = connection.execute(
                 text("SELECT id FROM episodes WHERE public_id = 'target-backfill-episode'")
             ).scalar_one()
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO publications (
                         episode_id, publisher_type, target_key, status, idempotency_key,
                         request_fingerprint, feed_guid, public_audio_url, attempt_count,
@@ -150,7 +169,8 @@ def test_publication_targets_migration_projects_existing_rss_publications(
                         'https://podcast.example.test/media/immutable.mp3', 2,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
-                    """),
+                    """
+                ),
                 {"episode_id": episode_id, "fingerprint": "a" * 64},
             )
     finally:
@@ -160,10 +180,14 @@ def test_publication_targets_migration_projects_existing_rss_publications(
     engine = create_sqlite_engine(settings.database)
     try:
         with engine.connect() as connection:
-            target = connection.execute(text("""
+            target = connection.execute(
+                text(
+                    """
                     SELECT platform, status, remote_id, remote_url, attempt_count
                     FROM publication_targets
-                    """)).one()
+                    """
+                )
+            ).one()
         assert target == (
             "rss",
             "published",
@@ -186,7 +210,8 @@ def test_waiting_action_migration_upgrades_existing_task_run_schema(app_config_p
     try:
         with engine.begin() as connection:
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO task_runs (
                         id, task_type, business_key, idempotency_key, trigger_type, status,
                         pipeline_version, config_fingerprint, config_snapshot_json, request_json,
@@ -195,7 +220,8 @@ def test_waiting_action_migration_upgrades_existing_task_run_schema(app_config_p
                         'legacy-task', 'daily_generate', 'daily:legacy', 'legacy-key', 'manual',
                         'queued', 'test-v1', :fingerprint, '{}', '{}', :created_at, :updated_at
                     )
-                    """),
+                    """
+                ),
                 {
                     "fingerprint": "a" * 64,
                     "created_at": "2026-07-23 00:00:00",
@@ -230,7 +256,8 @@ def test_reliability_migration_preserves_task_steps_referenced_by_llm_artifacts(
     try:
         with engine.begin() as connection:
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO task_runs (
                         id, task_type, business_key, idempotency_key, trigger_type, status,
                         pipeline_version, config_fingerprint, config_snapshot_json, request_json,
@@ -239,25 +266,29 @@ def test_reliability_migration_preserves_task_steps_referenced_by_llm_artifacts(
                         'referenced-task', 'daily_generate', 'daily:referenced', 'referenced-key',
                         'manual', 'succeeded', 'test-v1', :hash, '{}', '{}', :now, :now
                     )
-                    """),
+                    """
+                ),
                 {"hash": "a" * 64, "now": "2026-07-24 00:00:00"},
             )
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO task_steps (
                         task_run_id, step_name, step_order, attempt, status, details_json,
                         created_at, updated_at
                     ) VALUES (
                         'referenced-task', 'ranking', 1, 1, 'succeeded', '{}', :now, :now
                     )
-                    """),
+                    """
+                ),
                 {"now": "2026-07-24 00:00:00"},
             )
             step_id = connection.execute(
                 text("SELECT id FROM task_steps WHERE task_run_id = 'referenced-task'")
             ).scalar_one()
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO llm_artifacts (
                         operation, provider, model, prompt_version, schema_version,
                         generation_config_hash, input_hash, output_json, output_hash,
@@ -266,7 +297,8 @@ def test_reliability_migration_preserves_task_steps_referenced_by_llm_artifacts(
                         'score_events', 'fake', 'fake-model', 'v1', 'v1', :config_hash,
                         :input_hash, '{}', :output_hash, 'referenced-task', :step_id, :now
                     )
-                    """),
+                    """
+                ),
                 {
                     "config_hash": "b" * 64,
                     "input_hash": "c" * 64,
@@ -322,17 +354,20 @@ def test_tts_preprocess_migration_backfills_existing_audio_segments(app_config_p
     try:
         with engine.begin() as connection:
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO episodes (public_id, episode_date, status, created_at, updated_at)
                     VALUES ('legacy-audio-episode', '2026-07-24', 'draft', :now, :now)
-                    """),
+                    """
+                ),
                 {"now": "2026-07-24 00:00:00"},
             )
             episode_id = connection.execute(
                 text("SELECT id FROM episodes WHERE public_id = 'legacy-audio-episode'")
             ).scalar_one()
             connection.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO audio_segments (
                         episode_id, script_revision, segment_index, segmenter_version, text,
                         text_hash, cache_key, provider, model, voice, provider_config_hash,
@@ -342,7 +377,8 @@ def test_tts_preprocess_migration_backfills_existing_audio_segments(app_config_p
                         'edge_tts', 'edge-tts', 'zh-CN-XiaoxiaoNeural', :provider_hash,
                         'succeeded', :now, :now
                     )
-                    """),
+                    """
+                ),
                 {
                     "episode_id": episode_id,
                     "text_hash": "a" * 64,
