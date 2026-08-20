@@ -132,3 +132,34 @@ def test_briefing_generate_accepts_the_force_parameter(
 
     assert response.status_code == 202
     assert response.json() == {"status": "accepted"}
+
+
+def test_briefing_test_push_is_bearer_protected_on_public_deployments(
+    app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On public_only deployments the manual push trigger requires the operator token."""
+    token = "test-trigger-token-0123456789abcdef0123456789abcdef"
+    _enable_briefing(app_config_path, tmp_path)
+    app_config_path.write_text(
+        app_config_path.read_text(encoding="utf-8").replace(
+            "  environment: test\n",
+            f"  environment: test\n  public_only: true\n  manual_trigger_token: {token}\n",
+        )
+        + "  webhook_enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DAILYCAST_BRIEFING__WEBHOOK_URL", "https://briefing-push.invalid/hook")
+    upgraded_session_factory(app_config_path)
+
+    with TestClient(create_app(config_path=app_config_path)) as client:
+        unauthenticated = client.post("/briefing/test-push")
+        wrong_token = client.post(
+            "/briefing/test-push", headers={"Authorization": "Bearer wrong-token"}
+        )
+        accepted = client.post("/briefing/test-push", headers={"Authorization": f"Bearer {token}"})
+
+    assert unauthenticated.status_code == 401
+    assert wrong_token.status_code == 401
+    # The valid token reaches the handler; the unreachable webhook surfaces as 502.
+    assert accepted.status_code == 502
+    assert accepted.json()["detail"].startswith("webhook push failed")

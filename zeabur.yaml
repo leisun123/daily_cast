@@ -41,6 +41,10 @@ spec:
       type: PASSWORD
       name: Fallback LLM API key
       description: Fallback endpoint secret stored only in Zeabur environment configuration.
+    - key: DAILYCAST_BRIEFING__WEBHOOK_URL
+      type: PASSWORD
+      name: Daily briefing webhook URL
+      description: WeCom group-bot webhook (or any JSON webhook) that receives the daily text briefing; required because briefing pushes are enabled in the deployment config.
   tags:
     - AI
     - Tool
