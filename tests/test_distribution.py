@@ -49,7 +49,8 @@ def test_enabled_platforms_are_built_with_a_private_persistent_netease_profile(
 ) -> None:
     """The deployment only mounts a private profile when NetEase is explicitly enabled."""
     app_config_path.write_text(
-        app_config_path.read_text(encoding="utf-8") + """
+        app_config_path.read_text(encoding="utf-8")
+        + """
 publishing:
   rss:
     enabled: true

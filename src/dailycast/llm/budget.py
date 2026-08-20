@@ -91,7 +91,9 @@ class BudgetReservingLLMProvider:
         """Reserve this attempt's allowance, then forward the call unchanged."""
         self._budget.reserve(
             input_tokens=estimate_message_input_tokens(messages),
-            output_tokens=self._provider.max_output_tokens,
+            # A provider without an explicit output ceiling reserves no output
+            # budget; the configured providers always carry one.
+            output_tokens=self._provider.max_output_tokens or 0,
         )
         return await self._provider.generate_structured(
             operation, messages, response_schema, model_options

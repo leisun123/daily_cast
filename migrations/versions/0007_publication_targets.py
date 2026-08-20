@@ -65,7 +65,9 @@ def upgrade() -> None:
     op.create_index("ix_publication_targets_platform", "publication_targets", ["platform"])
     op.create_index("ix_publication_targets_remote", "publication_targets", ["remote_id"])
 
-    op.get_bind().execute(sa.text("""
+    op.get_bind().execute(
+        sa.text(
+            """
             INSERT INTO publication_targets (
                 episode_id, platform, status, remote_id, remote_url, last_error,
                 attempt_count, created_at, updated_at
@@ -82,7 +84,9 @@ def upgrade() -> None:
                 updated_at
             FROM publications
             WHERE publisher_type = 'rss'
-            """))
+            """
+        )
+    )
 
 
 def downgrade() -> None:
