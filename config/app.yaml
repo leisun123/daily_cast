@@ -122,19 +122,38 @@ publishing:
   feed_description: A personal AI news podcast.
   language: zh-CN
   author: DailyCast
+  # RSS owns immutable media and remains the source of truth for all targets.
+  rss:
+    enabled: true
+  # Playwright uses this persistent browser profile after you log in manually.
+  # The relative path is rooted under DATA_DIR, never PUBLIC_DIR or source control.
+  netease:
+    enabled: false
+    profile_dir: netease/profile
+    # Set false for the first manual creator-center login, then return to true.
+    headless: true
+    creator_url: https://music.163.com/creatorcenter
+    # Set an existing local cover image when enabling NetEase publication.
+    cover_path: null
+    category: 资讯
+  # Xiaoyuzhou consumes standard RSS; DailyCast does not automate it yet.
+  xiaoyuzhou:
+    enabled: false
 
 # Structured JSON logs are written to the console at this minimum level.
 logging:
   level: INFO
 
-# Optional daily telecom + AI text briefing pushed to a WeCom group bot,
-# independent of the podcast pipeline. Set the bot webhook via
-# DAILYCAST_BRIEFING__WECOM_WEBHOOK_URL in the environment.
+# Daily telecom + AI text briefing pushed to a WeCom group bot. This flow is
+# independent of the podcast pipeline: it collects only sources seeded with a
+# briefing_category, summarizes them with the LLM into two Chinese markdown
+# briefings, and pushes them to WeCom. The bot webhook URL stays in the
+# environment (DAILYCAST_BRIEFING__WECOM_WEBHOOK_URL), never in YAML.
 briefing:
-  enabled: false
+  enabled: true
   sources_config_path: ./config/briefing.sources.yaml
   cron_expression: "30 7 * * *"
   window_hours: 24
   max_items_per_category: 10
   max_evidence_chars_per_article: 800
-  wecom_enabled: false
+  wecom_enabled: true

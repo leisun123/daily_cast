@@ -13,6 +13,9 @@ from fastapi import FastAPI
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from dailycast.briefing.scheduler import BriefingScheduler
+from dailycast.briefing.service import BriefingService
+from dailycast.briefing.wecom import WeComNotifier
 from dailycast.core.config import LLMProviderSettings, Settings, load_settings
 from dailycast.core.logging import configure_logging
 from dailycast.db.models import SourceKind, TaskType, TriggerType
@@ -61,6 +64,8 @@ class AppRuntime:
     executor: InProcessTaskExecutor | None
     submission_service: TaskSubmissionService | None
     scheduler: SchedulerService | None
+    briefing_service: BriefingService | None = None
+    briefing_scheduler: BriefingScheduler | None = None
 
 
 def build_lifespan(
@@ -90,6 +95,8 @@ def build_lifespan(
         executor: InProcessTaskExecutor | None = None
         submission_service: TaskSubmissionService | None = None
         scheduler: SchedulerService | None = None
+        briefing_service: BriefingService | None = None
+        briefing_scheduler: BriefingScheduler | None = None
         llm_client: httpx.AsyncClient | None = None
         if startup_revision_status is not None and startup_revision_status.is_current:
             created_source_count = seed_missing_sources(
@@ -231,6 +238,16 @@ def build_lifespan(
                     "scheduler failed to start; application will continue without ticks"
                 )
                 scheduler = None
+            if settings.briefing.enabled:
+                briefing_service, briefing_scheduler = _build_briefing_runtime(
+                    settings,
+                    session_factory,
+                    collection_service,
+                    article_service,
+                    fetcher,
+                    news_processor,
+                    llm_provider,
+                )
         runtime = AppRuntime(
             settings=settings,
             engine=engine,
@@ -240,12 +257,16 @@ def build_lifespan(
             executor=executor,
             submission_service=submission_service,
             scheduler=scheduler,
+            briefing_service=briefing_service,
+            briefing_scheduler=briefing_scheduler,
         )
         app.state.runtime = runtime
         logger.info("application_started")
         try:
             yield
         finally:
+            if briefing_scheduler is not None:
+                briefing_scheduler.shutdown()
             if scheduler is not None:
                 scheduler.shutdown()
             if executor is not None:
@@ -256,6 +277,57 @@ def build_lifespan(
             logger.info("application_stopped")
 
     return lifespan
+
+
+def _build_briefing_runtime(
+    settings: Settings,
+    session_factory: sessionmaker[Session],
+    collection_service: SourceCollectionService,
+    article_service: ArticleService,
+    fetcher: SafeHttpFetcher,
+    news_processor: NewsProcessor,
+    llm_provider: LLMProvider,
+) -> tuple[BriefingService, BriefingScheduler | None]:
+    """Build the independent briefing flow, reusing the podcast's collectors and LLM."""
+    created_source_count = seed_missing_sources(
+        session_factory,
+        settings.resolve_path(settings.briefing.sources_config_path),
+    )
+    logger.info(
+        "briefing_source_seed_completed", extra={"created_source_count": created_source_count}
+    )
+    notifier: WeComNotifier | None = None
+    if settings.briefing.wecom_enabled:
+        assert settings.briefing.wecom_webhook_url is not None
+        notifier = WeComNotifier(settings.briefing.wecom_webhook_url)
+    briefing_service = BriefingService(
+        session_factory,
+        collection_service,
+        article_service,
+        ContentExtractor(fetcher),
+        news_processor,
+        llm_provider,
+        notifier,
+        window_hours=settings.briefing.window_hours,
+        max_items_per_category=settings.briefing.max_items_per_category,
+        max_evidence_chars_per_article=settings.briefing.max_evidence_chars_per_article,
+        output_dir=settings.data_dir / "work" / "briefings",
+        timezone=settings.app.timezone,
+    )
+    briefing_scheduler = BriefingScheduler(
+        briefing_service.run,
+        cron_expression=settings.briefing.cron_expression,
+        timezone=settings.app.timezone,
+    )
+    try:
+        briefing_scheduler.start()
+    except Exception:
+        # Like the podcast scheduler, a briefing tick failure must not become a startup outage.
+        logger.exception(
+            "briefing scheduler failed to start; application will continue without ticks"
+        )
+        return briefing_service, None
+    return briefing_service, briefing_scheduler
 
 
 def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) -> LLMProvider:

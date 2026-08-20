@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -250,8 +250,18 @@ class SourceCollectionService:
     async def collect_enabled_sources(
         self, window: CollectionWindow
     ) -> CollectionPersistenceResult:
-        """Run each source independently and return the persisted Article IDs."""
-        sources = self._enabled_sources()
+        """Run each enabled source independently and return the persisted Article IDs."""
+        return await self.collect_sources(self._enabled_sources(), window)
+
+    async def collect_sources(
+        self, sources: Sequence[Source], window: CollectionWindow
+    ) -> CollectionPersistenceResult:
+        """Collect the given sources independently and persist their candidates.
+
+        This one per-source loop backs both the podcast pipeline (all enabled
+        sources) and the briefing flow (briefing-tagged sources only), so both
+        paths share identical persistence and failure-isolation semantics.
+        """
         article_ids: list[int] = []
         warning_count = 0
         successful_source_count = 0

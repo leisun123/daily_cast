@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
@@ -83,6 +83,27 @@ class SchedulerSettings(BaseModel):
 
     enabled: bool = False
     cron_expression: str = "0 8 * * *"
+
+
+class BriefingSettings(BaseModel):
+    """Independent daily text-briefing settings; disabled until a deployment opts in."""
+
+    enabled: bool = False
+    sources_config_path: Path = Path("config/briefing.sources.yaml")
+    cron_expression: str = "30 7 * * *"
+    window_hours: int = Field(default=24, ge=1, le=168)
+    max_items_per_category: int = Field(default=10, ge=1, le=20)
+    max_evidence_chars_per_article: int = Field(default=800, ge=1, le=8000)
+    wecom_enabled: bool = False
+    wecom_webhook_url: str | None = None
+
+    @model_validator(mode="after")
+    def require_webhook_url_when_wecom_enabled(self) -> "BriefingSettings":
+        """A WeCom push target without a webhook URL must fail at configuration load."""
+        if self.wecom_enabled and not self.wecom_webhook_url:
+            msg = "briefing.wecom_webhook_url is required when briefing.wecom_enabled=true"
+            raise ValueError(msg)
+        return self
 
 
 class TaskExecutionSettings(BaseModel):
@@ -282,11 +303,17 @@ class Settings(BaseSettings):
         frozen=True,
     )
 
+    # DAILYCAST_CONFIG_PATH points the loader at the YAML file and is consumed before
+    # Settings exists; this field only absorbs the variable so the dotenv and
+    # environment sources do not fail the extra="forbid" validation.
+    config_path: Path | None = None
+
     app: AppSettings = Field(default_factory=AppSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     sources: SourcesSettings = Field(default_factory=SourcesSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
+    briefing: BriefingSettings = Field(default_factory=BriefingSettings)
     task_execution: TaskExecutionSettings = Field(default_factory=TaskExecutionSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     editorial: EditorialSettings = Field(default_factory=EditorialSettings)

@@ -135,13 +135,14 @@ class TaskStepStatus(StrEnum):
 
 
 class LLMOperation(StrEnum):
-    """V1 structured LLM operations eligible for artifact caching."""
+    """Structured LLM operations; briefing generation bypasses artifact caching."""
 
     SCORE_EVENTS = "score_events"
     GENERATE_OUTLINE = "generate_outline"
     GENERATE_SCRIPT = "generate_script"
     GENERATE_METADATA = "generate_metadata"
     REVIEW_SCRIPT = "review_script"
+    GENERATE_BRIEFING = "generate_briefing"
 
 
 class AudioSegmentStatus(StrEnum):

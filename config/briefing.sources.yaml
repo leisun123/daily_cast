@@ -1,0 +1,73 @@
+# Briefing-only source seeds for the daily telecom + AI text briefing pushed to
+# WeCom. Each entry carries `config.briefing_category` ("telecom" | "ai"); RSS
+# collectors ignore that key, so these rows are safe to also exist for the
+# podcast pipeline. Seeding is idempotent: existing database rows stay
+# authoritative.
+#
+# Verified 2026-08 (DailyCast UA):
+# - C114 sub-feeds are gb2312 RSS 2.0; feedparser handles the declared encoding.
+# - qbitai.com/feed returns full RSS with article content.
+# - The 36kr route is a third-party RSSHub mirror: flaky and flash items are
+#   often shorter than processing.min_content_length, so it is a low-priority
+#   fallback only.
+#
+# Excluded on purpose:
+# - chinamobileltd.com/en/global/rss.php returns HTML, not a feed; Unicom /
+#   China Telecom newsrooms answer 404/412; miit.gov.cn answers 403.
+# - news.cctv.com/rss/keji.xml is 404; 36kr official feeds return HTML.
+# - Google News keyword RSS links are JS interstitials (no server redirect, no
+#   extractable body) and require VPN to open - violates the "links must be
+#   reachable without VPN" requirement.
+# - OpenAI / Hugging Face / Google AI blog feeds work technically, but their
+#   links need VPN from mainland China. Re-add only if deploying overseas.
+sources:
+  - id: c114-operators
+    name: C114 电信运营商
+    kind: rss
+    entry_url: https://www.c114.com.cn/rss/rss_news_21.xml
+    priority: 85
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      briefing_category: telecom
+  - id: c114-top-news
+    name: C114 通信要闻
+    kind: rss
+    entry_url: https://www.c114.com.cn/rss/rss_news_17.xml
+    priority: 80
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      briefing_category: telecom
+  - id: c114-equipment
+    name: C114 设备商动态
+    kind: rss
+    entry_url: https://www.c114.com.cn/rss/rss_news_18.xml
+    priority: 70
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      briefing_category: telecom
+  - id: qbitai
+    name: 量子位
+    kind: rss
+    entry_url: https://www.qbitai.com/feed
+    priority: 80
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      briefing_category: ai
+  - id: kr36-newsflashes
+    name: 36氪快讯（RSSHub 镜像）
+    kind: rss
+    entry_url: https://rsshub.rssforever.com/36kr/newsflashes
+    priority: 50
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      briefing_category: ai
