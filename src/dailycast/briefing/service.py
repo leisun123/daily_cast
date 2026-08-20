@@ -218,12 +218,7 @@ class BriefingService:
                 )
                 grouped.setdefault(category, []).append((sort_key, evidence))
         return {
-            category: tuple(
-                evidence
-                for _, evidence in sorted(entries, key=lambda entry: entry[0])[
-                    : self._max_items_per_category
-                ]
-            )
+            category: _interleave_by_source(entries)[: self._max_items_per_category]
             for category, entries in grouped.items()
         }
 
@@ -392,6 +387,28 @@ def _utc_timestamp(value: datetime) -> float:
     """Normalize SQLite-like naive values before ordering articles by recency."""
     aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
     return aware.timestamp()
+
+
+def _interleave_by_source(
+    entries: list[tuple[tuple[int, float, int], BriefingEvidence]],
+) -> tuple[BriefingEvidence, ...]:
+    """Rotate evidence across sources so one feed cannot fill a whole category.
+
+    Entries arrive with a (priority, recency, id) sort key. Sources are ordered
+    by their best entry and then take turns; within a source the ranked order
+    is preserved. A category fed by a single source degrades to plain ranking.
+    """
+    queues: dict[str, list[BriefingEvidence]] = {}
+    for _, evidence in sorted(entries, key=lambda entry: entry[0]):
+        queues.setdefault(evidence.source_name, []).append(evidence)
+    rotation = list(queues.values())
+    picked: list[BriefingEvidence] = []
+    while rotation:
+        for queue in rotation[:]:
+            picked.append(queue.pop(0))
+            if not queue:
+                rotation.remove(queue)
+    return tuple(picked)
 
 
 def _atomic_write(target: Path, content: str) -> None:

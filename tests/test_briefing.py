@@ -13,7 +13,7 @@ import pytest
 from dailycast.briefing.prompt import build_briefing_messages
 from dailycast.briefing.renderer import RENDER_BYTE_BUDGET, render_briefing, truncate_markdown
 from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
-from dailycast.briefing.service import latest_briefing_date
+from dailycast.briefing.service import _interleave_by_source, latest_briefing_date
 from dailycast.briefing.webhook import WebhookNotifier, WebhookPushError
 from dailycast.core.config import BriefingSettings, load_settings
 
@@ -91,7 +91,7 @@ def test_renderer_uses_the_configured_title_and_numbered_list() -> None:
     assert markdown.startswith("# 通信行业日报 8月20日\n")
     assert "概览一句话。" in markdown
     expected_item = (
-        "1. **头条一句话** — 第一句摘要。第二句摘要。 [量子位](https://news.example.test/a)"
+        "**1. 头条一句话**\n" "第一句摘要。第二句摘要。\n" "[量子位](https://news.example.test/a)"
     )
     assert expected_item in markdown
 
@@ -288,3 +288,24 @@ def test_briefing_settings_load_from_yaml(app_config_path: Path, tmp_path: Path)
     assert settings.briefing.webhook_enabled is True
     assert settings.briefing.webhook_format == "generic_json"
     assert settings.briefing.webhook_url == WEBHOOK_URL
+
+
+def test_interleave_by_source_rotates_feeds_instead_of_ranking_one_to_the_top() -> None:
+    """A high-priority feed must share the briefing with lower-priority sources."""
+    entries = [
+        ((-90, -10.0, 1), _evidence(source_url="https://a.example.test/1", source_name="甲源")),
+        ((-90, -9.0, 2), _evidence(source_url="https://a.example.test/2", source_name="甲源")),
+        ((-90, -8.0, 3), _evidence(source_url="https://a.example.test/3", source_name="甲源")),
+        ((-50, -7.0, 4), _evidence(source_url="https://b.example.test/1", source_name="乙源")),
+        ((-50, -6.0, 5), _evidence(source_url="https://c.example.test/1", source_name="丙源")),
+    ]
+
+    picked = _interleave_by_source(entries)
+
+    assert [entry.source_name for entry in picked] == ["甲源", "乙源", "丙源", "甲源", "甲源"]
+    # Within one source the ranked order is preserved.
+    assert [entry.source_url for entry in picked if entry.source_name == "甲源"] == [
+        "https://a.example.test/1",
+        "https://a.example.test/2",
+        "https://a.example.test/3",
+    ]
