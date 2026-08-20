@@ -19,6 +19,7 @@ from dailycast.briefing.service import (
     BriefingService,
     read_briefings_for_date,
 )
+from dailycast.briefing.renderer import RENDER_BYTE_BUDGET
 from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.errors import LLMProviderError
 from dailycast.db.models import LLMOperation, Source, SourceKind
@@ -178,9 +179,28 @@ def _llm_payload(source_url: str, source_name: str) -> dict[str, object]:
             {
                 "headline": "一句话头条",
                 "summary": "第一句摘要。第二句摘要。",
+                "why_it_matters": "这件事会影响团队接下来一周的产品与采购判断。",
                 "source_name": source_name,
                 "source_url": source_url,
             }
+        ],
+    }
+
+
+def _llm_payloads(source_urls: Sequence[str], source_name: str) -> dict[str, object]:
+    """Return one detailed evidence-backed entry for every supplied article URL."""
+    return {
+        "overview": "今天该类目的重要进展集中在网络、算力和智能服务的协同演进。",
+        "items": [
+            {
+                "headline": f"第 {index} 条重要进展",
+                "summary": "相关主体公布最新进展并披露了覆盖范围、业务数据和下一步安排，"
+                "这些信息反映当前项目已从规划进入实际推进阶段。",
+                "why_it_matters": "它会影响行业下一阶段的产品投入与采购判断。",
+                "source_name": source_name,
+                "source_url": source_url,
+            }
+            for index, source_url in enumerate(source_urls, start=1)
         ],
     }
 
@@ -193,6 +213,7 @@ def _build_service(
     llm: LLMProvider,
     notifier: WebhookNotifier | None,
     budget_factory: Callable[[], BudgetController] = BudgetController,
+    briefing_source_ids: frozenset[str] | None = None,
 ) -> BriefingService:
     article_service = ArticleService(factory)
     collection_service = SourceCollectionService(
@@ -212,6 +233,7 @@ def _build_service(
         notifier,
         output_dir=output_dir,
         budget_factory=budget_factory,
+        briefing_source_ids=briefing_source_ids,
     )
 
 
@@ -230,15 +252,23 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
     _seed_source(session_factory, "podcast-source", category=None)
     collector = FakeRSSCollector(
         {
-            "telecom-source": [_candidate("telecom-source", "t1")],
-            "ai-source": [_candidate("ai-source", "a1")],
+            "telecom-source": [
+                _candidate("telecom-source", f"t{index}") for index in range(1, 6)
+            ],
+            "ai-source": [_candidate("ai-source", f"a{index}") for index in range(1, 6)],
             "podcast-source": [_candidate("podcast-source", "p1")],
         }
     )
     llm = FakeBriefingLLM(
         {
-            "通信行业日报": _llm_payload("https://news.example.test/t1", "来源 telecom-source"),
-            "AI 动态日报": _llm_payload("https://news.example.test/a1", "来源 ai-source"),
+            "通信行业日报": _llm_payloads(
+                [f"https://news.example.test/t{index}" for index in range(1, 6)],
+                "来源 telecom-source",
+            ),
+            "AI 动态日报": _llm_payloads(
+                [f"https://news.example.test/a{index}" for index in range(1, 6)],
+                "来源 ai-source",
+            ),
         }
     )
     notifier = RecordingNotifier()
@@ -262,6 +292,41 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
     assert "# 通信行业日报" in briefings["telecom"]
     assert "https://news.example.test/t1" in briefings["telecom"]
     assert "https://news.example.test/a1" in briefings["ai"]
+    assert notifier.pushed[0].startswith("# 通信行业日报")
+    assert notifier.pushed[1].startswith("# AI 动态日报")
+    assert all(len(markdown.encode("utf-8")) <= RENDER_BYTE_BUDGET for markdown in notifier.pushed)
+
+
+def test_briefing_run_ignores_historical_sources_absent_from_current_policy(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Removing a source from the current YAML policy takes effect without mutating its row."""
+    _seed_source(session_factory, "curated-ai", category="ai")
+    _seed_source(session_factory, "retired-general-feed", category="ai")
+    collector = FakeRSSCollector(
+        {
+            "curated-ai": [_candidate("curated-ai", "curated")],
+            "retired-general-feed": [_candidate("retired-general-feed", "retired")],
+        }
+    )
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=FakeBriefingLLM(
+            {"AI 动态日报": _llm_payload("https://news.example.test/curated", "精选来源")}
+        ),
+        notifier=None,
+        briefing_source_ids=frozenset({"curated-ai"}),
+    )
+
+    report = asyncio.run(service.run())
+
+    assert collector.collected_source_ids == ["curated-ai"]
+    assert {entry.category: entry.status for entry in report.categories} == {
+        "telecom": "skipped",
+        "ai": "generated",
+    }
 
 
 def test_briefing_run_isolates_one_category_failure(

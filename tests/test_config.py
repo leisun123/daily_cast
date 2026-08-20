@@ -6,6 +6,7 @@ import pytest
 
 from dailycast.core.config import (
     AppSettings,
+    BriefingSettings,
     EditorialSettings,
     LLMSettings,
     PublishingSettings,
@@ -297,6 +298,30 @@ def test_quality_gate_and_auto_publish_remain_strict_by_model_default() -> None:
 def test_default_llm_model_is_gpt_5_6_terra() -> None:
     """New installations use the production model verified against the Responses endpoint."""
     assert LLMSettings().model == "gpt-5.6-terra"
+
+
+def test_briefing_defaults_to_five_items_per_category() -> None:
+    """Detailed prose reserves enough WeCom space by default."""
+    assert BriefingSettings().max_items_per_category == 5
+
+
+def test_briefing_rejects_more_than_five_items_per_category() -> None:
+    """One category must never crowd out the detail in its own message."""
+    with pytest.raises(ValueError, match="max_items_per_category"):
+        BriefingSettings(max_items_per_category=6)
+
+
+def test_web_research_defaults_to_disabled_with_bounded_discovery(
+    app_config_path: Path,
+) -> None:
+    """Local DailyCast never spends on web discovery until an operator opts in."""
+    settings = load_settings(config_path=app_config_path)
+
+    assert settings.web_research.enabled is False
+    assert settings.web_research.max_candidates_per_source == 12
+    assert settings.web_research.max_search_calls_per_source == 1
+    assert settings.web_research.search_context_size == "medium"
+    assert settings.web_research.max_article_chars == 12_000
 
 
 def test_application_timezone_must_be_an_iana_timezone() -> None:

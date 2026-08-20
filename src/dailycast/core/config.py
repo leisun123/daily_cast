@@ -97,8 +97,12 @@ class BriefingSettings(BaseModel):
     sources_config_path: Path = Path("config/briefing.sources.yaml")
     cron_expression: str = "30 8 * * mon-fri"
     window_hours: int = Field(default=24, ge=1, le=168)
-    max_items_per_category: int = Field(default=10, ge=1, le=20)
+    max_items_per_category: int = Field(default=5, ge=1, le=5)
     max_evidence_chars_per_article: int = Field(default=800, ge=1, le=8000)
+    # `rsshub://` source routes are resolved through this deployment-controlled
+    # HTTP(S) endpoint. Keep it unset unless the deployment has a known-good
+    # RSSHub instance; regular RSS sources do not depend on it.
+    rsshub_base_url: str | None = None
     webhook_enabled: bool = False
     webhook_url: str | None = None
     webhook_format: WebhookFormat = "wecom_markdown"
@@ -110,6 +114,16 @@ class BriefingSettings(BaseModel):
             msg = "briefing.webhook_url is required when briefing.webhook_enabled=true"
             raise ValueError(msg)
         return self
+
+
+class WebResearchSettings(BaseModel):
+    """Bound native web-search discovery for briefing-only sources."""
+
+    enabled: bool = False
+    max_candidates_per_source: int = Field(default=12, ge=1, le=20)
+    max_search_calls_per_source: int = Field(default=1, ge=1, le=1)
+    search_context_size: Literal["low", "medium", "high"] = "medium"
+    max_article_chars: int = Field(default=12_000, ge=1_000, le=50_000)
 
 
 class TaskExecutionSettings(BaseModel):
@@ -361,6 +375,7 @@ class Settings(BaseSettings):
     sources: SourcesSettings = Field(default_factory=SourcesSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     briefing: BriefingSettings = Field(default_factory=BriefingSettings)
+    web_research: WebResearchSettings = Field(default_factory=WebResearchSettings)
     task_execution: TaskExecutionSettings = Field(default_factory=TaskExecutionSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     editorial: EditorialSettings = Field(default_factory=EditorialSettings)
