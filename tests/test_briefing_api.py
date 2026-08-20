@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from editorial_test_support import upgraded_session_factory
@@ -72,13 +71,13 @@ def test_briefing_generate_returns_409_while_a_run_is_in_progress(
     with TestClient(create_app(config_path=app_config_path)) as client:
         runtime = client.app.state.runtime
         assert runtime.briefing_service is not None
-        # Hold the run lock from the test side to make the overlap deterministic.
-        lock = runtime.briefing_service._run_lock
-        asyncio.run(lock.acquire())
+        # Reserve the single run slot from the test side to make the overlap deterministic.
+        service = runtime.briefing_service
+        service._try_reserve_run()
         try:
             response = client.post("/briefing/generate")
         finally:
-            lock.release()
+            service._run_reserved = False
 
     assert response.status_code == 409
     assert response.json() == {"detail": "briefing run already in progress"}

@@ -20,11 +20,13 @@ from dailycast.briefing.service import (
     read_briefings_for_date,
 )
 from dailycast.briefing.wecom import WeComNotifier
+from dailycast.core.errors import LLMProviderError
 from dailycast.db.models import LLMOperation, Source, SourceKind
 from dailycast.db.repositories import SourceRepository
 from dailycast.db.transactions import UnitOfWork
-from dailycast.llm.budget import BudgetController
-from dailycast.llm.contracts import LLMMessage, LLMUsage, StructuredResult
+from dailycast.llm.budget import BudgetController, estimate_message_input_tokens
+from dailycast.llm.contracts import LLMMessage, LLMProvider, LLMUsage, StructuredResult
+from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.news.service import NewsProcessor
 from dailycast.news.types import ProcessingPolicy
 from dailycast.sources.contracts import (
@@ -188,7 +190,7 @@ def _build_service(
     output_dir: Path,
     *,
     collector: FakeRSSCollector,
-    llm: FakeBriefingLLM,
+    llm: LLMProvider,
     notifier: WeComNotifier | None,
     budget_factory: Callable[[], BudgetController] = BudgetController,
 ) -> BriefingService:
@@ -489,3 +491,210 @@ def test_llm_budget_reservations_accumulate_per_run(
     assert budgets[0].call_count == 2
     assert budgets[0].input_tokens > 0
     assert budgets[0].output_tokens == 2 * llm.max_output_tokens
+
+
+class StubProvider:
+    """One configurable provider leg for failover budget tests."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        max_output_tokens: int,
+        payload: dict[str, object] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.provider_name = name
+        self.model = f"{name}-model"
+        self.max_output_tokens = max_output_tokens
+        self._payload = payload
+        self._error = error
+        self.calls = 0
+        self.attempt_messages: list[Sequence[LLMMessage]] = []
+
+    def generation_config_hash(self, model_options: Mapping[str, object]) -> str:
+        """Return a stable per-leg identity for the failover contract."""
+        del model_options
+        return f"{self.provider_name}-config"
+
+    async def generate_structured(
+        self,
+        operation: LLMOperation,
+        messages: Sequence[LLMMessage],
+        response_schema: type[BaseModel],
+        model_options: Mapping[str, object],
+    ) -> StructuredResult:
+        """Record the attempt, then fail or succeed as configured."""
+        del operation, response_schema, model_options
+        self.calls += 1
+        self.attempt_messages.append(messages)
+        if self._error is not None:
+            raise self._error
+        assert self._payload is not None
+        return StructuredResult(
+            content=self._payload,  # type: ignore[arg-type]
+            model=self.model,
+            usage=LLMUsage(input_tokens=5, output_tokens=5),
+            request_id=f"{self.provider_name}-1",
+        )
+
+
+def _telecom_only_setup(session_factory: sessionmaker[Session]) -> FakeRSSCollector:
+    """Seed one telecom source so exactly one category reaches the LLM."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    return FakeRSSCollector({"telecom-source": [_candidate("telecom-source", "t1")]})
+
+
+def _telecom_payload() -> dict[str, object]:
+    return _llm_payload("https://news.example.test/t1", "来源 telecom-source")
+
+
+def _recording_budget_factory(
+    budgets: list[BudgetController], **limits: int
+) -> Callable[[], BudgetController]:
+    """Capture each run's budget for reservation assertions."""
+
+    def factory() -> BudgetController:
+        budget = BudgetController(**limits)
+        budgets.append(budget)
+        return budget
+
+    return factory
+
+
+def test_failover_fallback_attempt_is_not_made_when_budget_is_exhausted(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """With one call left, a failed primary must not trigger the fallback attempt."""
+    collector = _telecom_only_setup(session_factory)
+    primary = StubProvider(name="primary", max_output_tokens=100, error=LLMProviderError())
+    fallback = StubProvider(name="fallback", max_output_tokens=200, payload=_telecom_payload())
+    budgets: list[BudgetController] = []
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=FailoverLLMProvider(primary, fallback),
+        notifier=None,
+        budget_factory=_recording_budget_factory(budgets, max_calls=1),
+    )
+
+    report = asyncio.run(service.run())
+
+    by_category = {entry.category: entry for entry in report.categories}
+    assert by_category["telecom"].status == "failed"
+    assert "budget" in (by_category["telecom"].error or "")
+    assert primary.calls == 1
+    assert fallback.calls == 0
+    assert budgets[0].call_count == 1
+
+
+def test_failover_primary_success_reserves_exactly_once(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A successful primary costs one reservation, so max_calls=1 still generates."""
+    collector = _telecom_only_setup(session_factory)
+    primary = StubProvider(name="primary", max_output_tokens=100, payload=_telecom_payload())
+    fallback = StubProvider(name="fallback", max_output_tokens=200, payload=_telecom_payload())
+    budgets: list[BudgetController] = []
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=FailoverLLMProvider(primary, fallback),
+        notifier=None,
+        budget_factory=_recording_budget_factory(budgets, max_calls=1),
+    )
+
+    report = asyncio.run(service.run())
+
+    by_category = {entry.category: entry for entry in report.categories}
+    assert by_category["telecom"].status == "generated"
+    assert primary.calls == 1
+    assert fallback.calls == 0
+    assert budgets[0].call_count == 1
+    assert budgets[0].output_tokens == 100
+
+
+def test_failover_reserves_each_attempt_with_its_own_output_allowance(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A failed primary plus a successful fallback costs two distinct reservations."""
+    collector = _telecom_only_setup(session_factory)
+    primary = StubProvider(name="primary", max_output_tokens=100, error=LLMProviderError())
+    fallback = StubProvider(name="fallback", max_output_tokens=200, payload=_telecom_payload())
+    budgets: list[BudgetController] = []
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=FailoverLLMProvider(primary, fallback),
+        notifier=None,
+        budget_factory=_recording_budget_factory(budgets, max_calls=2),
+    )
+
+    report = asyncio.run(service.run())
+
+    by_category = {entry.category: entry for entry in report.categories}
+    assert by_category["telecom"].status == "generated"
+    assert primary.calls == 1
+    assert fallback.calls == 1
+    assert budgets[0].call_count == 2
+    assert budgets[0].output_tokens == 100 + 200
+    expected_input = sum(
+        estimate_message_input_tokens(messages)
+        for messages in primary.attempt_messages + fallback.attempt_messages
+    )
+    assert budgets[0].input_tokens == expected_input
+
+
+def test_failover_double_failure_still_reserves_both_attempts(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Two failed attempts both consume budget before the category is marked failed."""
+    collector = _telecom_only_setup(session_factory)
+    primary = StubProvider(name="primary", max_output_tokens=100, error=LLMProviderError())
+    fallback = StubProvider(name="fallback", max_output_tokens=200, error=LLMProviderError())
+    budgets: list[BudgetController] = []
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=FailoverLLMProvider(primary, fallback),
+        notifier=None,
+        budget_factory=_recording_budget_factory(budgets, max_calls=2),
+    )
+
+    report = asyncio.run(service.run())
+
+    by_category = {entry.category: entry for entry in report.categories}
+    assert by_category["telecom"].status == "failed"
+    assert "budget" not in (by_category["telecom"].error or "")
+    assert primary.calls == 1
+    assert fallback.calls == 1
+    assert budgets[0].call_count == 2
+
+
+def test_create_run_task_reserves_the_slot_within_one_event_loop_tick(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A second trigger in the same tick fails before the first task has even started."""
+    collector, llm = _two_category_setup(session_factory)
+    service = _build_service(
+        session_factory, tmp_path / "briefings", collector=collector, llm=llm, notifier=None
+    )
+
+    async def scenario() -> None:
+        first = service.create_run_task()
+        with pytest.raises(BriefingRunInProgressError, match="already in progress"):
+            service.create_run_task()
+        with pytest.raises(BriefingRunInProgressError, match="already in progress"):
+            await service.run()
+        report = await first
+        assert all(entry.status == "generated" for entry in report.categories)
+        # The slot is released once the first run finishes, so another run may start.
+        second_report = await service.run()
+        assert all(entry.status == "skipped" for entry in second_report.categories)
+
+    asyncio.run(scenario())
+    assert service.run_in_progress is False

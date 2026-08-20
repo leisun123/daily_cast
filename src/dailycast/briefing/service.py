@@ -21,8 +21,9 @@ from dailycast.core.time import Clock
 from dailycast.db.models import LLMOperation, Source
 from dailycast.db.repositories import ArticleRepository, SourceRepository
 from dailycast.db.transactions import UnitOfWork
-from dailycast.llm.budget import BudgetController, estimate_message_input_tokens
+from dailycast.llm.budget import BudgetController, BudgetReservingLLMProvider
 from dailycast.llm.contracts import LLMProvider
+from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.news.service import NewsProcessor
 from dailycast.sources.contracts import CollectionWindow
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy
@@ -103,31 +104,51 @@ class BriefingService:
         self._budget_factory = budget_factory
         self._timezone = ZoneInfo(timezone)
         self._clock = clock or Clock()
-        self._run_lock = asyncio.Lock()
+        self._run_reserved = False
 
     @property
     def run_in_progress(self) -> bool:
-        """Report whether a briefing run currently holds the run lock."""
-        return self._run_lock.locked()
+        """Report whether the single briefing run slot is currently reserved."""
+        return self._run_reserved
+
+    def _try_reserve_run(self) -> None:
+        """Claim the one run slot synchronously, before any coroutine can interleave.
+
+        A boolean flag is enough here because every caller runs on the same event
+        loop: between the check and the assignment there is no await, so two
+        callers in one loop tick can never both reserve the slot.
+        """
+        if self._run_reserved:
+            raise BriefingRunInProgressError("briefing run already in progress")
+        self._run_reserved = True
 
     def create_run_task(self, *, force: bool = False) -> asyncio.Task[BriefingRunReport]:
         """Start one background run, failing fast when another run is in progress."""
-        if self._run_lock.locked():
-            raise BriefingRunInProgressError("briefing run already in progress")
-        return asyncio.create_task(self.run(force=force))
+        self._try_reserve_run()
+        try:
+            return asyncio.create_task(self._run_reserved_body(force=force))
+        except Exception:
+            self._run_reserved = False
+            raise
 
     async def run(self, *, force: bool = False) -> BriefingRunReport:
         """Run at most one briefing at a time across manual and scheduled triggers."""
-        if self._run_lock.locked():
-            raise BriefingRunInProgressError("briefing run already in progress")
-        async with self._run_lock:
+        self._try_reserve_run()
+        return await self._run_reserved_body(force=force)
+
+    async def _run_reserved_body(self, *, force: bool) -> BriefingRunReport:
+        """Execute one reserved run and always release the slot afterwards."""
+        try:
             return await self._run_once(force=force)
+        finally:
+            self._run_reserved = False
 
     async def _run_once(self, *, force: bool) -> BriefingRunReport:
         """Collect, generate, persist, and optionally push every configured category."""
         now = self._clock.now()
         briefing_date = now.astimezone(self._timezone).date()
         budget = self._budget_factory()
+        provider = _budgeted_provider(self._llm_provider, budget)
         sources = self._briefing_sources()
         if not sources:
             logger.warning("briefing found no enabled sources tagged with briefing_category")
@@ -143,7 +164,7 @@ class BriefingService:
         for category in CATEGORY_TITLES:
             evidence = evidence_by_category.get(category, ())
             reports.append(
-                await self._run_category(category, briefing_date, evidence, budget, force=force)
+                await self._run_category(category, briefing_date, evidence, provider, force=force)
             )
         return BriefingRunReport(date=briefing_date.isoformat(), categories=tuple(reports))
 
@@ -210,7 +231,7 @@ class BriefingService:
         category: str,
         briefing_date: date,
         evidence: tuple[BriefingEvidence, ...],
-        budget: BudgetController,
+        provider: LLMProvider,
         *,
         force: bool,
     ) -> BriefingCategoryReport:
@@ -233,7 +254,7 @@ class BriefingService:
                 category=category, status="skipped", reason=NO_ELIGIBLE_ARTICLES
             )
         try:
-            markdown = await self._generate_markdown(category, briefing_date, evidence, budget)
+            markdown = await self._generate_markdown(category, briefing_date, evidence, provider)
             file_path = self._write_markdown(briefing_date, category, markdown)
         except Exception as error:
             logger.exception("briefing category generation failed", extra={"category": category})
@@ -261,15 +282,11 @@ class BriefingService:
         category: str,
         briefing_date: date,
         evidence: tuple[BriefingEvidence, ...],
-        budget: BudgetController,
+        provider: LLMProvider,
     ) -> str:
         """Ask the LLM for prose, then render links deterministically from evidence."""
         messages = build_briefing_messages(CATEGORY_TITLES[category], evidence)
-        budget.reserve(
-            input_tokens=estimate_message_input_tokens(messages),
-            output_tokens=self._llm_provider.max_output_tokens,
-        )
-        structured = await self._llm_provider.generate_structured(
+        structured = await provider.generate_structured(
             operation=LLMOperation.GENERATE_BRIEFING,
             messages=messages,
             response_schema=BriefingResult,
@@ -310,6 +327,22 @@ def read_briefings_for_date(output_dir: Path, briefing_date: date) -> dict[str, 
         if path.is_file():
             briefings[category] = path.read_text(encoding="utf-8")
     return briefings
+
+
+def _budgeted_provider(provider: LLMProvider, budget: BudgetController) -> LLMProvider:
+    """Reserve budget per real provider attempt for one briefing run.
+
+    A failover chain turns one logical call into up to two physical attempts,
+    so each leg is wrapped separately and reassembled: the primary and the
+    fallback each reserve with their own output-token allowance right before
+    they are actually invoked.
+    """
+    if isinstance(provider, FailoverLLMProvider):
+        return FailoverLLMProvider(
+            BudgetReservingLLMProvider(provider.primary, budget),
+            BudgetReservingLLMProvider(provider.fallback, budget),
+        )
+    return BudgetReservingLLMProvider(provider, budget)
 
 
 def _utc_timestamp(value: datetime) -> float:
