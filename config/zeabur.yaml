@@ -34,13 +34,14 @@ llm:
 editorial:
   enforce_quality_gate: false
 
-# The daily telecom + AI text briefing runs at 07:30 Asia/Shanghai and pushes
-# markdown to the configured webhook (WeCom group bot by default). The webhook
-# URL is a Zeabur password variable; the service refuses to start without it.
+# The telecom + AI text briefing runs at 08:30 Asia/Shanghai on workdays and
+# pushes markdown to the configured webhook (WeCom group bot by default). The
+# webhook URL is a Zeabur password variable; the service refuses to start
+# without it.
 briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
-  cron_expression: "30 7 * * *"
+  cron_expression: "30 8 * * mon-fri"
   webhook_enabled: true
   webhook_format: wecom_markdown
 

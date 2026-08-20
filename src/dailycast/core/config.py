@@ -95,7 +95,7 @@ class BriefingSettings(BaseModel):
 
     enabled: bool = False
     sources_config_path: Path = Path("config/briefing.sources.yaml")
-    cron_expression: str = "30 7 * * *"
+    cron_expression: str = "30 8 * * mon-fri"
     window_hours: int = Field(default=24, ge=1, le=168)
     max_items_per_category: int = Field(default=10, ge=1, le=20)
     max_evidence_chars_per_article: int = Field(default=800, ge=1, le=8000)

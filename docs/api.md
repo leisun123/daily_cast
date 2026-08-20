@@ -689,7 +689,7 @@ HTMX 表单遇到业务错误时可返回相同错误码并渲染局部错误片
 
 启用方式：
 
-- YAML 增加 `briefing:` 段：`enabled: true`、`sources_config_path`（简报源种子，默认 `config/briefing.sources.yaml`）、`cron_expression`（默认 `30 7 * * *`，应用时区）、`window_hours`、`webhook_enabled`、`webhook_format`（`wecom_markdown`（默认）或 `generic_json`）。
+- YAML 增加 `briefing:` 段：`enabled: true`、`sources_config_path`（简报源种子，默认 `config/briefing.sources.yaml`）、`cron_expression`（默认 `30 8 * * mon-fri`，即工作日 08:30，应用时区）、`window_hours`、`webhook_enabled`、`webhook_format`（`wecom_markdown`（默认）或 `generic_json`）。
 - webhook 凭据只从环境变量注入：`DAILYCAST_BRIEFING__WEBHOOK_URL`；`webhook_enabled=true` 时必填，缺失则配置加载失败。
 - `config/app.yaml` 为启用示例（配合 `.env` 的 `DAILYCAST_CONFIG_PATH=config/app.yaml`）；默认 `config/app.example.yaml` 中 `briefing.enabled=false`，功能完全关闭。
 
@@ -700,6 +700,7 @@ HTMX 表单遇到业务错误时可返回相同错误码并渲染局部错误片
 - 返回：`202`，`{"status":"accepted"}`；实际生成在后台任务中执行。
 - 幂等语义：同一应用时区日期内，每个类目完成（生成成功且推送已发送或未启用）后写入 `data/work/briefings/YYYY-MM-DD-{category}.done` 标记；非 force 的重复触发对已完成类目直接跳过（report 中 `status=skipped`、`reason=already_completed`），不重复调用 LLM、不重复推送。推送失败不写标记，下次运行自动补推。全进程同时只允许一个简报 run。
 - 常见错误：`409 {"detail":"briefing is not enabled"}`（功能未启用）；`409 {"detail":"briefing run already in progress"}`（已有运行中的简报任务）。
+- 公开部署（`app.public_only=true`，如 Zeabur）：需携带 `Authorization: Bearer <DAILYCAST_APP__MANUAL_TRIGGER_TOKEN>`（未配置 token 返回 `404`，token 错误返回 `401`）；本地开发无需。
 - 幂等键：不需要；按日按类目完成标记 + 单运行互斥提供等效保护。
 
 ### 13.2 手动测试推送通道
@@ -729,6 +730,7 @@ HTMX 表单遇到业务错误时可返回相同错误码并渲染局部错误片
 
 - `date` 为最近一个已落盘简报的业务日期；`briefings` 只包含该日已落盘的类目 markdown。当日简报尚未生成时（例如午夜后、`cron_expression` 触发前），返回最近一个有简报的日期，而不是 404。
 - 常见错误：`404`（从未生成过任何简报）。
+- 公开部署：同 13.1/13.2，需 Bearer token。
 - 幂等键：不需要。
 
 ## 14. 分发目标手动恢复（Distribution resume，已实现）

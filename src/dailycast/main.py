@@ -214,8 +214,18 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         )
 
     @app.post("/briefing/generate", status_code=202, tags=["briefing"])
-    async def generate_briefing(runtime: RuntimeDependency, force: bool = False) -> JSONResponse:
-        """Trigger one manual briefing run in the background without blocking the request."""
+    async def generate_briefing(
+        runtime: RuntimeDependency,
+        force: bool = False,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    ) -> JSONResponse:
+        """Trigger one manual briefing run in the background without blocking the request.
+
+        On a public_only deployment the route requires the same bearer token as
+        the manual generate trigger; locally it stays open.
+        """
+        if runtime.settings.app.public_only:
+            _require_manual_trigger_token(runtime, authorization)
         _require_ready(runtime)
         if runtime.briefing_service is None:
             raise HTTPException(status_code=409, detail="briefing is not enabled")
@@ -254,8 +264,16 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         return JSONResponse(content={"status": push_status})
 
     @app.get("/briefing/latest", tags=["briefing"])
-    async def latest_briefing(runtime: RuntimeDependency) -> dict[str, object]:
-        """Return the most recent persisted briefing markdown for local acceptance checks."""
+    async def latest_briefing(
+        runtime: RuntimeDependency,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    ) -> dict[str, object]:
+        """Return the most recent persisted briefing markdown for acceptance checks.
+
+        Token-guarded on public_only deployments like the other briefing routes.
+        """
+        if runtime.settings.app.public_only:
+            _require_manual_trigger_token(runtime, authorization)
         _require_ready(runtime)
         briefings_dir = runtime.settings.data_dir / "work" / "briefings"
         briefing_date = latest_briefing_date(briefings_dir)
@@ -413,7 +431,9 @@ def _is_public_deployment_path(path: str) -> bool:
         "/feed.xml",
         "/cover.png",
         PUBLIC_MANUAL_GENERATE_PATH,
+        "/briefing/generate",
         "/briefing/test-push",
+        "/briefing/latest",
     } or path.startswith("/media/episodes/")
 
 
