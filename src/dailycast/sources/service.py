@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -250,8 +250,18 @@ class SourceCollectionService:
     async def collect_enabled_sources(
         self, window: CollectionWindow
     ) -> CollectionPersistenceResult:
-        """Run each source independently and return the persisted Article IDs."""
-        sources = self._enabled_sources()
+        """Run each enabled source independently and return the persisted Article IDs."""
+        return await self.collect_sources(self._enabled_sources(), window)
+
+    async def collect_sources(
+        self, sources: Sequence[Source], window: CollectionWindow
+    ) -> CollectionPersistenceResult:
+        """Collect the given sources independently and persist their candidates.
+
+        This one per-source loop backs both the podcast pipeline (all enabled
+        sources) and the briefing flow (briefing-tagged sources only), so both
+        paths share identical persistence and failure-isolation semantics.
+        """
         article_ids: list[int] = []
         warning_count = 0
         successful_source_count = 0
@@ -291,11 +301,18 @@ class SourceCollectionService:
         return await collector.collect(source, window)
 
     def _enabled_sources(self) -> tuple[Source, ...]:
-        """Read the current database truth for enabled sources without retaining the Session."""
+        """Read the current database truth for enabled sources without retaining the Session.
+
+        Sources carrying a ``briefing_category`` tag in their config belong to the
+        briefing-only pool: the podcast pipeline never collects them by default, and
+        the briefing flow selects them explicitly through the same tag.
+        """
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             return tuple(
-                source for source in SourceRepository(unit.session).list() if source.enabled
+                source
+                for source in SourceRepository(unit.session).list()
+                if source.enabled and briefing_category_for_source(source) is None
             )
 
     def _record_source_success(self, source_id: str) -> None:
@@ -324,6 +341,24 @@ class SourceCollectionService:
                     last_error_code=error.code,
                     last_error_summary=error.summary[:1000],
                 )
+
+
+def briefing_category_for_source(source: Source) -> str | None:
+    """Return the briefing-pool tag without trusting arbitrary config JSON shapes.
+
+    This is the single place that parses the ``briefing_category`` config key, so the
+    podcast exclusion rule and the briefing selection rule can never drift apart.
+    """
+    try:
+        config = json.loads(source.config_json)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    category = config.get("briefing_category")
+    if isinstance(category, str) and category:
+        return category
+    return None
 
 
 def normalize_url(url: str) -> str:

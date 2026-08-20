@@ -1,5 +1,6 @@
 """Sprint 0 FastAPI application: startup infrastructure and health endpoints only."""
 
+import asyncio
 import json
 import logging
 from collections.abc import Sequence
@@ -7,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -14,6 +16,11 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
+from dailycast.briefing.service import (
+    BriefingRunInProgressError,
+    BriefingRunReport,
+    read_briefings_for_date,
+)
 from dailycast.core.errors import DailyCastError, InfrastructureError
 from dailycast.core.identifiers import UUIDGenerator
 from dailycast.core.lifespan import AppRuntime, build_daily_generation_command, build_lifespan
@@ -182,6 +189,33 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
             },
         )
 
+    @app.post("/briefing/generate", status_code=202, tags=["briefing"])
+    async def generate_briefing(runtime: RuntimeDependency, force: bool = False) -> JSONResponse:
+        """Trigger one manual briefing run in the background without blocking the request."""
+        _require_ready(runtime)
+        if runtime.briefing_service is None:
+            raise HTTPException(status_code=409, detail="briefing is not enabled")
+        try:
+            task = runtime.briefing_service.create_run_task(force=force)
+        except BriefingRunInProgressError:
+            raise HTTPException(
+                status_code=409, detail="briefing run already in progress"
+            ) from None
+        task.add_done_callback(_log_briefing_task_result)
+        return JSONResponse(status_code=202, content={"status": "accepted"})
+
+    @app.get("/briefing/latest", tags=["briefing"])
+    async def latest_briefing(runtime: RuntimeDependency) -> dict[str, object]:
+        """Return today's persisted briefing markdown for local acceptance checks."""
+        _require_ready(runtime)
+        briefing_date = datetime.now(ZoneInfo(runtime.settings.app.timezone)).date()
+        briefings = read_briefings_for_date(
+            runtime.settings.data_dir / "work" / "briefings", briefing_date
+        )
+        if not briefings:
+            raise HTTPException(status_code=404, detail="no briefing was generated today")
+        return {"date": briefing_date.isoformat(), "briefings": briefings}
+
     @app.get("/healthz", tags=["system"])
     async def healthz() -> dict[str, str]:
         """Report process liveness without checking external dependencies."""
@@ -250,6 +284,15 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
 
 
 app = create_app()
+
+
+def _log_briefing_task_result(task: asyncio.Task[BriefingRunReport]) -> None:
+    """Surface a failed background briefing run instead of losing the exception."""
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("manual briefing run failed: %s", error)
 
 
 def _require_ready(runtime: AppRuntime) -> None:

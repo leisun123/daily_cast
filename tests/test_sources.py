@@ -44,7 +44,7 @@ from dailycast.pipeline.contracts import TaskCommand
 from dailycast.pipeline.executor import InProcessTaskExecutor
 from dailycast.pipeline.orchestrator import PipelineOrchestrator, build_collection_pipeline
 from dailycast.pipeline.submission import TaskSubmissionService
-from dailycast.sources.contracts import ArticleCandidate, CollectionWindow
+from dailycast.sources.contracts import ArticleCandidate, CollectionResult, CollectionWindow
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy, SafeHttpFetcher
 from dailycast.sources.html_list import HTMLListCollector
 from dailycast.sources.rss import RSSCollector
@@ -726,3 +726,49 @@ def test_collection_pipeline_persists_articles_and_continues_after_one_extractio
         )
 
     asyncio.run(scenario())
+
+
+class RecordingCollector:
+    """Record which sources the collection service asks to collect."""
+
+    def __init__(self) -> None:
+        self.collected_source_ids: list[str] = []
+
+    async def collect(self, source: Source, window: CollectionWindow) -> CollectionResult:
+        """Return no candidates; only the collected source identity matters here."""
+        del window
+        self.collected_source_ids.append(source.id)
+        return CollectionResult(source_id=source.id)
+
+
+def test_collect_enabled_sources_excludes_briefing_tagged_sources(app_config_path: Path) -> None:
+    """Briefing-only sources stay out of the podcast collection pool even when enabled."""
+    engine, factory = upgraded_factory(app_config_path)
+    try:
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            SourceRepository(unit.session).create(**source_values())
+            SourceRepository(unit.session).create(
+                **{
+                    **source_values(),
+                    "id": "briefing-only-rss",
+                    "entry_url": "https://briefing.example.test/rss",
+                    "normalized_entry_url": "https://briefing.example.test/rss",
+                    "config_json": json.dumps({"briefing_category": "ai"}),
+                }
+            )
+        collector = RecordingCollector()
+        collection_service = SourceCollectionService(
+            factory, {SourceKind.RSS: collector}, ArticleService(factory)
+        )
+        window = CollectionWindow(
+            start=datetime(2026, 8, 19, tzinfo=UTC),
+            end=datetime(2026, 8, 20, tzinfo=UTC),
+        )
+
+        result = asyncio.run(collection_service.collect_enabled_sources(window))
+
+        assert collector.collected_source_ids == ["hacker-news-rss"]
+        assert result.source_count == 1
+    finally:
+        engine.dispose()
