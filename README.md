@@ -155,6 +155,16 @@ uses `daily` only if that edition does not exist, otherwise it creates `daily-2`
 so on. Because production has `publishing.auto_publish=true`, each successful manual task
 generates and publishes its own immutable episode.
 
+The Zeabur config also enables the daily telecom + AI text briefing (07:30 Asia/Shanghai).
+Create the Zeabur password variable `DAILYCAST_BRIEFING__WEBHOOK_URL` with a WeCom group-bot
+webhook (or any JSON webhook); the service refuses to start without it because briefing pushes
+are enabled. To verify the channel from outside, reuse the same bearer token:
+
+```bash
+curl --fail-with-body -X POST https://your-domain/briefing/test-push \
+  -H 'Authorization: Bearer your-secret-token'
+```
+
 DailyCast reads its ordered LLM configuration from exactly eight environment variables:
 `DAILYCAST_LLM__PROVIDER`, `DAILYCAST_LLM__BASE_URL`, `DAILYCAST_LLM__MODEL`,
 `DAILYCAST_LLM__API_KEY`, plus the corresponding four

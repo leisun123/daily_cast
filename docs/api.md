@@ -708,6 +708,7 @@ HTMX 表单遇到业务错误时可返回相同错误码并渲染局部错误片
 - 参数：无。
 - 返回：`200`，`{"status":"sent"}`。接口**同步**发送一条固定的测试 markdown（标题「DailyCast 简报推送测试」，含触发时间与已配置类目）到当前配置的 webhook，用于在不触发完整简报运行（不采集、不调 LLM）的情况下调试推送通道；在目标群里看到这条消息即代表通道可用。
 - 常见错误：`409 {"detail":"briefing is not enabled"}`（简报功能未启用）；`409 {"detail":"briefing webhook is not enabled"}`（简报启用但未配置 `webhook_enabled=true`）；`502 {"detail":"webhook push failed: ..."}`（webhook 不可达或拒绝消息，错误信息含 HTTP 状态码 / `errcode` 等，重试一次后仍失败才返回）。
+- 公开部署（`app.public_only=true`，如 Zeabur）：该路径在公开白名单内，但必须携带与手动生成触发器相同的 Bearer token：`Authorization: Bearer <DAILYCAST_APP__MANUAL_TRIGGER_TOKEN>`。未配置 token 时返回 `404`，token 错误返回 `401`；本地开发（非 public_only）无需 token。
 - 幂等键：不需要；仅用于调试，无落盘副作用。
 
 ### 13.3 读取最近一期简报

@@ -229,12 +229,19 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         return JSONResponse(status_code=202, content={"status": "accepted"})
 
     @app.post("/briefing/test-push", tags=["briefing"])
-    async def test_briefing_push(runtime: RuntimeDependency) -> JSONResponse:
+    async def test_briefing_push(
+        runtime: RuntimeDependency,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    ) -> JSONResponse:
         """Push one fixed test markdown through the configured webhook, synchronously.
 
         Meant for debugging the push channel: the response reports the delivery
-        outcome directly instead of hiding it in a background run report.
+        outcome directly instead of hiding it in a background run report. On a
+        public_only deployment the route is allowlisted but guarded by the same
+        bearer token as the manual generate trigger; locally it stays open.
         """
+        if runtime.settings.app.public_only:
+            _require_manual_trigger_token(runtime, authorization)
         _require_ready(runtime)
         if runtime.briefing_service is None:
             raise HTTPException(status_code=409, detail="briefing is not enabled")
@@ -406,6 +413,7 @@ def _is_public_deployment_path(path: str) -> bool:
         "/feed.xml",
         "/cover.png",
         PUBLIC_MANUAL_GENERATE_PATH,
+        "/briefing/test-push",
     } or path.startswith("/media/episodes/")
 
 

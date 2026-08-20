@@ -132,9 +132,10 @@ def test_alpha_example_uses_json_object_for_deepseek_fallback(tmp_path: Path) ->
 
 
 def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environment(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Zeabur supplies only dynamic values while this checked-in YAML owns stable defaults."""
+    monkeypatch.setenv("DAILYCAST_BRIEFING__WEBHOOK_URL", "https://qyapi.example.test/hook")
     settings = load_settings(
         config_path=Path(__file__).resolve().parents[1] / "config" / "zeabur.yaml",
         env_file=tmp_path / "absent.env",
@@ -172,6 +173,7 @@ def test_zeabur_eight_variable_interface_keeps_fallback_in_json_object_mode(
     monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__API_KEY", "fallback-secret")
     monkeypatch.delenv("DAILYCAST_LLM__FALLBACK__RESPONSE_FORMAT", raising=False)
+    monkeypatch.setenv("DAILYCAST_BRIEFING__WEBHOOK_URL", "https://qyapi.example.test/hook")
 
     settings = load_settings(
         config_path=Path(__file__).resolve().parents[1] / "config" / "zeabur.yaml",
@@ -188,12 +190,18 @@ def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path
     """A deployed pre-template service upgrades to the checked-in Zeabur defaults."""
     monkeypatch.setenv("ZEABUR_WEB_URL", "https://dailycast.example")
     monkeypatch.setenv("DAILYCAST_CONFIG_PATH", "/app/config/app.example.yaml")
+    monkeypatch.setenv("DAILYCAST_BRIEFING__WEBHOOK_URL", "https://qyapi.example.test/hook")
 
     settings = load_settings(env_file=tmp_path / "absent.env")
 
     assert settings.app.environment == "production"
     assert settings.app.public_only is True
     assert settings.scheduler.enabled is True
+    # The briefing section is on in the checked-in deployment config; only the
+    # webhook URL stays dynamic.
+    assert settings.briefing.enabled is True
+    assert settings.briefing.webhook_enabled is True
+    assert settings.briefing.webhook_url == "https://qyapi.example.test/hook"
 
 
 def test_dailycast_llm_primary_and_fallback_environment_override_yaml(
