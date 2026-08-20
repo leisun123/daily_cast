@@ -157,9 +157,20 @@ def test_briefing_test_push_is_bearer_protected_on_public_deployments(
             "/briefing/test-push", headers={"Authorization": "Bearer wrong-token"}
         )
         accepted = client.post("/briefing/test-push", headers={"Authorization": f"Bearer {token}"})
+        generate_unauthenticated = client.post("/briefing/generate")
+        generate_accepted = client.post(
+            "/briefing/generate", headers={"Authorization": f"Bearer {token}"}
+        )
+        latest_accepted = client.get(
+            "/briefing/latest", headers={"Authorization": f"Bearer {token}"}
+        )
 
     assert unauthenticated.status_code == 401
     assert wrong_token.status_code == 401
     # The valid token reaches the handler; the unreachable webhook surfaces as 502.
     assert accepted.status_code == 502
     assert accepted.json()["detail"].startswith("webhook push failed")
+    # The other briefing routes share the same public-deployment gate.
+    assert generate_unauthenticated.status_code == 401
+    assert generate_accepted.status_code == 202
+    assert latest_accepted.status_code == 404

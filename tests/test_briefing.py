@@ -257,7 +257,7 @@ def test_briefing_settings_default_to_disabled() -> None:
     assert settings.webhook_enabled is False
     assert settings.webhook_format == "wecom_markdown"
     assert settings.window_hours == 24
-    assert settings.cron_expression == "30 7 * * *"
+    assert settings.cron_expression == "30 8 * * mon-fri"
 
 
 def test_webhook_enabled_requires_a_webhook_url() -> None:
