@@ -81,7 +81,7 @@ class ScriptCheckingService:
         task_step_id: int,
         budget: BudgetController,
     ) -> ScriptCheckingResult:
-        """Record checks, revising only when strict quality enforcement requires it."""
+        """Record checks and repair a short script once before metadata generation."""
         validated_outline = EpisodeOutline.model_validate(outline)
         dossiers = tuple(EvidenceDossier.model_validate(dossier) for dossier in evidence_dossiers)
         validated_script = self._validated_script(script, validated_outline, dossiers)
@@ -103,10 +103,9 @@ class ScriptCheckingService:
             ScriptReviewResult | ScriptRevisionResult | MetadataGenerationResult
         ] = [review_result]
 
-        if (
-            self._enforce_quality_gate
-            and review_result.review.verdict == "revise"
-            and self._max_automatic_script_revisions == 1
+        if self._max_automatic_script_revisions == 1 and (
+            self._has_duration_blocker(validation)
+            or (self._enforce_quality_gate and review_result.review.verdict == "revise")
         ):
             revision_result = await self._editorial_service.revise_script(
                 validated_script,
@@ -134,13 +133,15 @@ class ScriptCheckingService:
             operation_results.extend((revision_result, review_result))
             revision_count = 1
 
-        requires_human_review = (
-            validation.has_blocking_issues
-            or review_result.review.verdict != "pass"
-            or any(issue.severity == "blocking" for issue in review_result.review.issues)
+        requires_human_review = validation.has_blocking_issues or (
+            self._enforce_quality_gate
+            and (
+                review_result.review.verdict != "pass"
+                or any(issue.severity == "blocking" for issue in review_result.review.issues)
+            )
         )
         metadata_result = None
-        if not requires_human_review or not self._enforce_quality_gate:
+        if not requires_human_review:
             metadata_result = await self._editorial_service.generate_metadata(
                 validated_script,
                 selected_event_titles,
@@ -175,6 +176,14 @@ class ScriptCheckingService:
                 ),
             ),
             provider_call_count=sum(result.provider_call_count for result in operation_results),
+        )
+
+    @staticmethod
+    def _has_duration_blocker(validation: ValidationReport) -> bool:
+        """Only retry the one deterministic issue that generation can safely expand."""
+        return any(
+            issue.code == "SCRIPT_TOO_SHORT" and issue.severity == "blocking"
+            for issue in validation.issues
         )
 
     @staticmethod

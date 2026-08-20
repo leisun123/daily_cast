@@ -428,7 +428,7 @@ erDiagram
 
 - 唯一：`(operation, provider, model, prompt_version, schema_version, generation_config_hash, input_hash)`；这七个字段共同构成完整缓存身份。
 - 索引：`created_at`、`created_by_task_run_id`、`created_by_task_step_id`、`output_hash`。
-- `generation_config_hash` 是按键排序并统一数值/空值表达的 canonical JSON SHA-256，至少覆盖 `endpoint_identity_hash`、temperature、可选 top_p、max_output_tokens、response format/structured output mode 和其他影响结果的 provider model options。endpoint 只以规范化、脱敏后的身份 hash 参与并落库；明文 URL 中的 userinfo、token、signature 或其他疑似凭证必须拒绝/移除。API Key、Authorization、timeout、连接参数和 retry 次数不参与缓存身份，也不保存。
+- `generation_config_hash` 是按键排序并统一数值/空值表达的 canonical JSON SHA-256，至少覆盖 `endpoint_identity_hash`、temperature、可选 top_p、显式的 per-call `max_output_tokens`（默认 null）、response format/structured output mode 和其他影响结果的 provider model options。endpoint 只以规范化、脱敏后的身份 hash 参与并落库；明文 URL 中的 userinfo、token、signature 或其他疑似凭证必须拒绝/移除。API Key、Authorization、timeout、连接参数和 retry 次数不参与缓存身份，也不保存。
 - `output_json` 必须先由 `schema_version` 对应的本地 schema 校验，再与 `output_hash` 一起在短事务中插入；仅通过校验的成功结果有记录。
 - TaskRun 恢复和新 TaskRun 都通过 LLMArtifactRepository 查询完整七字段唯一键。provider、model、Prompt、schema、generation config 或输入任一变化都会 cache miss；只有成功且 exact-key 相同的行可复用。
 - 不保存系统密钥、Authorization、Cookie、未经限制的完整原始 Prompt或所有新闻全文。失败、超时、拒绝和 schema 不合法的供应商响应只进入脱敏 TaskStep 错误/日志，不写此表。

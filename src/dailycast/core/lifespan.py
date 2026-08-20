@@ -163,9 +163,11 @@ def build_lifespan(
                     SourceKind.HTML_LIST: HTMLListCollector(fetcher),
                 },
                 article_service,
+                source_max_age_hours=settings.processing.source_max_age_hours,
             )
             processing_policy = ProcessingPolicy(
                 max_age_hours=settings.processing.max_age_hours,
+                source_max_age_hours=settings.processing.source_max_age_hours,
                 min_content_length=settings.processing.min_content_length,
                 similarity_threshold=settings.processing.similarity_threshold,
             )
@@ -181,6 +183,13 @@ def build_lifespan(
                 llm_provider,
                 max_candidates=settings.editorial.max_candidates,
                 max_selected_events=settings.editorial.max_selected_events,
+                max_ai_events=settings.editorial.max_ai_events,
+                min_domestic_events_when_available=(
+                    settings.editorial.min_domestic_events_when_available
+                ),
+                min_recruitment_events_when_available=(
+                    settings.editorial.min_recruitment_events_when_available
+                ),
                 max_sources_per_event=settings.editorial.max_sources_per_event,
                 max_chars_per_source=settings.editorial.max_chars_per_source,
                 max_total_evidence_chars=settings.editorial.max_total_evidence_chars,
@@ -256,7 +265,6 @@ def build_lifespan(
                     lambda: BudgetController(
                         max_calls=settings.llm.budget.max_calls,
                         max_input_tokens=settings.llm.budget.max_input_tokens,
-                        max_output_tokens=settings.llm.budget.max_output_tokens,
                     ),
                     data_dir=settings.data_dir,
                     auto_publish=settings.publishing.auto_publish,

@@ -1,0 +1,86 @@
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: DailyCast
+spec:
+  description: Daily AI news podcast with immutable RSS publication.
+  variables:
+    - key: PUBLIC_DOMAIN
+      type: DOMAIN
+      name: Public podcast domain
+      description: Public HTTPS domain used by the RSS Feed and immutable MP3 URLs.
+    - key: DAILYCAST_LLM__PROVIDER
+      type: STRING
+      name: Primary LLM provider
+      description: Preferred provider protocol; use openai_responses for GPT-5.6 Terra.
+    - key: DAILYCAST_LLM__BASE_URL
+      type: STRING
+      name: Primary LLM base URL
+      description: Preferred endpoint without embedded credentials.
+    - key: DAILYCAST_LLM__MODEL
+      type: STRING
+      name: Primary LLM model
+      description: Preferred model identifier, such as gpt-5.6-terra.
+    - key: DAILYCAST_LLM__API_KEY
+      type: PASSWORD
+      name: Primary LLM API key
+      description: Preferred endpoint secret stored only in Zeabur environment configuration.
+    - key: DAILYCAST_LLM__FALLBACK__PROVIDER
+      type: STRING
+      name: Fallback LLM provider
+      description: Fallback provider protocol; use openai_compatible for DeepSeek.
+    - key: DAILYCAST_LLM__FALLBACK__BASE_URL
+      type: STRING
+      name: Fallback LLM base URL
+      description: Fallback endpoint without embedded credentials.
+    - key: DAILYCAST_LLM__FALLBACK__MODEL
+      type: STRING
+      name: Fallback LLM model
+      description: Fallback model identifier, such as deepseek-chat.
+    - key: DAILYCAST_LLM__FALLBACK__API_KEY
+      type: PASSWORD
+      name: Fallback LLM API key
+      description: Fallback endpoint secret stored only in Zeabur environment configuration.
+  tags:
+    - AI
+    - Tool
+  readme: |-
+    # DailyCast
+
+    The service builds the `main` branch directly from the connected GitHub repository.
+    SQLite, task artifacts, generated audio, and published RSS media are stored in persistent
+    Zeabur volumes. The public domain exposes diagnostics, `feed.xml`, and immutable MP3 files;
+    unauthenticated management and generation routes remain hidden.
+  services:
+    - name: DailyCast
+      template: GIT
+      domainKey: PUBLIC_DOMAIN
+      spec:
+        source:
+          source: GITHUB
+          repo: 1309505877
+          branch: main
+        ports:
+          - id: web
+            port: 8000
+            type: HTTP
+        volumes:
+          - id: data
+            dir: /app/data
+          - id: public
+            dir: /app/public
+        healthCheck:
+          type: HTTP
+          port: web
+          http:
+            path: /healthz
+        env:
+          DAILYCAST_CONFIG_PATH:
+            default: /app/config/zeabur.yaml
+          DAILYCAST_PUBLISHING__PUBLIC_BASE_URL:
+            default: ${ZEABUR_WEB_URL}
+        instructions:
+          - title: RSS Feed
+            content: ${ZEABUR_WEB_URL}/feed.xml
+          - title: Readiness
+            content: ${ZEABUR_WEB_URL}/readyz

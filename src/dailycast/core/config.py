@@ -14,9 +14,11 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 from dailycast.briefing.webhook import WebhookFormat
 from dailycast.core.errors import ConfigurationError
+from dailycast.news.source_windows import DEFAULT_SOURCE_MAX_AGE_HOURS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.example.yaml"
+ZEABUR_CONFIG_PATH = PROJECT_ROOT / "config" / "zeabur.yaml"
 _yaml_path_context: ContextVar[Path] = ContextVar(
     "dailycast_yaml_path", default=DEFAULT_CONFIG_PATH
 )
@@ -36,6 +38,8 @@ class AppSettings(BaseModel):
     name: str = "DailyCast"
     environment: str = "development"
     timezone: str = "Asia/Shanghai"
+    public_only: bool = False
+    manual_trigger_token: str | None = Field(default=None, min_length=32, repr=False)
     server: ServerSettings = Field(default_factory=ServerSettings)
 
     @field_validator("timezone")
@@ -115,7 +119,7 @@ class TaskExecutionSettings(BaseModel):
 
 
 class LLMBudgetSettings(BaseModel):
-    """Hard per-task LLM use limits, applied before cache-miss provider calls."""
+    """Hard per-task request and input limits, applied before cache-miss provider calls."""
 
     max_calls: int = Field(default=12, ge=0)
     max_input_tokens: int = Field(default=60_000, ge=0)
@@ -128,12 +132,12 @@ class LLMProviderSettings(BaseModel):
     provider: str = "openai_compatible"
     base_url: str = "https://api.openai.com/v1"
     api_key: str | None = None
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-5.6-terra"
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
-    max_output_tokens: int = Field(default=2000, ge=1)
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=10)
+    max_output_tokens: int = Field(default=2000, ge=1)
     response_format: str = "json_schema"
 
     @field_validator("provider")
@@ -162,6 +166,9 @@ class EditorialSettings(BaseModel):
     enforce_quality_gate: bool = True
     max_candidates: int = Field(default=30, ge=1, le=30)
     max_selected_events: int = Field(default=8, ge=1, le=30)
+    max_ai_events: int = Field(default=3, ge=1, le=30)
+    min_domestic_events_when_available: int = Field(default=2, ge=0, le=30)
+    min_recruitment_events_when_available: int = Field(default=1, ge=0, le=30)
     max_sources_per_event: int = Field(default=3, ge=1, le=3)
     max_chars_per_source: int = Field(default=1200, ge=1, le=1200)
     max_total_evidence_chars: int = Field(default=24_000, ge=1, le=240_000)
@@ -180,6 +187,9 @@ class ProcessingSettings(BaseModel):
     """Deterministic Article-to-NewsEvent processing limits."""
 
     max_age_hours: int = Field(default=36, ge=1, le=720)
+    source_max_age_hours: dict[str, int] = Field(
+        default_factory=lambda: dict(DEFAULT_SOURCE_MAX_AGE_HOURS)
+    )
     min_content_length: int = Field(default=300, ge=1, le=100_000)
     similarity_threshold: float = Field(default=0.58, ge=0.0, le=1.0)
 
@@ -400,6 +410,11 @@ def _resolve_yaml_path(config_path: Path | None, env_file: Path | None) -> Path:
     dotenv_path = env_file or (Path.cwd() / ".env")
     dotenv_config_path = dotenv_values(dotenv_path).get("DAILYCAST_CONFIG_PATH")
     configured_path = os.environ.get("DAILYCAST_CONFIG_PATH", dotenv_config_path)
+    if os.environ.get("ZEABUR_WEB_URL") and configured_path in {
+        None,
+        "/app/config/app.example.yaml",
+    }:
+        return ZEABUR_CONFIG_PATH
     if configured_path is None:
         return DEFAULT_CONFIG_PATH
     path = Path(configured_path)

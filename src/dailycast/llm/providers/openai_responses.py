@@ -55,13 +55,17 @@ class OpenAIResponsesLLMProvider:
         model: str,
         timeout_seconds: float,
         temperature: float,
-        max_output_tokens: int,
+        max_output_tokens: int | None = None,
         max_retries: int = 2,
         response_format: str = "json_schema",
         top_p: float | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        if timeout_seconds <= 0 or max_output_tokens < 0 or max_retries < 0:
+        if (
+            timeout_seconds <= 0
+            or (max_output_tokens is not None and max_output_tokens < 0)
+            or max_retries < 0
+        ):
             msg = "LLM provider timeout, token limit, and retry count must be valid"
             raise ValueError(msg)
         self._endpoint, self._endpoint_identity_hash = self._endpoint_details(base_url)
@@ -131,9 +135,11 @@ class OpenAIResponsesLLMProvider:
             "model": self.model,
             "input": _responses_input(request_messages),
             "temperature": request_options.pop("temperature", self._temperature),
-            "max_output_tokens": request_options.pop("max_output_tokens", self.max_output_tokens),
             "text": {"format": self._response_format_payload(response_mode, response_schema)},
         }
+        max_output_tokens = request_options.pop("max_output_tokens", self.max_output_tokens)
+        if max_output_tokens is not None:
+            payload["max_output_tokens"] = max_output_tokens
         top_p = request_options.pop("top_p", self._top_p)
         if top_p is not None:
             payload["top_p"] = top_p

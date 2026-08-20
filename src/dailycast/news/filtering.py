@@ -18,14 +18,21 @@ def filter_articles(
     """Return eligible Article IDs and stable reasons while preserving every input row."""
     eligible_article_ids: list[int] = []
     filtered_reasons: dict[int, str] = {}
-    oldest_allowed = _as_utc(now) - timedelta(hours=policy.max_age_hours)
     for article in sorted(articles, key=lambda item: item.id):
-        reason = _filter_reason(article, oldest_allowed, policy)
+        reason = _filter_reason(article, _oldest_allowed(article, now, policy), policy)
         if reason is None:
             eligible_article_ids.append(article.id)
         else:
             filtered_reasons[article.id] = reason
     return FilterResult(tuple(eligible_article_ids), filtered_reasons)
+
+
+def _oldest_allowed(
+    article: ProcessableArticle, now: datetime, policy: ProcessingPolicy
+) -> datetime:
+    """Use a longer configured freshness window for recurring notice trackers."""
+    max_age_hours = policy.source_max_age_hours.get(article.source_id, policy.max_age_hours)
+    return _as_utc(now) - timedelta(hours=max_age_hours)
 
 
 def _filter_reason(

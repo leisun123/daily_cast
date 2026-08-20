@@ -263,10 +263,61 @@ def test_llm_settings_have_explicit_safe_defaults(app_config_path: Path) -> None
     assert settings.llm.provider == "openai_responses"
     assert settings.llm.model == "gpt-5.6-terra"
     assert settings.llm.temperature == 0.1
-    assert settings.llm.max_output_tokens == 2000
     assert settings.llm.budget.max_calls == 12
     assert settings.llm.budget.max_input_tokens == 60_000
+    # Explicit output ceilings reserve the per-attempt budget for the briefing flow.
+    assert settings.llm.max_output_tokens == 2000
     assert settings.llm.budget.max_output_tokens == 15_000
+
+
+def test_unbounded_providers_omit_application_output_token_ceiling() -> None:
+    """Absent an explicit per-call option, providers defer output length to the model."""
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        if request.url.path.endswith("/responses"):
+            return httpx.Response(
+                200,
+                json={
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": '{"score":7}'}],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"score":7}'}}]})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            chat = OpenAICompatibleLLMProvider(
+                base_url="https://models.example/v1",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=None,
+                http_client=client,
+            )
+            responses = OpenAIResponsesLLMProvider(
+                base_url="https://models.example/v1",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=None,
+                http_client=client,
+            )
+            request = (LLMMessage(role="user", content="Score this."),)
+            await chat.generate_structured(LLMOperation.SCORE_EVENTS, request, ScoreOutput, {})
+            await responses.generate_structured(LLMOperation.SCORE_EVENTS, request, ScoreOutput, {})
+
+    asyncio.run(scenario())
+
+    assert "max_tokens" not in captured[0]
+    assert "max_output_tokens" not in captured[1]
 
 
 def test_llm_settings_allow_only_supported_wire_protocols() -> None:
@@ -579,6 +630,48 @@ def test_openai_compatible_provider_requests_json_schema_output() -> None:
     assert result.content == {"score": 7}
     assert result.usage == LLMUsage(input_tokens=3, output_tokens=2)
     assert result.request_id == "provider-request"
+
+
+def test_openai_compatible_json_object_embeds_schema_contract() -> None:
+    """JSON-only Chat Completions gateways receive the local output contract."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"score":7}'}}]},
+        )
+
+    async def scenario() -> StructuredResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICompatibleLLMProvider(
+                base_url="https://models.example/v1",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=30,
+                response_format="json_object",
+                http_client=client,
+            )
+            return await provider.generate_structured(
+                LLMOperation.SCORE_EVENTS,
+                (LLMMessage(role="user", content="Score this."),),
+                ScoreOutput,
+                {},
+            )
+
+    result = asyncio.run(scenario())
+
+    request = captured["request"]
+    assert isinstance(request, httpx.Request)
+    payload = json.loads(request.content)
+    contract = payload["messages"][0]["content"]
+    assert payload["response_format"] == {"type": "json_object"}
+    assert "Structured output contract" in contract
+    assert '"score"' in contract
+    assert result.content == {"score": 7}
 
 
 def test_openai_responses_provider_requests_json_schema_and_reads_output_text() -> None:

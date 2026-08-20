@@ -1,4 +1,4 @@
-"""Conservative, in-memory per-task LLM budget reservation."""
+"""Conservative, in-memory per-task LLM request and input-budget reservation."""
 
 from __future__ import annotations
 
@@ -13,16 +13,17 @@ from dailycast.llm.contracts import JSONValue, LLMMessage, LLMProvider, Structur
 
 
 class BudgetController:
-    """Reserve a bounded call and token allowance before a cache-miss model call."""
+    """Reserve a bounded call and input allowance before a cache-miss model call."""
 
     def __init__(
         self,
         *,
         max_calls: int = 12,
         max_input_tokens: int = 60_000,
-        max_output_tokens: int = 15_000,
+        max_output_tokens: int | None = None,
     ) -> None:
-        if min(max_calls, max_input_tokens, max_output_tokens) < 0:
+        limits = (max_calls, max_input_tokens)
+        if min(limits) < 0 or (max_output_tokens is not None and max_output_tokens < 0):
             msg = "LLM budget limits must be non-negative"
             raise ValueError(msg)
         self._max_calls = max_calls
@@ -40,7 +41,10 @@ class BudgetController:
         if (
             self.call_count + 1 > self._max_calls
             or self.input_tokens + input_tokens > self._max_input_tokens
-            or self.output_tokens + output_tokens > self._max_output_tokens
+            or (
+                self._max_output_tokens is not None
+                and self.output_tokens + output_tokens > self._max_output_tokens
+            )
         ):
             raise AIBudgetExceededError()
         self.call_count += 1

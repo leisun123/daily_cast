@@ -83,6 +83,25 @@ The Feed URL is `http://127.0.0.1:8000/feed.xml`. It returns `404` until at leas
 
 `data/` is the private runtime volume for SQLite and task artifacts. `public/` contains the generated Feed and immutable media assets. Neither directory should be committed.
 
+### RSS distribution: NetEase Cloud Music and Xiaoyuzhou
+
+For a real podcast platform, deploy DailyCast behind a stable public HTTPS domain and use its
+Feed URL, for example `https://your-domain.example/feed.xml`. Do not use the local
+`127.0.0.1` URL outside your computer.
+
+DailyCast does not upload credentials or automate platform logins for this workflow. Instead,
+bind or claim the same public Feed in each platform's creator console:
+
+- **NetEase Cloud Music:** choose the RSS import/claim flow, enter the Feed URL, and provide a
+  screenshot of the hosting dashboard that visibly associates your DailyCast service with the
+  public domain when ownership proof is requested. If you already created the podcast in
+  NetEase, choose **同步至现有播客** rather than creating a second podcast.
+- **Xiaoyuzhou:** use its RSS claim/import flow and enter the same public Feed URL.
+
+After a platform accepts the Feed, it fetches the current episode and polls the stable URL for
+future episodes. Initial ingestion is asynchronous; keep `publishing.public_base_url` and the
+Feed URL stable so existing subscribers and platform records are not broken.
+
 ## Configuration
 
 DailyCast uses two configuration layers:
@@ -108,6 +127,45 @@ key, so repeated ticks and restarts do not create a duplicate daily TaskRun or E
 For a non-loopback public Feed, configure an explicit HTTPS `DAILYCAST_PUBLISHING__PUBLIC_BASE_URL` and expose only the intended Feed/media paths through your reverse proxy or static hosting setup.
 
 To enable NetEase distribution, keep RSS enabled, set `publishing.netease.enabled: true`, provide a readable `cover_path`, and complete the creator-center login once in the persistent `DATA_DIR/netease/profile` directory. Set `headless: false` for that initial manual login, then switch it back to `true` for unattended runs. No username, password, API token, or Cookie belongs in YAML, `.env`, logs, or Git. A login expiry, CAPTCHA, upload problem, or page change records `needs_attention`; it never bypasses platform security and never regenerates the episode or its MP3.
+
+### Zeabur
+
+`zeabur.yaml` is a one-service deployment resource whose source is the public GitHub repository's
+`main` branch. It does not upload local source code. The resource mounts `/app/data` and
+`/app/public` as persistent volumes, enables the Asia/Shanghai 06:00 daily schedule, runs
+Alembic before Uvicorn, and binds a Zeabur HTTPS domain to the RSS service.
+
+During deployment, supply the public domain and LLM provider settings. The API key is a Zeabur
+password variable and must never be committed. The template enables `app.public_only`, so the
+public domain serves only `/healthz`, `/readyz`, `/feed.xml`, and immutable
+`/media/episodes/...` assets plus `/cover.png`. Management pages and `POST /generate` return `404`; production
+generation is driven by the durable scheduler. To enable one authenticated manual test run,
+create the Zeabur password variable `DAILYCAST_APP__MANUAL_TRIGGER_TOKEN` with a random value
+of at least 32 characters. The public endpoint then accepts only:
+
+```bash
+curl --fail-with-body -X POST https://your-domain/api/v1/manual/generate \
+  -H 'Authorization: Bearer your-secret-token' \
+  -H 'Idempotency-Key: manual-test-20260726-001'
+```
+
+It returns `202` with a durable `task_id` and `edition`. Reusing the same `Idempotency-Key` is
+safe. The scheduler always publishes the base `daily` edition once per date; a manual trigger
+uses `daily` only if that edition does not exist, otherwise it creates `daily-2`, `daily-3`, and
+so on. Because production has `publishing.auto_publish=true`, each successful manual task
+generates and publishes its own immutable episode.
+
+DailyCast reads its ordered LLM configuration from exactly eight environment variables:
+`DAILYCAST_LLM__PROVIDER`, `DAILYCAST_LLM__BASE_URL`, `DAILYCAST_LLM__MODEL`,
+`DAILYCAST_LLM__API_KEY`, plus the corresponding four
+`DAILYCAST_LLM__FALLBACK__*` variables. The old unprefixed `LLM_*` variables are ignored;
+new deployments should create only the eight `DAILYCAST_LLM__*` rows.
+
+Deploy into a selected Zeabur project with:
+
+```bash
+npx --yes zeabur@latest template deploy -f zeabur.yaml
+```
 
 ## Development
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from math import ceil
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -120,6 +121,7 @@ async def revise_script(
         "script": script.model_dump(mode="json"),
         "evidence_dossiers": [dossier.model_dump(mode="json") for dossier in dossiers],
         "deterministic_validation": validation_report.model_dump(mode="json"),
+        "duration_requirement": _duration_requirement(outline, validation_report),
         "semantic_review": review.model_dump(mode="json"),
     }
     messages = _messages(prompt, payload)
@@ -220,6 +222,22 @@ def _messages(prompt: PromptTemplate, payload: object) -> tuple[LLMMessage, ...]
             content=json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         ),
     )
+
+
+def _duration_requirement(
+    outline: EpisodeOutline, validation_report: ValidationReport
+) -> dict[str, int | float]:
+    """Give revision prompts an exact spoken-character target derived from the current rate."""
+    estimated_duration = validation_report.estimated_duration_seconds
+    chars_per_second = (
+        validation_report.character_count / estimated_duration if estimated_duration > 0 else 4.0
+    )
+    return {
+        "target_seconds": outline.target_seconds,
+        "current_character_count": validation_report.character_count,
+        "current_estimated_duration_seconds": estimated_duration,
+        "target_character_count": ceil(outline.target_seconds * chars_per_second),
+    }
 
 
 def _bounded_script_text(script: EpisodeScript) -> str:

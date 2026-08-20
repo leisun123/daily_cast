@@ -46,6 +46,8 @@ def test_startup_seeds_missing_sources_from_default_source_configuration(
             ("jiangsu-civil-service-notices", "江苏省公务员考试专题"),
             ("hacker-news-rss", "Hacker News"),
             ("ithome-rss", "IT之家"),
+            ("chinanews-china-rss", "中新网时政"),
+            ("chinanews-finance-rss", "中新网财经"),
             ("oschina-news-rss", "开源中国"),
             ("sspai-rss", "少数派"),
         ]

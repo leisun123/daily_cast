@@ -94,6 +94,8 @@ def test_script_request_exposes_exact_reference_allowlists_for_json_only_provide
     assert "a listener can absorb" in messages[0].content
     assert "do not stack several independent facts" in messages[0].content
     assert "Separate each paragraph with a blank line" in messages[0].content
+    assert "target_seconds" in messages[0].content
+    assert "每个 section 的 seconds" in messages[0].content
     assert constraints["required_section_ids"] == [
         section.section_id for section in outline.sections
     ]

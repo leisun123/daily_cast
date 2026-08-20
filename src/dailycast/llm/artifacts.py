@@ -420,8 +420,10 @@ class LLMArtifactService:
 
 
 def _requested_output_tokens(provider: LLMProvider, model_options: Mapping[str, JSONValue]) -> int:
-    """Read an optional semantic token cap without treating transport settings as cache inputs."""
+    """Read an explicit per-call cap; an absent cap reserves no output ceiling."""
     configured = model_options.get("max_output_tokens", provider.max_output_tokens)
+    if configured is None:
+        return 0
     if isinstance(configured, bool) or not isinstance(configured, int) or configured < 0:
         msg = "max_output_tokens must be a non-negative integer"
         raise ValueError(msg)

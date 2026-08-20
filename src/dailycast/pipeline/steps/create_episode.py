@@ -50,7 +50,7 @@ class CreateEpisodeStep:
         )
         selected_event_ids = _event_ids(context.values.get("outlined_news_event_ids"))
         artifact_refs = _artifact_refs(context.artifact_run_id)
-        if self.enforce_quality_gate and validation.has_blocking_issues:
+        if validation.has_blocking_issues:
             return _skipped_result(selected_event_ids, artifact_refs, "SCRIPT_VALIDATION_FAILED")
         if self.enforce_quality_gate and (
             review.verdict != "pass" or any(issue.severity == "blocking" for issue in review.issues)

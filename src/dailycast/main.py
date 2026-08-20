@@ -3,9 +3,10 @@
 import asyncio
 import json
 import logging
+import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -33,6 +34,7 @@ from dailycast.db.models import (
     Publication,
     PublicationPlatform,
     TaskRun,
+    TaskType,
     TriggerType,
 )
 from dailycast.db.repositories import (
@@ -47,6 +49,8 @@ from dailycast.db.transactions import UnitOfWork
 
 logger = logging.getLogger(__name__)
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+PODCAST_COVER_PATH = Path(__file__).resolve().parents[2] / "assets" / "dailycast-cover.png"
+PUBLIC_MANUAL_GENERATE_PATH = "/api/v1/manual/generate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +98,16 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         request_id = requested_id if requested_id else str(UUIDGenerator().new())
         token = set_request_id(request_id)
         try:
-            response = await call_next(request)
+            runtime = getattr(request.app.state, "runtime", None)
+            response: Response
+            if (
+                isinstance(runtime, AppRuntime)
+                and runtime.settings.app.public_only
+                and not _is_public_deployment_path(request.url.path)
+            ):
+                response = JSONResponse(status_code=404, content={"detail": "Not Found"})
+            else:
+                response = await call_next(request)
         finally:
             reset_request_id(token)
         response.headers["X-Request-ID"] = request_id
@@ -189,21 +202,13 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
     ) -> JSONResponse:
         """Submit a manual run without letting a previous terminal run block a retry."""
         _require_ready(runtime)
-        if runtime.submission_service is None:
-            raise InfrastructureError("task submission service is not available")
-        command = build_daily_generation_command(runtime.settings, trigger_type=TriggerType.MANUAL)
-        # A browser click is a fresh manual attempt. An active task with the same
-        # business key is still reused by TaskSubmissionService, while an explicit
-        # client key preserves ordinary request-replay idempotency.
-        effective_idempotency_key = idempotency_key or f"manual:{UUIDGenerator().new()}"
-        task_run = runtime.submission_service.submit(
-            replace(command, idempotency_key=effective_idempotency_key)
-        )
+        task_run, edition = _submit_manual_generation(runtime, idempotency_key)
         return JSONResponse(
             status_code=202,
             content={
                 "task_id": task_run.id,
                 "status": task_run.status.value,
+                "edition": edition,
                 "task_url": "/tasks/latest",
             },
         )
@@ -278,7 +283,28 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
                 "episode_id": episode_id,
                 "target_statuses": distribution.target_statuses,
                 "warning_count": distribution.warning_count,
-            }
+            },
+        )
+
+    @app.post(PUBLIC_MANUAL_GENERATE_PATH, status_code=202, tags=["operator"])
+    async def public_manual_generate(
+        runtime: RuntimeDependency,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+        idempotency_key: Annotated[
+            str | None, Header(alias="Idempotency-Key", max_length=256)
+        ] = None,
+    ) -> JSONResponse:
+        """Queue one daily run through a bearer-token-protected public operator endpoint."""
+        _require_manual_trigger_token(runtime, authorization)
+        _require_ready(runtime)
+        task_run, edition = _submit_manual_generation(runtime, idempotency_key)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "task_id": task_run.id,
+                "status": task_run.status.value,
+                "edition": edition,
+            },
         )
 
     @app.get("/healthz", tags=["system"])
@@ -293,7 +319,7 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         status_code = 200 if report.ready else 503
         return JSONResponse(status_code=status_code, content=report.as_dict())
 
-    @app.get("/feed.xml", tags=["public"])
+    @app.api_route("/feed.xml", methods=["GET", "HEAD"], tags=["public"])
     async def feed(runtime: RuntimeDependency) -> FileResponse:
         """Serve only atomically published Feed data, never a draft or temporary file."""
         _require_ready(runtime)
@@ -302,7 +328,19 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="RSS feed is not published")
         return FileResponse(feed_path, media_type="application/rss+xml; charset=utf-8")
 
-    @app.get("/media/episodes/{episode_public_id}/{asset_filename}.mp3", tags=["public"])
+    @app.api_route("/cover.png", methods=["GET", "HEAD"], tags=["public"])
+    async def cover(runtime: RuntimeDependency) -> FileResponse:
+        """Serve the stable channel artwork referenced by the public podcast Feed."""
+        _require_ready(runtime)
+        if not PODCAST_COVER_PATH.is_file():
+            raise HTTPException(status_code=404, detail="podcast cover is not available")
+        return FileResponse(PODCAST_COVER_PATH, media_type="image/png")
+
+    @app.api_route(
+        "/media/episodes/{episode_public_id}/{asset_filename}.mp3",
+        methods=["GET", "HEAD"],
+        tags=["public"],
+    )
     async def media(
         episode_public_id: str, asset_filename: str, runtime: RuntimeDependency
     ) -> FileResponse:
@@ -358,6 +396,119 @@ def _log_briefing_task_result(task: asyncio.Task[BriefingRunReport]) -> None:
     error = task.exception()
     if error is not None:
         logger.error("manual briefing run failed: %s", error)
+
+
+def _is_public_deployment_path(path: str) -> bool:
+    """Allow only diagnostics and immutable podcast resources on an unauthenticated domain."""
+    return path in {
+        "/healthz",
+        "/readyz",
+        "/feed.xml",
+        "/cover.png",
+        PUBLIC_MANUAL_GENERATE_PATH,
+    } or path.startswith("/media/episodes/")
+
+
+def _require_manual_trigger_token(runtime: AppRuntime, authorization: str | None) -> None:
+    """Reject public trigger attempts unless a configured bearer token matches exactly."""
+    configured_token = runtime.settings.app.manual_trigger_token
+    if configured_token is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    scheme, separator, supplied_token = (authorization or "").partition(" ")
+    valid = (
+        separator == " "
+        and scheme.casefold() == "bearer"
+        and bool(supplied_token)
+        and secrets.compare_digest(supplied_token, configured_token)
+    )
+    if not valid:
+        raise HTTPException(
+            status_code=401,
+            detail="a valid bearer token is required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def _submit_manual_generation(
+    runtime: AppRuntime, idempotency_key: str | None
+) -> tuple[TaskRun, str]:
+    """Queue a manual run with a new edition once that day's daily episode exists."""
+    if runtime.submission_service is None:
+        raise InfrastructureError("task submission service is not available")
+    command = build_daily_generation_command(runtime.settings, trigger_type=TriggerType.MANUAL)
+    episode_date = command.request["episode_date"]
+    if not isinstance(episode_date, str):
+        raise InfrastructureError("manual generation command has no episode date")
+    if idempotency_key is not None:
+        replay = _find_manual_idempotency_replay(runtime, idempotency_key, episode_date)
+        if replay is not None:
+            return replay
+    edition = _next_manual_edition(runtime, episode_date)
+    command = replace(command, request={**command.request, "edition": edition})
+    # A browser click is a fresh manual attempt. An active task with the same
+    # business key is still reused by TaskSubmissionService, while an explicit
+    # client key preserves ordinary request-replay idempotency.
+    effective_idempotency_key = idempotency_key or f"manual:{UUIDGenerator().new()}"
+    return (
+        runtime.submission_service.submit(
+            replace(command, idempotency_key=effective_idempotency_key)
+        ),
+        edition,
+    )
+
+
+def _find_manual_idempotency_replay(
+    runtime: AppRuntime, idempotency_key: str, episode_date: str
+) -> tuple[TaskRun, str] | None:
+    """Return a prior same-day manual request before choosing a newer edition."""
+    with UnitOfWork(runtime.session_factory) as unit:
+        assert unit.session is not None
+        task_run = TaskRunRepository(unit.session).get_by_idempotency_key(idempotency_key)
+    if task_run is None:
+        return None
+
+    try:
+        request = json.loads(task_run.request_json)
+    except json.JSONDecodeError:
+        request = None
+    edition = request.get("edition") if isinstance(request, dict) else None
+    valid_edition = edition == "daily" or (
+        isinstance(edition, str)
+        and edition.startswith("daily-")
+        and edition.removeprefix("daily-").isascii()
+        and edition.removeprefix("daily-").isdigit()
+    )
+    if (
+        task_run.task_type is not TaskType.DAILY_GENERATE
+        or task_run.trigger_type is not TriggerType.MANUAL
+        or not isinstance(request, dict)
+        or request.get("episode_date") != episode_date
+        or not valid_edition
+    ):
+        raise HTTPException(status_code=409, detail="Idempotency-Key belongs to another request")
+    assert isinstance(edition, str)
+    return task_run, edition
+
+
+def _next_manual_edition(runtime: AppRuntime, episode_date: str) -> str:
+    """Return ``daily`` or the next same-day ``daily-N`` edition for a manual run."""
+    business_date = date.fromisoformat(episode_date)
+    with UnitOfWork(runtime.session_factory) as unit:
+        assert unit.session is not None
+        editions = {
+            episode.edition
+            for episode in EpisodeRepository(unit.session).list()
+            if episode.episode_date == business_date
+        }
+    if "daily" not in editions:
+        return "daily"
+
+    highest_suffix = 1
+    for edition in editions:
+        suffix = edition.removeprefix("daily-")
+        if edition.startswith("daily-") and suffix.isascii() and suffix.isdigit():
+            highest_suffix = max(highest_suffix, int(suffix))
+    return f"daily-{highest_suffix + 1}"
 
 
 def _require_ready(runtime: AppRuntime) -> None:

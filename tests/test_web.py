@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+import json
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -17,7 +18,7 @@ from dailycast.core.hashes import sha256_text
 from dailycast.core.lifespan import build_daily_generation_command
 from dailycast.core.time import Clock
 from dailycast.db.models import EpisodeStatus, TaskRunStatus, TaskStepStatus, TaskType, TriggerType
-from dailycast.db.repositories import TaskRunRepository, TaskStepRepository
+from dailycast.db.repositories import EpisodeRepository, TaskRunRepository, TaskStepRepository
 from dailycast.db.transactions import UnitOfWork
 from dailycast.episodes.service import EpisodeService
 from dailycast.main import create_app
@@ -150,6 +151,90 @@ def test_generate_submits_durable_task_run_through_submission_service(
         with UnitOfWork(factory) as unit:
             assert unit.session is not None
             assert TaskRunRepository(unit.session).get(payload["task_id"]) is not None
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_manual_generate_uses_the_next_edition_after_daily_is_published(
+    app_config_path: Path,
+) -> None:
+    """Manual runs create a same-day follow-up instead of reusing published daily output."""
+    factory = _factory(app_config_path)
+    try:
+        settings = load_settings(config_path=app_config_path)
+        command = build_daily_generation_command(settings, trigger_type=TriggerType.MANUAL)
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            EpisodeRepository(unit.session).create(
+                public_id="published-daily-edition",
+                episode_date=date.fromisoformat(command.request["episode_date"]),
+                edition="daily",
+                status=EpisodeStatus.PUBLISHED,
+            )
+
+        with TestClient(create_app(config_path=app_config_path)) as client:
+            response = client.post("/generate")
+
+        assert response.status_code == 202
+        assert response.json()["edition"] == "daily-2"
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            task_run = TaskRunRepository(unit.session).get(response.json()["task_id"])
+            assert task_run is not None
+            assert json.loads(task_run.request_json)["edition"] == "daily-2"
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_manual_generate_replays_an_explicit_key_after_follow_up_is_published(
+    app_config_path: Path,
+) -> None:
+    """A client retry keeps its original manual edition after a later publication exists."""
+    factory = _factory(app_config_path)
+    idempotency_key = "manual-follow-up-replay"
+    try:
+        settings = load_settings(config_path=app_config_path)
+        command = build_daily_generation_command(settings, trigger_type=TriggerType.MANUAL)
+        episode_date = date.fromisoformat(command.request["episode_date"])
+        request = {**command.request, "edition": "daily-2"}
+        config_snapshot_json = canonical_json(command.config_snapshot)
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            EpisodeRepository(unit.session).create(
+                public_id="published-base-edition",
+                episode_date=episode_date,
+                edition="daily",
+                status=EpisodeStatus.PUBLISHED,
+            )
+            EpisodeRepository(unit.session).create(
+                public_id="published-follow-up-edition",
+                episode_date=episode_date,
+                edition="daily-2",
+                status=EpisodeStatus.PUBLISHED,
+            )
+            TaskRunRepository(unit.session).create(
+                id="published-follow-up-task",
+                task_type=command.task_type,
+                business_key=f"daily:{episode_date}:daily-2:{command.pipeline_version}",
+                idempotency_key=idempotency_key,
+                trigger_type=command.trigger_type,
+                status=TaskRunStatus.SUCCEEDED,
+                pipeline_version=command.pipeline_version,
+                config_fingerprint=sha256_text(config_snapshot_json),
+                config_snapshot_json=config_snapshot_json,
+                request_json=canonical_json(request),
+            )
+
+        with TestClient(create_app(config_path=app_config_path)) as client:
+            response = client.post("/generate", headers={"Idempotency-Key": idempotency_key})
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "task_id": "published-follow-up-task",
+            "status": "succeeded",
+            "edition": "daily-2",
+            "task_url": "/tasks/latest",
+        }
     finally:
         factory.kw["bind"].dispose()
 

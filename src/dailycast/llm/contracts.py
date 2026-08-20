@@ -54,7 +54,7 @@ class LLMProvider(Protocol):
 
     provider_name: str
     model: str
-    max_output_tokens: int
+    max_output_tokens: int | None
 
     def generation_config_hash(self, model_options: Mapping[str, JSONValue]) -> str:
         """Return the non-secret cache identity for semantic generation settings."""

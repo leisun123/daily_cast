@@ -393,11 +393,13 @@ def _validated_artifacts(
         or len(event_ids) != len(set(event_ids))
         or not all(isinstance(event_id, int) and event_id > 0 for event_id in event_ids)
         or (
-            enforce_quality_gate
-            and (
-                validated_validation.has_blocking_issues
-                or validated_review.verdict != "pass"
-                or any(issue.severity == "blocking" for issue in validated_review.issues)
+            validated_validation.has_blocking_issues
+            or (
+                enforce_quality_gate
+                and (
+                    validated_review.verdict != "pass"
+                    or any(issue.severity == "blocking" for issue in validated_review.issues)
+                )
             )
         )
     ):

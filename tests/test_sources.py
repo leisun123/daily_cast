@@ -365,6 +365,58 @@ def test_html_list_collector_discovers_only_matching_public_recruitment_announce
     asyncio.run(scenario())
 
 
+def test_recruitment_source_uses_the_extended_tracking_window(app_config_path: Path) -> None:
+    """Official recruitment tracking is not limited to the general breaking-news window."""
+
+    class RecordingCollector:
+        """Capture the effective collection window without making a network request."""
+
+        def __init__(self) -> None:
+            self.window: CollectionWindow | None = None
+
+        async def collect(self, source: Source, window: CollectionWindow) -> CollectionResult:
+            self.window = window
+            return CollectionResult(source_id=source.id)
+
+    async def scenario() -> None:
+        engine, factory = upgraded_factory(app_config_path)
+        try:
+            with UnitOfWork(factory) as unit:
+                assert unit.session is not None
+                SourceRepository(unit.session).create(
+                    **(
+                        source_values()
+                        | {
+                            "id": "changzhou-public-recruitment",
+                            "name": "常州市事业单位公开招聘",
+                            "entry_url": "https://rsj.changzhou.gov.cn/recruitment",
+                            "normalized_entry_url": "https://rsj.changzhou.gov.cn/recruitment",
+                        }
+                    )
+                )
+            collector = RecordingCollector()
+            service = SourceCollectionService(
+                factory,
+                {SourceKind.RSS: collector},
+                ArticleService(factory),
+            )
+            await service.collect_enabled_sources(
+                CollectionWindow(
+                    start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+                )
+            )
+
+            assert collector.window == CollectionWindow(
+                start=datetime(2026, 7, 8, 0, 0, tzinfo=UTC),
+                end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+            )
+        finally:
+            engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_content_extractor_returns_text_for_valid_html() -> None:
     """The extractor returns trafilatura-cleaned article text after a bounded HTTP fetch."""
 

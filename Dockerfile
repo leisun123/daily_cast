@@ -20,6 +20,7 @@ RUN poetry install --only main --no-root \
     && chmod -R a+rX /ms-playwright
 
 COPY alembic.ini ./
+COPY assets ./assets
 COPY config ./config
 COPY migrations ./migrations
 COPY src ./src
@@ -30,4 +31,4 @@ RUN chmod +x /app/docker-entrypoint.sh \
     && mkdir -p /app/data/netease/profile /app/public
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn dailycast.main:app --host 0.0.0.0 --port 8000 --workers 1"]
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn dailycast.main:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1"]

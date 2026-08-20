@@ -250,6 +250,27 @@ def test_filtering_rejects_old_short_and_missing_content_articles(app_config_pat
         engine.dispose()
 
 
+def test_filtering_keeps_recent_recruitment_notices_for_the_watch_window() -> None:
+    """Recruitment notices remain eligible for the longer user-requested tracking window."""
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    recruitment_notice = processable_article(
+        1,
+        source_id="changzhou-public-recruitment",
+        title="2026年常州市事业单位公开招聘工作人员公告",
+        content="常州市事业单位公开招聘工作人员公告，报名资格和时间安排详见正文。" * 12,
+        published_at=now - timedelta(days=6),
+    )
+
+    decision = filter_articles(
+        [recruitment_notice],
+        ProcessingPolicy(max_age_hours=36, min_content_length=300),
+        now,
+    )
+
+    assert decision.eligible_article_ids == (recruitment_notice.id,)
+    assert decision.filtered_reasons == {}
+
+
 def test_deduplication_marks_exact_and_near_duplicate_articles() -> None:
     """URL/content equality and high-overlap text select one deterministic quality winner."""
     now = datetime(2026, 7, 22, 12, tzinfo=UTC)

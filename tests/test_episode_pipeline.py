@@ -146,17 +146,17 @@ def test_ineligible_editorial_checkpoint_stops_before_episode(
 @pytest.mark.parametrize(
     ("enforce_quality_gate", "episode_created"),
     [
-        pytest.param(False, True, id="alpha-relaxed"),
+        pytest.param(False, False, id="alpha-relaxed"),
         pytest.param(True, False, id="strict"),
     ],
 )
-def test_quality_flagged_artifacts_are_persisted_only_when_alpha_gate_is_relaxed(
+def test_short_script_artifacts_never_create_an_episode(
     app_config_path,
     tmp_path,
     enforce_quality_gate: bool,
     episode_created: bool,
 ) -> None:
-    """A short/revise script stays auditable while only Alpha mode permits Episode creation."""
+    """A duration blocker stays auditable but must never create a publishable Episode."""
     factory: sessionmaker[Session] = upgraded_session_factory(app_config_path)
     try:
         fixture = create_selected_event(

@@ -32,6 +32,7 @@ _NON_SEMANTIC_OPTIONS = frozenset(
     }
 )
 _SENSITIVE_QUERY_MARKERS = ("api_key", "auth", "credential", "key", "secret", "signature", "token")
+_JSON_OBJECT_CONTRACT_VERSION = "chat-completions-json-object-schema-v1"
 
 
 def _canonical_json(value: object) -> str:
@@ -52,13 +53,17 @@ class OpenAICompatibleLLMProvider:
         model: str,
         timeout_seconds: float,
         temperature: float,
-        max_output_tokens: int,
+        max_output_tokens: int | None = None,
         max_retries: int = 2,
         response_format: str = "json_schema",
         top_p: float | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        if timeout_seconds <= 0 or max_output_tokens < 0 or max_retries < 0:
+        if (
+            timeout_seconds <= 0
+            or (max_output_tokens is not None and max_output_tokens < 0)
+            or max_retries < 0
+        ):
             msg = "LLM provider timeout, token limit, and retry count must be valid"
             raise ValueError(msg)
         self._endpoint, self._endpoint_identity_hash = self._endpoint_details(base_url)
@@ -75,12 +80,14 @@ class OpenAICompatibleLLMProvider:
     def generation_config_hash(self, model_options: Mapping[str, JSONValue]) -> str:
         """Hash only output-semantic settings and a credential-free endpoint identity."""
         options = self._semantic_options(model_options)
+        response_format = options.pop("response_format", self._response_format)
         payload = {
             "endpoint_identity_hash": self._endpoint_identity_hash,
             "max_output_tokens": options.pop("max_output_tokens", self.max_output_tokens),
             "provider_model_options_sorted": options,
-            "response_format_or_structured_output_mode": options.pop(
-                "response_format", self._response_format
+            "response_format_or_structured_output_mode": response_format,
+            "json_object_contract_version": (
+                _JSON_OBJECT_CONTRACT_VERSION if response_format == "json_object" else None
             ),
             "temperature": options.pop("temperature", self._temperature),
             "top_p_or_null": options.pop("top_p", self._top_p),
@@ -100,14 +107,21 @@ class OpenAICompatibleLLMProvider:
             raise LLMProviderAuthenticationError()
         options = self._semantic_options(model_options)
         response_mode = options.pop("response_format", self._response_format)
+        request_messages = (
+            _with_json_object_contract(messages, response_schema)
+            if response_mode == "json_object"
+            else messages
+        )
         payload: dict[str, object] = {
             "model": self.model,
             "messages": [
-                {"role": message.role, "content": message.content} for message in messages
+                {"role": message.role, "content": message.content} for message in request_messages
             ],
             "temperature": options.pop("temperature", self._temperature),
-            "max_tokens": options.pop("max_output_tokens", self.max_output_tokens),
         }
+        max_output_tokens = options.pop("max_output_tokens", self.max_output_tokens)
+        if max_output_tokens is not None:
+            payload["max_tokens"] = max_output_tokens
         top_p = options.pop("top_p", self._top_p)
         if top_p is not None:
             payload["top_p"] = top_p
@@ -257,6 +271,29 @@ def _response_content(body: Mapping[str, object]) -> dict[str, JSONValue]:
     if not isinstance(parsed, dict):
         raise LLMProviderResponseError()
     return parsed
+
+
+def _with_json_object_contract(
+    messages: Sequence[LLMMessage], response_schema: type[BaseModel]
+) -> tuple[LLMMessage, ...]:
+    """Embed the local schema when a compatible endpoint only exposes JSON-object mode."""
+    schema_json = _canonical_json(response_schema.model_json_schema())
+    contract = (
+        "Structured output contract: return exactly one JSON object that conforms to this JSON "
+        "Schema. Do not use Markdown, explanations, or additional top-level keys. JSON Schema: "
+        f"{schema_json}"
+    )
+    enriched: list[LLMMessage] = []
+    attached = False
+    for message in messages:
+        if message.role == "system" and not attached:
+            enriched.append(LLMMessage(role="system", content=f"{message.content}\n\n{contract}"))
+            attached = True
+        else:
+            enriched.append(message)
+    if not attached:
+        enriched.insert(0, LLMMessage(role="system", content=contract))
+    return tuple(enriched)
 
 
 def _response_usage(body: Mapping[str, object]) -> LLMUsage:

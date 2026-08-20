@@ -32,6 +32,16 @@ class RSSSettings:
     language: str
     author: str
 
+    @property
+    def channel_url(self) -> str:
+        """Return the canonical public page for the podcast channel."""
+        return self.public_base_url.rstrip("/")
+
+    @property
+    def cover_url(self) -> str:
+        """Return the immutable application-hosted podcast cover resource."""
+        return f"{self.channel_url}/cover.png"
+
 
 class RSSPublisher:
     """Publish V1 items to one local RSS feed while keeping public media paths immutable."""
@@ -162,6 +172,8 @@ class RSSPublisher:
             root = ElementTree.fromstring(self.feed_path.read_bytes())
         except (ElementTree.ParseError, OSError, RSSPublicationError):
             return False
+        if not self._channel_metadata_is_current(root):
+            return False
         for item in root.findall("./channel/item"):
             enclosure = item.find("enclosure")
             if enclosure is None:
@@ -184,11 +196,17 @@ class RSSPublisher:
         rss = ElementTree.Element("rss", {"version": "2.0"})
         channel = ElementTree.SubElement(rss, "channel")
         ElementTree.SubElement(channel, "title").text = self._settings.feed_title
+        ElementTree.SubElement(channel, "link").text = self._settings.channel_url
         ElementTree.SubElement(channel, "description").text = self._settings.feed_description
         ElementTree.SubElement(channel, "language").text = self._settings.language
         ElementTree.SubElement(channel, "author").text = self._settings.author
         ElementTree.SubElement(channel, f"{{{_ITUNES_NAMESPACE}}}author").text = (
             self._settings.author
+        )
+        ElementTree.SubElement(
+            channel,
+            f"{{{_ITUNES_NAMESPACE}}}image",
+            {"href": self._settings.cover_url},
         )
         for feed_item in items:
             item = ElementTree.SubElement(channel, "item")
@@ -218,6 +236,8 @@ class RSSPublisher:
             raise RSSPublicationError("generated RSS XML is invalid") from error
         if root.tag != "rss" or root.attrib.get("version") != "2.0":
             raise RSSPublicationError("generated XML is not an RSS 2.0 document")
+        if not self._channel_metadata_is_current(root):
+            raise RSSPublicationError("RSS channel metadata validation failed")
         item_nodes = root.findall("./channel/item")
         actual_guids = [node.findtext("guid") for node in item_nodes]
         expected_guids = [item.guid for item in expected_items]
@@ -232,6 +252,14 @@ class RSSPublisher:
                 "type": expected.asset.mime_type,
             }:
                 raise RSSPublicationError("RSS enclosure validation failed")
+
+    def _channel_metadata_is_current(self, root: ElementTree.Element) -> bool:
+        """Require the channel identity fields expected by podcast RSS importers."""
+        channel = root.find("channel")
+        if channel is None or channel.findtext("link") != self._settings.channel_url:
+            return False
+        cover = channel.find(f"{{{_ITUNES_NAMESPACE}}}image")
+        return cover is not None and cover.attrib == {"href": self._settings.cover_url}
 
     def _asset_from_publication(self, publication: Publication) -> PublicAsset | None:
         """Reconstruct a public asset only when all durable publication fields are present."""

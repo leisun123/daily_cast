@@ -103,6 +103,8 @@ def create_event(
     factory: sessionmaker[Session],
     *,
     key: str,
+    source_id: str | None = None,
+    title: str | None = None,
     deterministic_score: float = 0.0,
     source_priority: int = 50,
     summary: str = "Short, bounded event summary.",
@@ -110,7 +112,8 @@ def create_event(
 ) -> NewsEvent:
     """Persist one candidate event with representative source/article evidence."""
     now = datetime(2026, 7, 22, 12, tzinfo=UTC)
-    source_id = f"source-{key}"
+    source_id = source_id or f"source-{key}"
+    title = title or f"Event {key}"
     with UnitOfWork(factory) as unit:
         assert unit.session is not None
         SourceRepository(unit.session).create(
@@ -129,9 +132,9 @@ def create_event(
             url=url,
             normalized_url=url,
             url_hash=sha256_text(url),
-            title=f"Event {key}",
-            normalized_title=f"event {key}",
-            title_hash=sha256_text(f"event {key}"),
+            title=title,
+            normalized_title=title.casefold(),
+            title_hash=sha256_text(title.casefold()),
             summary=summary,
             content_text=content,
             content_hash=sha256_text(content),
@@ -355,6 +358,248 @@ def test_ranking_persists_scores_and_selects_the_top_configured_count(
         assert events[high.id].risk_flags_json == '["verify wording"]'
 
 
+def test_ranking_reserves_a_domestic_story_and_caps_ai_stories(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A stronger AI score cannot crowd every domestic story out of an episode."""
+    candidates = (
+        create_event(
+            migrated_session_factory,
+            key="hn-ai",
+            source_id="hacker-news-rss",
+            title="Claude model update changes enterprise coding workflows",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="ithome-ai",
+            source_id="ithome-rss",
+            title="DeepSeek 发布新一代大模型",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="oschina-ai",
+            source_id="oschina-news-rss",
+            title="OpenAI 发布新的 GPT 模型",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="sspai-tech",
+            source_id="sspai-rss",
+            title="Gemini AI 新功能进入手机系统",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="domestic",
+            source_id="chinanews-china-rss",
+            title="国务院部署促进消费和稳定就业的重点工作",
+        ),
+    )
+    task_run_id, task_step_id = create_task_provenance(migrated_session_factory)
+    provider = FakeLLMProvider(
+        {
+            "scores": [
+                event_score(candidates[0].id, importance=100, relevance=100),
+                event_score(candidates[1].id, importance=95, relevance=95),
+                event_score(candidates[2].id, importance=90, relevance=90),
+                event_score(candidates[3].id, importance=85, relevance=85),
+                event_score(candidates[4].id, importance=80, relevance=80),
+            ]
+        }
+    )
+    service = AIEditorialService(
+        migrated_session_factory,
+        provider,
+        max_selected_events=4,
+    )
+
+    result = asyncio.run(
+        service.score_events(
+            tuple(candidate.id for candidate in candidates),
+            task_run_id=task_run_id,
+            task_step_id=task_step_id,
+            budget=BudgetController(),
+        )
+    )
+
+    assert result.selected_event_ids == (
+        candidates[0].id,
+        candidates[1].id,
+        candidates[2].id,
+        candidates[4].id,
+    )
+
+
+def test_ranking_caps_ai_stories_when_other_topics_are_available(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """The AI cap leaves room for a lower-ranked non-AI story on a tech-heavy day."""
+    candidates = (
+        create_event(
+            migrated_session_factory,
+            key="hn-ai-only",
+            source_id="hacker-news-rss",
+            title="Claude model update changes enterprise coding workflows",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="ithome-ai-only",
+            source_id="ithome-rss",
+            title="DeepSeek 发布新一代大模型",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="oschina-ai-only",
+            source_id="oschina-news-rss",
+            title="OpenAI 发布新的 GPT 模型",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="sspai-ai-only",
+            source_id="sspai-rss",
+            title="Gemini AI 新功能进入手机系统",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="non-ai",
+            source_id="source-non-ai",
+            title="手机系统更新带来新的隐私设置",
+        ),
+    )
+    task_run_id, task_step_id = create_task_provenance(migrated_session_factory)
+    provider = FakeLLMProvider(
+        {
+            "scores": [
+                event_score(candidates[0].id, importance=100, relevance=100),
+                event_score(candidates[1].id, importance=95, relevance=95),
+                event_score(candidates[2].id, importance=90, relevance=90),
+                event_score(candidates[3].id, importance=85, relevance=85),
+                event_score(candidates[4].id, importance=80, relevance=80),
+            ]
+        }
+    )
+    service = AIEditorialService(
+        migrated_session_factory,
+        provider,
+        max_selected_events=4,
+    )
+
+    result = asyncio.run(
+        service.score_events(
+            tuple(candidate.id for candidate in candidates),
+            task_run_id=task_run_id,
+            task_step_id=task_step_id,
+            budget=BudgetController(),
+        )
+    )
+
+    assert result.selected_event_ids == (
+        candidates[0].id,
+        candidates[1].id,
+        candidates[2].id,
+        candidates[4].id,
+    )
+
+
+def test_ranking_reserves_a_recruitment_notice_when_one_is_available(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A current recruitment notice stays in the daily briefing despite lower model scores."""
+    candidates = (
+        create_event(
+            migrated_session_factory,
+            key="top-one",
+            source_id="hacker-news-rss",
+            title="A high-scoring technology story",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="top-two",
+            source_id="ithome-rss",
+            title="另一条高分科技资讯",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="top-three",
+            source_id="oschina-news-rss",
+            title="第三条高分产业动态",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="top-four",
+            source_id="sspai-rss",
+            title="第四条高分数码新闻",
+        ),
+        create_event(
+            migrated_session_factory,
+            key="recruitment",
+            source_id="changzhou-public-recruitment",
+            title="2026年常州市事业单位公开招聘工作人员公告",
+        ),
+    )
+    task_run_id, task_step_id = create_task_provenance(migrated_session_factory)
+    provider = FakeLLMProvider(
+        {
+            "scores": [
+                event_score(candidates[0].id, importance=100, relevance=100),
+                event_score(candidates[1].id, importance=95, relevance=95),
+                event_score(candidates[2].id, importance=90, relevance=90),
+                event_score(candidates[3].id, importance=85, relevance=85),
+                event_score(candidates[4].id, importance=80, relevance=80),
+            ]
+        }
+    )
+
+    result = asyncio.run(
+        AIEditorialService(
+            migrated_session_factory,
+            provider,
+            max_selected_events=4,
+        ).score_events(
+            tuple(candidate.id for candidate in candidates),
+            task_run_id=task_run_id,
+            task_step_id=task_step_id,
+            budget=BudgetController(),
+        )
+    )
+
+    assert result.selected_event_ids == (
+        candidates[0].id,
+        candidates[1].id,
+        candidates[2].id,
+        candidates[4].id,
+    )
+
+
+def test_candidate_cap_keeps_a_recruitment_notice_for_ranking(
+    migrated_session_factory: sessionmaker[Session],
+) -> None:
+    """A lower-scored notice reaches the ranking stage instead of being cut before selection."""
+    top = create_event(
+        migrated_session_factory,
+        key="candidate-top",
+        deterministic_score=100,
+    )
+    runner_up = create_event(
+        migrated_session_factory,
+        key="candidate-runner-up",
+        deterministic_score=90,
+    )
+    recruitment = create_event(
+        migrated_session_factory,
+        key="candidate-recruitment",
+        source_id="changzhou-public-recruitment",
+        deterministic_score=0,
+    )
+
+    cards = AIEditorialService(
+        migrated_session_factory,
+        FakeLLMProvider({"scores": []}),
+        max_candidates=2,
+    ).build_event_cards((top.id, runner_up.id, recruitment.id))
+
+    assert tuple(card.event_id for card in cards) == (top.id, recruitment.id)
+
+
 def test_score_for_unknown_event_id_is_rejected_before_cache_persistence(
     migrated_session_factory: sessionmaker[Session],
 ) -> None:
@@ -409,6 +654,8 @@ def test_editorial_configuration_has_documented_candidate_and_selection_defaults
 
     assert settings.editorial.max_candidates == 30
     assert settings.editorial.max_selected_events == 8
+    assert settings.editorial.max_ai_events == 3
+    assert settings.editorial.min_domestic_events_when_available == 2
 
 
 def test_ranking_step_consumes_clustered_event_ids_and_records_selection(

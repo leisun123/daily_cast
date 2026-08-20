@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+
+from dailycast.news.source_windows import DEFAULT_SOURCE_MAX_AGE_HOURS
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +13,9 @@ class ProcessingPolicy:
     """Explicit V1 bounds and thresholds for deterministic processing."""
 
     max_age_hours: int = 36
+    source_max_age_hours: dict[str, int] = field(
+        default_factory=lambda: dict(DEFAULT_SOURCE_MAX_AGE_HOURS)
+    )
     min_content_length: int = 300
     title_duplicate_window_hours: int = 72
     near_duplicate_window_hours: int = 72
