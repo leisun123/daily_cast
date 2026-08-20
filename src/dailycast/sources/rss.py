@@ -54,7 +54,9 @@ class RSSCollector:
         for entry in entries:
             if len(candidates) >= (source.max_items_per_run or 50):
                 break
-            candidate, entry_error = self._to_candidate(source, entry, response.final_url)
+            candidate, entry_error = self._to_candidate(
+                source, entry, response.final_url, window.end
+            )
             if entry_error is not None:
                 errors.append(entry_error)
                 continue
@@ -69,9 +71,14 @@ class RSSCollector:
 
     @staticmethod
     def _to_candidate(
-        source: Source, entry: Any, feed_url: str
+        source: Source, entry: Any, feed_url: str, discovered_at: datetime
     ) -> tuple[ArticleCandidate | None, SourceError | None]:
-        """Map one feedparser entry while making malformed entries an isolated warning."""
+        """Map one feedparser entry while making malformed entries an isolated warning.
+
+        A feed entry without any date field counts as discovered at collection
+        time: undated feeds stay usable, and the age filter still retires each
+        stored article max_age_hours after its first ingest.
+        """
         raw_url = entry.get("link")
         raw_title = entry.get("title")
         if not isinstance(raw_url, str) or not raw_url.strip():
@@ -98,7 +105,7 @@ class RSSCollector:
                 title=RSSCollector._plain_text(raw_title) or raw_title.strip(),
                 summary=summary,
                 content_text=content_text,
-                published_at=RSSCollector._entry_datetime(entry),
+                published_at=RSSCollector._entry_datetime(entry) or discovered_at,
                 language=source.language,
                 metadata={"feed_url": feed_url},
             ),
