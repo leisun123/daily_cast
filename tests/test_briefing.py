@@ -34,10 +34,17 @@ def _evidence(
     )
 
 
-def _item(source_url: str, source_name: str = "量子位") -> BriefingItem:
+def _item(
+    source_url: str,
+    source_name: str = "量子位",
+    *,
+    summary: str = "第一句摘要。第二句摘要。",
+    why_it_matters: str = "这会影响行业下一步的产品布局。",
+) -> BriefingItem:
     return BriefingItem(
         headline="头条一句话",
-        summary="第一句摘要。第二句摘要。",
+        summary=summary,
+        why_it_matters=why_it_matters,
         source_name=source_name,
         source_url=source_url,
     )
@@ -62,11 +69,28 @@ def test_briefing_result_rejects_extra_fields() -> None:
         BriefingResult.model_validate({"overview": "概览。", "items": [], "unexpected": 1})
 
 
-def test_briefing_result_caps_items_at_twelve() -> None:
-    """The item cap keeps one briefing inside the WeCom markdown byte budget."""
-    items = [_item(f"https://news.example.test/{index}").model_dump() for index in range(13)]
+def test_briefing_result_rejects_more_than_five_items() -> None:
+    """The item cap keeps detailed entries inside the per-message byte budget."""
+    items = [_item(f"https://news.example.test/{index}").model_dump() for index in range(6)]
     with pytest.raises(ValueError):
         BriefingResult.model_validate({"overview": "概览。", "items": items})
+
+
+def test_briefing_item_allows_a_detailed_factual_summary() -> None:
+    """A factual event summary can carry enough detail to stand on its own."""
+    detailed_summary = "甲" * 110
+
+    item = _item("https://news.example.test/a", summary=detailed_summary)
+
+    assert item.summary == detailed_summary
+
+
+def test_briefing_item_rejects_content_above_the_delivery_budget() -> None:
+    """Longer prose belongs in the source article, not a single WeCom message."""
+    with pytest.raises(ValueError, match="summary"):
+        _item("https://news.example.test/a", summary="甲" * 111)
+    with pytest.raises(ValueError, match="why_it_matters"):
+        _item("https://news.example.test/a", why_it_matters="乙" * 56)
 
 
 def test_briefing_item_requires_an_absolute_http_source_url() -> None:
@@ -79,21 +103,32 @@ def test_briefing_item_requires_an_absolute_http_source_url() -> None:
         _item("news.example.test/a")
 
 
-def test_renderer_uses_the_configured_title_and_numbered_list() -> None:
-    """The deterministic layout keeps the daily heading and evidence link format stable."""
+def test_renderer_uses_a_scannable_briefing_hierarchy_and_reader_friendly_source() -> None:
+    """A reader can scan the context, the key point, and a clean original-source link."""
     markdown = render_briefing(
         "通信行业日报",
         date(2026, 8, 20),
-        BriefingResult(overview="概览一句话。", items=[_item("https://news.example.test/a")]),
+        BriefingResult(
+            overview="概览一句话。",
+            items=[
+                _item(
+                    "https://news.example.test/a",
+                    source_name="36氪快讯（RSSHub 镜像）",
+                    why_it_matters="企业部署模型时可少一道数据顾虑。",
+                )
+            ],
+        ),
         [_evidence()],
     )
 
-    assert markdown.startswith("# 通信行业日报 8月20日\n")
-    assert "概览一句话。" in markdown
-    expected_item = (
-        "**1. 头条一句话**\n" "第一句摘要。第二句摘要。\n" "[量子位](https://news.example.test/a)"
-    )
-    assert expected_item in markdown
+    assert markdown.startswith("# 通信行业日报｜8月20日\n")
+    assert '<font color="comment">今日精选 · 1 条</font>' in markdown
+    assert "**今日要点**\n概览一句话。" in markdown
+    assert "**01｜头条一句话**" in markdown
+    assert '<font color="comment">发生了什么</font>\n第一句摘要。第二句摘要。' in markdown
+    assert '<font color="comment">为什么值得看</font>\n企业部署模型时可少一道数据顾虑。' in markdown
+    assert "[36氪快讯 · 阅读原文 ↗](https://news.example.test/a)" in markdown
+    assert "RSSHub" not in markdown
 
 
 def test_renderer_replaces_a_hallucinated_url_with_the_evidence_url() -> None:
@@ -258,6 +293,7 @@ def test_briefing_settings_default_to_disabled() -> None:
     assert settings.webhook_format == "wecom_markdown"
     assert settings.window_hours == 24
     assert settings.cron_expression == "30 8 * * mon-fri"
+    assert settings.rsshub_base_url is None
 
 
 def test_webhook_enabled_requires_a_webhook_url() -> None:
@@ -275,6 +311,7 @@ def test_briefing_settings_load_from_yaml(app_config_path: Path, tmp_path: Path)
         + "briefing:\n"
         + "  enabled: true\n"
         + "  window_hours: 12\n"
+        + "  rsshub_base_url: https://rsshub.example.test/private-instance\n"
         + "  webhook_enabled: true\n"
         + "  webhook_format: generic_json\n"
         + f"  webhook_url: {WEBHOOK_URL}\n",
@@ -288,6 +325,7 @@ def test_briefing_settings_load_from_yaml(app_config_path: Path, tmp_path: Path)
     assert settings.briefing.webhook_enabled is True
     assert settings.briefing.webhook_format == "generic_json"
     assert settings.briefing.webhook_url == WEBHOOK_URL
+    assert settings.briefing.rsshub_base_url == "https://rsshub.example.test/private-instance"
 
 
 def test_interleave_by_source_rotates_feeds_instead_of_ranking_one_to_the_top() -> None:
