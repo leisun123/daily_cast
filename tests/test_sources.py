@@ -298,6 +298,49 @@ def test_rss_collector_returns_article_candidates_from_fixture() -> None:
     asyncio.run(scenario())
 
 
+def test_rss_collector_treats_undated_entries_as_discovered_now() -> None:
+    """Feeds without pubDate fields still produce in-window, dated candidates."""
+
+    async def scenario() -> None:
+        feed = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<rss version="2.0"><channel><title>undated</title>'
+            b"<item><title>undated entry</title>"
+            b"<link>https://news.example.test/undated</link>"
+            b"<description>A summary long enough to become a candidate.</description></item>"
+            b"</channel></rss>"
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "application/rss+xml"},
+                    content=feed,
+                    request=request,
+                )
+            )
+        )
+        try:
+            collector = RSSCollector(SafeHttpFetcher(client, url_validator=AllowAllUrls()))
+            result = await collector.collect(
+                source(),
+                CollectionWindow(
+                    start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert len(result.candidates) == 1
+        # No date fields exist on the entry, so the candidate carries the
+        # collection timestamp instead of an unverifiable None.
+        assert result.candidates[0].published_at == datetime(2026, 7, 22, 0, 0, tzinfo=UTC)
+
+    asyncio.run(scenario())
+
+
 def test_html_list_collector_discovers_only_matching_public_recruitment_announcements() -> None:
     """Official list pages become dated candidates after their recruitment title is matched."""
 
