@@ -175,6 +175,42 @@ def test_renderer_deduplicates_items_sharing_one_evidence_url() -> None:
     assert markdown.count("https://news.example.test/a") == 1
 
 
+def test_renderer_keeps_five_detailed_items_inside_the_wecom_budget() -> None:
+    """Five fully detailed entries must remain a complete single WeCom message."""
+    evidence = [_evidence(source_url=f"https://news.example.test/{index}") for index in range(5)]
+    result = BriefingResult(
+        overview="今日多项通信与AI基础设施进展进入实质交付阶段。",
+        items=[
+            _item(item.source_url, summary="甲" * 110, why_it_matters="乙" * 55)
+            for item in evidence
+        ],
+    )
+
+    markdown = render_briefing("通信行业日报", date(2026, 8, 20), result, evidence)
+
+    assert markdown.count("**0") == 5
+    assert len(markdown.encode("utf-8")) <= RENDER_BYTE_BUDGET
+
+
+def test_renderer_omits_an_oversized_item_without_cutting_the_next_item() -> None:
+    """An unusably long direct link drops its block rather than truncating the message tail."""
+    oversized_url = "https://news.example.test/" + "a" * 3900
+    evidence = [
+        _evidence(source_url=oversized_url),
+        _evidence(source_url="https://news.example.test/kept"),
+    ]
+    result = BriefingResult(
+        overview="概览。",
+        items=[_item(oversized_url), _item("https://news.example.test/kept")],
+    )
+
+    markdown = render_briefing("通信行业日报", date(2026, 8, 20), result, evidence)
+
+    assert oversized_url not in markdown
+    assert "https://news.example.test/kept" in markdown
+    assert not markdown.endswith("…（内容过长，已截断）")
+
+
 def test_truncate_markdown_keeps_short_content_unchanged() -> None:
     """Content already inside the byte budget ships without any marker."""
     assert truncate_markdown("# 标题\n正文\n") == "# 标题\n正文\n"

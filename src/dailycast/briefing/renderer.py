@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import date
 
@@ -10,6 +11,7 @@ from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingR
 WECOM_MARKDOWN_MAX_BYTES = 4096
 RENDER_BYTE_BUDGET = 4000
 _TRUNCATION_SUFFIX = "\n…（内容过长，已截断）"
+_RSS_MIRROR_SUFFIX = re.compile(r"[（(]RSSHub(?:\s*镜像)?[）)]", flags=re.IGNORECASE)
 
 
 def render_briefing(
@@ -29,27 +31,27 @@ def render_briefing(
     fallback_url_by_source: dict[str, str] = {}
     for entry in evidence:
         fallback_url_by_source.setdefault(entry.source_name, entry.source_url)
-    lines = [
-        f"# {category_title} {briefing_date.month}月{briefing_date.day}日",
-        "",
-        result.overview.strip(),
-        "",
-    ]
+    resolved_items: list[tuple[BriefingItem, str]] = []
     seen_urls: set[str] = set()
-    number = 0
     for item in result.items:
         url = _resolve_url(item, urls_in_evidence, fallback_url_by_source)
         if url is None or url in seen_urls:
             continue
         seen_urls.add(url)
-        number += 1
-        # One item per block: WeCom renders each line separately, so a single
-        # long "headline — summary — link" line becomes an unreadable wall.
-        lines.append(f"**{number}. {item.headline.strip()}**")
-        lines.append(item.summary.strip())
-        lines.append(f"[{item.source_name.strip()}]({url})")
-        lines.append("")
-    return "\n".join(lines).rstrip("\n") + "\n"
+        resolved_items.append((item, url))
+    accepted_blocks: list[list[str]] = []
+    for item, url in resolved_items:
+        number = len(accepted_blocks) + 1
+        block = _item_block(number, item, url)
+        candidate = _render_lines(
+            category_title,
+            briefing_date,
+            result.overview,
+            [*accepted_blocks, block],
+        )
+        if len(candidate.encode("utf-8")) <= RENDER_BYTE_BUDGET:
+            accepted_blocks.append(block)
+    return _render_lines(category_title, briefing_date, result.overview, accepted_blocks)
 
 
 def truncate_markdown(content: str, max_bytes: int = RENDER_BYTE_BUDGET) -> str:
@@ -67,6 +69,39 @@ def truncate_markdown(content: str, max_bytes: int = RENDER_BYTE_BUDGET) -> str:
     return text.rstrip("\n") + _TRUNCATION_SUFFIX
 
 
+def _render_lines(
+    category_title: str,
+    briefing_date: date,
+    overview: str,
+    item_blocks: Sequence[Sequence[str]],
+) -> str:
+    """Render the header and complete item blocks with their final item count."""
+    lines = [
+        f"# {category_title}｜{briefing_date.month}月{briefing_date.day}日",
+        f'<font color="comment">今日精选 · {len(item_blocks)} 条</font>',
+        "",
+        "**今日要点**",
+        overview.strip(),
+    ]
+    for block in item_blocks:
+        lines.extend(block)
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _item_block(number: int, item: BriefingItem, url: str) -> list[str]:
+    """Render one evidence-backed item without creating a partial-message risk."""
+    source_name = _display_source_name(item.source_name)
+    return [
+        "",
+        f"**{number:02d}｜{item.headline.strip()}**",
+        '<font color="comment">发生了什么</font>',
+        item.summary.strip(),
+        '<font color="comment">为什么值得看</font>',
+        item.why_it_matters.strip(),
+        f"[{source_name} · 阅读原文 ↗]({url})",
+    ]
+
+
 def _resolve_url(
     item: BriefingItem,
     urls_in_evidence: set[str],
@@ -76,3 +111,9 @@ def _resolve_url(
     if item.source_url in urls_in_evidence:
         return item.source_url
     return fallback_url_by_source.get(item.source_name)
+
+
+def _display_source_name(source_name: str) -> str:
+    """Hide feed-delivery plumbing while keeping the reader-facing publisher name."""
+    cleaned = _RSS_MIRROR_SUFFIX.sub("", source_name).strip(" -—·")
+    return cleaned or source_name.strip()
