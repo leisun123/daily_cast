@@ -16,7 +16,11 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
-from dailycast.briefing.service import BriefingRunReport, read_briefings_for_date
+from dailycast.briefing.service import (
+    BriefingRunInProgressError,
+    BriefingRunReport,
+    read_briefings_for_date,
+)
 from dailycast.core.errors import DailyCastError, InfrastructureError
 from dailycast.core.identifiers import UUIDGenerator
 from dailycast.core.lifespan import AppRuntime, build_daily_generation_command, build_lifespan
@@ -186,12 +190,17 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         )
 
     @app.post("/briefing/generate", status_code=202, tags=["briefing"])
-    async def generate_briefing(runtime: RuntimeDependency) -> JSONResponse:
+    async def generate_briefing(runtime: RuntimeDependency, force: bool = False) -> JSONResponse:
         """Trigger one manual briefing run in the background without blocking the request."""
         _require_ready(runtime)
         if runtime.briefing_service is None:
             raise HTTPException(status_code=409, detail="briefing is not enabled")
-        task = asyncio.create_task(runtime.briefing_service.run())
+        try:
+            task = runtime.briefing_service.create_run_task(force=force)
+        except BriefingRunInProgressError:
+            raise HTTPException(
+                status_code=409, detail="briefing run already in progress"
+            ) from None
         task.add_done_callback(_log_briefing_task_result)
         return JSONResponse(status_code=202, content={"status": "accepted"})
 

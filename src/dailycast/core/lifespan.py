@@ -312,6 +312,11 @@ def _build_briefing_runtime(
         max_items_per_category=settings.briefing.max_items_per_category,
         max_evidence_chars_per_article=settings.briefing.max_evidence_chars_per_article,
         output_dir=settings.data_dir / "work" / "briefings",
+        budget_factory=lambda: BudgetController(
+            max_calls=settings.llm.budget.max_calls,
+            max_input_tokens=settings.llm.budget.max_input_tokens,
+            max_output_tokens=settings.llm.budget.max_output_tokens,
+        ),
         timezone=settings.app.timezone,
     )
     briefing_scheduler = BriefingScheduler(

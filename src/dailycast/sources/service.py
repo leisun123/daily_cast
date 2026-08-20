@@ -301,11 +301,18 @@ class SourceCollectionService:
         return await collector.collect(source, window)
 
     def _enabled_sources(self) -> tuple[Source, ...]:
-        """Read the current database truth for enabled sources without retaining the Session."""
+        """Read the current database truth for enabled sources without retaining the Session.
+
+        Sources carrying a ``briefing_category`` tag in their config belong to the
+        briefing-only pool: the podcast pipeline never collects them by default, and
+        the briefing flow selects them explicitly through the same tag.
+        """
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             return tuple(
-                source for source in SourceRepository(unit.session).list() if source.enabled
+                source
+                for source in SourceRepository(unit.session).list()
+                if source.enabled and briefing_category_for_source(source) is None
             )
 
     def _record_source_success(self, source_id: str) -> None:
@@ -334,6 +341,24 @@ class SourceCollectionService:
                     last_error_code=error.code,
                     last_error_summary=error.summary[:1000],
                 )
+
+
+def briefing_category_for_source(source: Source) -> str | None:
+    """Return the briefing-pool tag without trusting arbitrary config JSON shapes.
+
+    This is the single place that parses the ``briefing_category`` config key, so the
+    podcast exclusion rule and the briefing selection rule can never drift apart.
+    """
+    try:
+        config = json.loads(source.config_json)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    category = config.get("briefing_category")
+    if isinstance(category, str) and category:
+        return category
+    return None
 
 
 def normalize_url(url: str) -> str:

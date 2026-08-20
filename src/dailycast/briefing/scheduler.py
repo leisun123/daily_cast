@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from dailycast.briefing.service import BriefingRunReport
+from dailycast.briefing.service import BriefingRunInProgressError, BriefingRunReport
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,9 @@ class BriefingScheduler:
         """Run one briefing while keeping a failed tick isolated from the process."""
         try:
             await self._run()
+        except BriefingRunInProgressError:
+            # A manual run overlapping the cron tick is normal operation, not a failure.
+            logger.info("scheduled briefing skipped: a run is already in progress")
         except Exception:
             logger.exception("scheduled briefing run failed")
 

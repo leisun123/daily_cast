@@ -682,3 +682,42 @@ HTMX 表单遇到业务错误时可返回相同错误码并渲染局部错误片
 - 直接查询、编辑或删除 LLMArtifact；该表是内部只读缓存，只能由通过 schema 校验的 LLM 服务写入，并按保留策略清理；
 - 网易云、Podbean 或 Dify 的运行接口；
 - WebSocket 实时推送。管理页使用有界轮询，任务终态后停止。
+
+## 13. 每日文字简报（Briefing，已实现）
+
+本节接口已随简报功能落地，独立于上述 `/api/v1` 设计（不带前缀、不走 TaskRun）。简报流程从带 `briefing_category` 标签的来源采集近 24 小时新闻，按类目（`telecom` 通信行业日报、`ai` AI 动态日报）生成中文 markdown 并推送企业微信群机器人；与播客流水线互不共享任务与来源池。
+
+启用方式：
+
+- YAML 增加 `briefing:` 段：`enabled: true`、`sources_config_path`（简报源种子，默认 `config/briefing.sources.yaml`）、`cron_expression`（默认 `30 7 * * *`，应用时区）、`window_hours`、`wecom_enabled`。
+- webhook 凭据只从环境变量注入：`DAILYCAST_BRIEFING__WECOM_WEBHOOK_URL`；`wecom_enabled=true` 时必填，缺失则配置加载失败。
+- `config/app.yaml` 为启用示例（配合 `.env` 的 `DAILYCAST_CONFIG_PATH=config/app.yaml`）；默认 `config/app.example.yaml` 中 `briefing.enabled=false`，功能完全关闭。
+
+### 13.1 手动触发简报生成
+
+- 方法/路径：`POST /briefing/generate`
+- 查询参数：`force:boolean=false`。`force=true` 忽略当日各类目完成标记，重新生成并推送。
+- 返回：`202`，`{"status":"accepted"}`；实际生成在后台任务中执行。
+- 幂等语义：同一应用时区日期内，每个类目完成（生成成功且推送已发送或未启用）后写入 `data/work/briefings/YYYY-MM-DD-{category}.done` 标记；非 force 的重复触发对已完成类目直接跳过（report 中 `status=skipped`、`reason=already_completed`），不重复调用 LLM、不重复推送。推送失败不写标记，下次运行自动补推。全进程同时只允许一个简报 run。
+- 常见错误：`409 {"detail":"briefing is not enabled"}`（功能未启用）；`409 {"detail":"briefing run already in progress"}`（已有运行中的简报任务）。
+- 幂等键：不需要；按日按类目完成标记 + 单运行互斥提供等效保护。
+
+### 13.2 读取当日简报
+
+- 方法/路径：`GET /briefing/latest`
+- 参数：无。
+- 返回：`200`：
+
+```json
+{
+  "date": "2026-08-20",
+  "briefings": {
+    "telecom": "# 通信行业日报 8月20日\n...",
+    "ai": "# AI 动态日报 8月20日\n..."
+  }
+}
+```
+
+- `date` 为应用时区的当天日期；`briefings` 只包含当日已落盘的类目 markdown。
+- 常见错误：`404`（当日尚未生成任何简报）。
+- 幂等键：不需要。

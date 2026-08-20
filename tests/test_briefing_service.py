@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -13,11 +13,17 @@ from editorial_test_support import upgraded_session_factory
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.briefing.service import BriefingService, read_briefings_for_date
+from dailycast.briefing.service import (
+    ALREADY_COMPLETED,
+    BriefingRunInProgressError,
+    BriefingService,
+    read_briefings_for_date,
+)
 from dailycast.briefing.wecom import WeComNotifier
 from dailycast.db.models import LLMOperation, Source, SourceKind
 from dailycast.db.repositories import SourceRepository
 from dailycast.db.transactions import UnitOfWork
+from dailycast.llm.budget import BudgetController
 from dailycast.llm.contracts import LLMMessage, LLMUsage, StructuredResult
 from dailycast.news.service import NewsProcessor
 from dailycast.news.types import ProcessingPolicy
@@ -119,6 +125,19 @@ class RecordingNotifier(WeComNotifier):
         self.pushed.append(markdown)
 
 
+class FailingNotifier(WeComNotifier):
+    """Fail every push so completion markers must stay absent."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def push(self, markdown: str) -> None:
+        """Count each attempt before reporting a webhook outage."""
+        del markdown
+        self.attempts += 1
+        raise RuntimeError("webhook down")
+
+
 def _seed_source(
     factory: sessionmaker[Session],
     source_id: str,
@@ -171,6 +190,7 @@ def _build_service(
     collector: FakeRSSCollector,
     llm: FakeBriefingLLM,
     notifier: WeComNotifier | None,
+    budget_factory: Callable[[], BudgetController] = BudgetController,
 ) -> BriefingService:
     article_service = ArticleService(factory)
     collection_service = SourceCollectionService(
@@ -189,6 +209,7 @@ def _build_service(
         llm,
         notifier,
         output_dir=output_dir,
+        budget_factory=budget_factory,
     )
 
 
@@ -300,3 +321,171 @@ def test_briefing_run_skips_a_category_without_eligible_articles(
     assert llm.operations == [LLMOperation.GENERATE_BRIEFING]
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
     assert set(briefings) == {"telecom"}
+
+
+def _two_category_setup(
+    session_factory: sessionmaker[Session],
+) -> tuple[FakeRSSCollector, FakeBriefingLLM]:
+    """Seed one telecom and one ai source with matching canned LLM payloads."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    _seed_source(session_factory, "ai-source", category="ai")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [_candidate("telecom-source", "t1")],
+            "ai-source": [_candidate("ai-source", "a1")],
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payload("https://news.example.test/t1", "来源 telecom-source"),
+            "AI 动态日报": _llm_payload("https://news.example.test/a1", "来源 ai-source"),
+        }
+    )
+    return collector, llm
+
+
+def test_second_non_force_run_skips_completed_categories(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A completed category is neither regenerated nor pushed again on the same day."""
+    collector, llm = _two_category_setup(session_factory)
+    notifier = RecordingNotifier()
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory, output_dir, collector=collector, llm=llm, notifier=notifier
+    )
+    asyncio.run(service.run())
+
+    report = asyncio.run(service.run())
+
+    assert all(entry.status == "skipped" for entry in report.categories)
+    assert all(entry.reason == ALREADY_COMPLETED for entry in report.categories)
+    assert llm.operations == [LLMOperation.GENERATE_BRIEFING, LLMOperation.GENERATE_BRIEFING]
+    assert len(notifier.pushed) == 2
+
+
+def test_force_run_regenerates_despite_completion_markers(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A forced rerun ignores the per-day completion markers."""
+    collector, llm = _two_category_setup(session_factory)
+    notifier = RecordingNotifier()
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory, output_dir, collector=collector, llm=llm, notifier=notifier
+    )
+    asyncio.run(service.run())
+
+    report = asyncio.run(service.run(force=True))
+
+    assert all(entry.status == "generated" for entry in report.categories)
+    assert len(llm.operations) == 4
+    assert len(notifier.pushed) == 4
+
+
+def test_failed_push_leaves_no_marker_so_the_next_run_retries(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A push failure must not mark the category done; the next run regenerates it."""
+    collector, llm = _two_category_setup(session_factory)
+    notifier = FailingNotifier()
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory, output_dir, collector=collector, llm=llm, notifier=notifier
+    )
+    first_report = asyncio.run(service.run())
+
+    assert all(entry.push_status == "failed" for entry in first_report.categories)
+    assert not list(output_dir.glob("*.done"))
+
+    second_report = asyncio.run(service.run())
+
+    assert all(entry.status == "generated" for entry in second_report.categories)
+    assert len(llm.operations) == 4
+    assert notifier.attempts == 4
+
+
+def test_concurrent_run_raises_briefing_run_in_progress(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A second overlapping run fails fast instead of duplicating collection and LLM work."""
+    collector, llm = _two_category_setup(session_factory)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_generate = llm.generate_structured
+
+    async def blocking_generate(*args: object, **kwargs: object) -> StructuredResult:
+        entered.set()
+        await release.wait()
+        return await original_generate(*args, **kwargs)  # type: ignore[arg-type]
+
+    llm.generate_structured = blocking_generate  # type: ignore[method-assign]
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory, output_dir, collector=collector, llm=llm, notifier=None
+    )
+
+    async def scenario() -> None:
+        first = asyncio.create_task(service.run())
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert service.run_in_progress is True
+        with pytest.raises(BriefingRunInProgressError, match="already in progress"):
+            await service.run()
+        release.set()
+        report = await first
+        assert all(entry.status == "generated" for entry in report.categories)
+
+    asyncio.run(scenario())
+    assert service.run_in_progress is False
+
+
+def test_exhausted_llm_budget_fails_categories_before_any_provider_call(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A depleted budget fails every category without invoking the LLM provider."""
+    collector, llm = _two_category_setup(session_factory)
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory,
+        output_dir,
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        budget_factory=lambda: BudgetController(max_calls=0),
+    )
+
+    report = asyncio.run(service.run())
+
+    assert all(entry.status == "failed" for entry in report.categories)
+    assert all("budget" in (entry.error or "") for entry in report.categories)
+    assert llm.operations == []
+
+
+def test_llm_budget_reservations_accumulate_per_run(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Each run reserves one call per generated category against a fresh budget."""
+    collector, llm = _two_category_setup(session_factory)
+    budgets: list[BudgetController] = []
+
+    def factory() -> BudgetController:
+        budget = BudgetController()
+        budgets.append(budget)
+        return budget
+
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory,
+        output_dir,
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        budget_factory=factory,
+    )
+
+    asyncio.run(service.run())
+
+    assert len(budgets) == 1
+    assert budgets[0].call_count == 2
+    assert budgets[0].input_tokens > 0
+    assert budgets[0].output_tokens == 2 * llm.max_output_tokens
