@@ -1,0 +1,397 @@
+"""Literal management-policy selection for the daily telecom and AI briefings."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from dailycast.briefing.schemas import BriefingEvidence
+from dailycast.briefing.selection import (
+    BriefingSelectionCandidate,
+    load_selection_policy,
+    select_evidence,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_policy(
+    path: Path, *, telecom_tier: str = "P0", fallback_max_items_per_publisher: int | None = None
+) -> Path:
+    policy_path = path / "selection.yaml"
+    fallback_limit = (
+        f"\n    fallback_max_items_per_publisher: {fallback_max_items_per_publisher}"
+        if fallback_max_items_per_publisher is not None
+        else ""
+    )
+    policy_path.write_text(
+        f"""
+categories:
+  telecom:
+    tiers: [P0, P1, P2, P3, P4, P5]
+    max_items_per_publisher: 1{fallback_limit}
+    rules:
+      - id: telecom-ran
+        tier: {telecom_tier}
+        specificity: 500
+        all_groups:
+          - [RAN]
+        reason: 无线接入网直接动态
+    fallback_any_of: [通信业]
+    fallback_tier: P5
+    global_excludes: [电信诈骗]
+  ai:
+    tiers: [A0, A1, A2, A3]
+    max_items_per_publisher: 1
+    rules: []
+    fallback_any_of: []
+    global_excludes: []
+    paper_only_terms: [论文]
+""".strip(),
+        encoding="utf-8",
+    )
+    return policy_path
+
+
+def _candidate(
+    *,
+    title: str,
+    content: str,
+    article_id: int = 1,
+    source_id: str = "test-source",
+    source_priority: int = 80,
+    source_url: str | None = None,
+) -> BriefingSelectionCandidate:
+    evidence = BriefingEvidence(
+        title=title,
+        source_name=f"来源 {source_id}",
+        published_at=datetime(2026, 8, 21, 8, tzinfo=UTC),
+        excerpt=content,
+        source_url=source_url or f"https://{source_id}.example.test/item-{article_id}",
+    )
+    return BriefingSelectionCandidate(
+        article_id=article_id,
+        source_id=source_id,
+        source_priority=source_priority,
+        discovered_at=datetime(2026, 8, 21, 8, tzinfo=UTC),
+        evidence=evidence,
+    )
+
+
+def test_short_latin_terms_do_not_match_inside_a_longer_word(tmp_path: Path) -> None:
+    """RAN and AI must respect Latin-token boundaries after normalization."""
+    policy = load_selection_policy(_write_policy(tmp_path))
+
+    selected = select_evidence(
+        "telecom",
+        [_candidate(title="transparent Random system", content="no telecom context")],
+        policy,
+        limit=5,
+    )
+
+    assert selected == ()
+
+
+def test_unknown_tier_is_rejected(tmp_path: Path) -> None:
+    """Malformed YAML must fail fast instead of silently weakening the policy."""
+    with pytest.raises(ValueError, match="tier"):
+        load_selection_policy(_write_policy(tmp_path, telecom_tier="P9"))
+
+
+def test_checked_in_management_policy_is_valid() -> None:
+    """The production policy remains a standalone, strictly validated config artifact."""
+    policy = load_selection_policy(PROJECT_ROOT / "config" / "briefing.selection.yaml")
+
+    assert policy.category("telecom").fallback_tier == "P5"
+    assert policy.category("telecom").max_items_per_publisher == 1
+    assert policy.category("telecom").fallback_max_items_per_publisher == 2
+    assert policy.category("ai").fallback_any_of == ()
+
+
+@pytest.fixture
+def policy():
+    """Load the management-approved production policy for ranking examples."""
+    return load_selection_policy(PROJECT_ROOT / "config" / "briefing.selection.yaml")
+
+
+def test_direct_mobile_outranks_competitor_and_policy(policy) -> None:
+    """Leadership-relevant China Mobile evidence comes before competition and policy fallback."""
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                article_id=1,
+                source_id="policy-source",
+                title="工信部发布通信规划",
+                content="通信网络专项政策文件",
+            ),
+            _candidate(
+                article_id=2,
+                source_id="competitor-source",
+                title="中国联通宣布算力网络合作",
+                content="运营商业务合作进展",
+            ),
+            _candidate(
+                article_id=3,
+                source_id="mobile-source",
+                title="中国移动启动基站集采",
+                content="无线网建设项目启动",
+            ),
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [(item.tier, item.specificity) for item in selected] == [
+        ("P0", 500),
+        ("P1", 300),
+        ("P3", 200),
+    ]
+
+
+def test_global_specificity_precedes_source_priority(policy) -> None:
+    """A direct China Mobile event remains ahead of a higher-priority generic P0 source."""
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                article_id=1,
+                source_id="generic-source",
+                source_priority=100,
+                title="5G-A 网络商用开通",
+                content="城市无线网络部署进展",
+            ),
+            _candidate(
+                article_id=2,
+                source_id="mobile-source",
+                source_priority=10,
+                title="中国移动发布网络建设安排",
+                content="覆盖能力提升计划",
+            ),
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.article_id for item in selected] == [2, 1]
+
+
+def test_publisher_cap_prevents_one_outlet_filling_a_tier(policy) -> None:
+    """After global priority is fixed, one outlet cannot fill the whole P0/500 bucket."""
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                article_id=1,
+                source_id="source-a",
+                source_priority=100,
+                title="中国移动启动核心网升级",
+                content="网络能力建设进展",
+            ),
+            _candidate(
+                article_id=2,
+                source_id="source-b",
+                source_priority=80,
+                title="中国移动公布基站建设计划",
+                content="无线网络建设进展",
+            ),
+            _candidate(
+                article_id=3,
+                source_id="source-a",
+                source_priority=100,
+                title="中国移动推进算力网络建设",
+                content="网络项目建设进展",
+            ),
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.source_id for item in selected] == ["source-a", "source-b", "source-a"]
+    assert sum(item.source_id == "source-a" for item in selected) == 2
+
+
+def test_publisher_fallback_can_add_one_second_story_after_source_diversity(
+    tmp_path: Path,
+) -> None:
+    """A quiet day may use a second story from one outlet, but never let it fill the brief."""
+    policy = load_selection_policy(_write_policy(tmp_path, fallback_max_items_per_publisher=2))
+
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                article_id=1,
+                source_id="source-a",
+                source_priority=100,
+                title="RAN 建设进展一",
+                content="无线接入网项目进展",
+            ),
+            _candidate(
+                article_id=2,
+                source_id="source-b",
+                source_priority=80,
+                title="RAN 建设进展二",
+                content="无线接入网项目进展",
+            ),
+            _candidate(
+                article_id=3,
+                source_id="source-a",
+                source_priority=100,
+                title="RAN 建设进展三",
+                content="无线接入网项目进展",
+            ),
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.article_id for item in selected] == [1, 2, 3]
+
+
+def test_publisher_cap_counts_c114_once_across_multiple_feed_ids(tmp_path: Path) -> None:
+    """C114's separate feeds still represent one outlet, never five daily slots."""
+    policy = load_selection_policy(_write_policy(tmp_path))
+
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                article_id=1,
+                source_id="c114-operators",
+                source_priority=100,
+                source_url="https://www.c114.com.cn/news/1.html",
+                title="RAN 网络建设进展",
+                content="运营商披露无线接入网动态",
+            ),
+            _candidate(
+                article_id=2,
+                source_id="c114-equipment",
+                source_priority=90,
+                source_url="https://www.c114.com.cn/news/2.html",
+                title="RAN 设备部署进展",
+                content="供应商披露无线接入网动态",
+            ),
+            _candidate(
+                article_id=3,
+                source_id="official-miit",
+                source_priority=80,
+                source_url="https://www.miit.gov.cn/news/3.html",
+                title="RAN 试点建设进展",
+                content="主管部门披露无线接入网动态",
+            ),
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.article_id for item in selected] == [1, 3]
+
+
+@pytest.mark.parametrize(
+    "title,content",
+    [
+        ("老旧小区改造开工", "住宅更新项目"),
+        ("电信诈骗案件通报", "反诈宣传"),
+        ("华为 Mate 新机发布", "手机产品上市"),
+    ],
+)
+def test_telecom_false_positives_are_excluded(title: str, content: str, policy) -> None:
+    """Ambiguous consumer and public-safety stories cannot climb into telecom tiers."""
+    assert (
+        select_evidence("telecom", [_candidate(title=title, content=content)], policy, limit=5)
+        == ()
+    )
+
+
+def test_ai_model_false_positive_is_excluded(policy) -> None:
+    """A non-AI physical model cannot enter the AI briefing through a short token."""
+    selected = select_evidence(
+        "ai", [_candidate(title="汽车模型大赛", content="车模展示活动")], policy, limit=5
+    )
+
+    assert selected == ()
+
+
+def test_private_deployment_outranks_a_generic_application(policy) -> None:
+    """Local deployment is more decision-relevant than a generic application release."""
+    selected = select_evidence(
+        "ai",
+        [
+            _candidate(
+                article_id=1,
+                source_id="application-source",
+                title="AI应用上线",
+                content="企业客户开始采用",
+            ),
+            _candidate(
+                article_id=2,
+                source_id="deployment-source",
+                title="昇腾适配完成",
+                content="企业私有化部署落地",
+            ),
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.tier for item in selected] == ["A1", "A2"]
+
+
+def test_global_industry_body_is_a_last_resort_telecom_signal(policy) -> None:
+    """A verified GSMA network report can fill a gap, but never outranks China Mobile news."""
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                source_id="gsma-newsroom",
+                title="80% of Malawians Remain Offline Despite Coverage",
+                content="GSMA report details mobile network coverage and connectivity policy.",
+            )
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.tier for item in selected] == ["P5"]
+
+
+def test_on_premise_sovereign_ai_is_local_deployment(policy) -> None:
+    """An overseas operator's on-premise model server is relevant AI deployment evidence."""
+    selected = select_evidence(
+        "ai",
+        [
+            _candidate(
+                source_id="rcr-wireless-ai",
+                title="KT unveils NPU LLM Station, a fully on-premise sovereign AI server",
+                content=(
+                    "The operator launched an on-premise sovereign AI server for enterprise use."
+                ),
+            )
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.tier for item in selected] == ["A1"]
+
+
+def test_paper_needs_an_independent_positive_rule(policy) -> None:
+    """Academic-only coverage stays out, while a model release remains eligible evidence."""
+    assert (
+        select_evidence(
+            "ai", [_candidate(title="论文预印本", content="基准测试结果")], policy, limit=5
+        )
+        == ()
+    )
+
+    selected = select_evidence(
+        "ai",
+        [_candidate(title="DeepSeek 发布大模型论文", content="模型API 开源")],
+        policy,
+        limit=5,
+    )
+
+    assert selected[0].tier == "A0"

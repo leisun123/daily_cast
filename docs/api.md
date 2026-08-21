@@ -689,7 +689,9 @@ HTMX 表单遇到业务错误时可返回相同错误码并渲染局部错误片
 
 启用方式：
 
-- YAML 增加 `briefing:` 段：`enabled: true`、`sources_config_path`（简报源种子，默认 `config/briefing.sources.yaml`）、`cron_expression`（默认 `30 8 * * mon-fri`，即工作日 08:30，应用时区）、`window_hours`、`webhook_enabled`、`webhook_format`（`wecom_markdown`（默认）或 `generic_json`）。
+- YAML 增加 `briefing:` 段：`enabled: true`、`sources_config_path`（简报源种子，默认 `config/briefing.sources.yaml`）、`cron_expression`（默认 `30 8 * * mon-fri`，即工作日 08:30，应用时区）、`window_hours`、`webhook_enabled`、`webhook_format`（推荐 `wecom_markdown_v2`；兼容旧客户端可选 `wecom_markdown`，或 `generic_json`）。V2 使用企业微信群机器人的增强 Markdown，支持分割线、列表、表格和内嵌图片；不支持机器人 `@` 语法。`rsshub_base_url` 是可选的、部署方控制的 HTTP(S) RSSHub 地址；配置后，`rsshub://36kr/hot-list` 等路由才会请求该地址，未配置时只记录该来源错误，不影响其他来源。
+- `web_research:` 是简报 P0 的可选发现能力：默认 `enabled=false`；Zeabur 测试配置显式开启。它使用当前 `openai_responses` primary provider 的原生 `web_search`，不需要 Anthropic key，也不会抓取 Google/Bing 搜索页。模型给出的 URL 只算候选，DailyCast 必须从自身服务器完成安全抓取、重定向、HTML 正文与页面发布日期验证后才会进入简报；两个 `web_research` source 只在 `config/briefing.sources.yaml` 中声明，因此不会进入 Podcast 来源池。
+- 所需环境能力仍是现有 `DAILYCAST_LLM__API_KEY`，但该 key 和当前 Responses 网关必须允许 native web search。若不支持，来源记录 `WEB_RESEARCH_UNSUPPORTED`；验证页/验证码页为 `ACCESS_CHALLENGE`；无可验证页面发布日期为 `MISSING_PUBLICATION_DATE`。这些都是来源级失败，不阻断其他 RSS 来源或另一类日报。
 - webhook 凭据只从环境变量注入：`DAILYCAST_BRIEFING__WEBHOOK_URL`；`webhook_enabled=true` 时必填，缺失则配置加载失败。
 - `config/app.yaml` 为启用示例（配合 `.env` 的 `DAILYCAST_CONFIG_PATH=config/app.yaml`）；默认 `config/app.example.yaml` 中 `briefing.enabled=false`，功能完全关闭。
 

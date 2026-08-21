@@ -47,6 +47,7 @@ class _HTMLListOptions:
     """Per-source list discovery boundaries persisted in the Source config JSON."""
 
     include_title_keywords: tuple[str, ...]
+    article_url_path_prefixes: tuple[str, ...]
     timezone: ZoneInfo
     allowed_host: str
 
@@ -168,12 +169,20 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
     try:
         raw = json.loads(source.config_json)
         keywords = raw["include_title_keywords"]
+        path_prefixes = raw.get("article_url_path_prefixes", [])
         timezone_name = raw.get("timezone", "UTC")
         if not isinstance(keywords, list) or not all(isinstance(value, str) for value in keywords):
             raise ValueError("include_title_keywords must be a list of strings")
         cleaned_keywords = tuple(value.strip() for value in keywords if value.strip())
         if not cleaned_keywords:
             raise ValueError("include_title_keywords must not be empty")
+        if not isinstance(path_prefixes, list) or not all(
+            isinstance(value, str) for value in path_prefixes
+        ):
+            raise ValueError("article_url_path_prefixes must be a list of strings")
+        cleaned_path_prefixes = tuple(value.strip() for value in path_prefixes if value.strip())
+        if any(not value.startswith("/") for value in cleaned_path_prefixes):
+            raise ValueError("article_url_path_prefixes must start with '/'")
         if not isinstance(timezone_name, str):
             raise ValueError("timezone must be a string")
         entry_host = urlsplit(source.entry_url).hostname
@@ -182,6 +191,7 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
         return (
             _HTMLListOptions(
                 include_title_keywords=cleaned_keywords,
+                article_url_path_prefixes=cleaned_path_prefixes,
                 timezone=ZoneInfo(timezone_name),
                 allowed_host=entry_host.lower(),
             ),
@@ -206,7 +216,12 @@ def _iter_anchors(node: _Node) -> Iterator[_Node]:
 def _to_candidate(
     source: Source, options: _HTMLListOptions, anchor: _Node, list_url: str
 ) -> tuple[ArticleCandidate | None, SourceError | None]:
-    """Map one matched same-host anchor and its nearest list-item date into a candidate."""
+    """Map one dated, matched same-host anchor from an announcement list.
+
+    Unlike RSS, an HTML list usually also contains navigation and topic links.
+    Requiring a nearby date keeps those links, and an old page re-observed on a
+    later run, from becoming apparently new articles.
+    """
     href = anchor.attributes.get("href", "").strip()
     title = _text_content(anchor)
     if not href:
@@ -225,10 +240,21 @@ def _to_candidate(
         )
     if parsed_url.hostname.lower() != options.allowed_host:
         return None, None
+    if options.article_url_path_prefixes and not any(
+        parsed_url.path.startswith(prefix) for prefix in options.article_url_path_prefixes
+    ):
+        return None, None
     if not title:
         return None, SourceError(
             code="INVALID_HTML_LIST_ENTRY",
             summary="matching announcement has no title",
+            retryable=False,
+        )
+    published_at = _nearby_date(anchor, options.timezone)
+    if published_at is None:
+        return None, SourceError(
+            code="MISSING_PUBLICATION_DATE",
+            summary="matching announcement has no nearby publication date",
             retryable=False,
         )
     return (
@@ -237,7 +263,7 @@ def _to_candidate(
             external_id=article_url,
             url=article_url,
             title=title,
-            published_at=_nearby_date(anchor, options.timezone),
+            published_at=published_at,
             language=source.language,
             metadata={"list_url": list_url},
         ),

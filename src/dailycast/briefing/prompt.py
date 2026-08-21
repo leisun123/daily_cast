@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from dailycast.briefing.schemas import MAX_BRIEFING_ITEMS, BriefingEvidence
+from dailycast.briefing.schemas import MAX_BRIEFING_ITEMS
+from dailycast.briefing.selection import RankedBriefingEvidence
 from dailycast.llm.contracts import LLMMessage
 
 _SYSTEM_PROMPT = (
@@ -16,34 +17,40 @@ _SYSTEM_PROMPT = (
 
 
 def build_briefing_messages(
-    category_title: str, evidence: Sequence[BriefingEvidence]
+    category_title: str, evidence: Sequence[RankedBriefingEvidence]
 ) -> tuple[LLMMessage, ...]:
-    """Build the bounded system and user messages for one category briefing."""
+    """Build fixed-order evidence instructions for one category briefing."""
     blocks: list[str] = []
     for index, item in enumerate(evidence, start=1):
-        published = item.published_at.strftime("%Y-%m-%d %H:%M") if item.published_at else "未知"
+        source = item.evidence
+        published = (
+            source.published_at.strftime("%Y-%m-%d %H:%M") if source.published_at else "未知"
+        )
         blocks.append(
-            f"[{index}] 标题：{item.title}\n"
-            f"来源：{item.source_name}\n"
+            f"[{index}] 已确定优先级：{item.tier}\n"
+            f"入选原因：{item.reason}\n"
+            f"标题：{source.title}\n"
+            f"来源：{source.source_name}\n"
             f"发布时间：{published}\n"
-            f"原文链接：{item.source_url}\n"
-            f"正文摘录：\n{item.excerpt}"
+            f"原文链接：{source.source_url}\n"
+            f"正文摘录：\n{source.excerpt}"
         )
     user_content = (
-        f"以下是过去24小时收集到的「{category_title}」相关新闻证据（共 {len(evidence)} 条）：\n\n"
+        f"以下是已按管理优先级确定顺序的「{category_title}」新闻证据（共 {len(evidence)} 条）：\n\n"
         + "\n\n".join(blocks)
-        + f"\n\n请从以上证据中挑选最重要、最有信息量的新闻（最多 {MAX_BRIEFING_ITEMS} 条），"
-        f"生成今日「{category_title}」文字简报。要求：\n"
+        + f"\n\n请按以上固定顺序逐条生成今日「{category_title}」文字简报，不得重新挑选、"
+        f"排序或补充其他新闻（最多 {MAX_BRIEFING_ITEMS} 条）。要求：\n"
         "- overview：用 1-2 句话概括当天该类目的整体动态，不超过 120 字。\n"
         "- 每条 item 包含：headline（结论在前的一句话标题，不超过 28 字）、"
-        "summary（只说明发生了什么，2 句、80-100 字为宜、不超过 110 字；必须说明主体、"
+        "summary（只说明发生了什么，2 句、120-150 字为宜、不超过 160 字；必须说明主体、"
         "动作、关键数字/范围/阶段中的可用信息，以及当前结果或下一步；只能复述证据中的事实）、"
-        "why_it_matters（只说明对行业、用户或业务的实际影响，1 句、不超过 55 字；"
+        "why_it_matters（只说明对行业、用户或业务的实际影响，1-2 句、60-75 字为宜、"
+        "不超过 80 字；"
         "不能重复 summary，也不能写“值得关注”等空话）、"
         "source_name（照抄对应证据的「来源」）、"
         "source_url（必须原样照抄对应证据的「原文链接」，不得修改、拼接或编造）。\n"
-        "- 同一事件只报道一次；证据不足时不要硬凑条数。\n"
-        "- 尽量覆盖不同来源的证据，避免简报全部来自单一媒体。\n"
+        "- 每条已给定证据都要覆盖一次；不得重复报道同一事件。\n"
+        "- 证据不足时不要补充其他新闻，也不要硬凑条数。\n"
     )
     return (
         LLMMessage(role="system", content=_SYSTEM_PROMPT),

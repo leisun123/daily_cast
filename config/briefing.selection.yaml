@@ -1,0 +1,131 @@
+# Literal, deterministic selection policy for the two daily management briefings.
+# Chinese terms use substring matching. ASCII terms use case-insensitive token
+# boundaries, so short terms such as RAN and AI cannot match inside longer words.
+categories:
+  telecom:
+    tiers: [P0, P1, P2, P3, P4, P5]
+    # A single outlet must not fill the management briefing, even through multiple feeds.
+    max_items_per_publisher: 1
+    # If distinct verified outlets cannot fill the report, one outlet may contribute
+    # one additional item; it still can never dominate the five-item briefing.
+    fallback_max_items_per_publisher: 2
+    rules:
+      - id: telecom-china-mobile
+        tier: P0
+        specificity: 500
+        all_groups:
+          - [中国移动, 中国移动通信, 中国移动集团, 中移]
+        none_of: [移动支付, 移动应用, 移动游戏, 移动办公]
+        reason: 中国移动直接动态
+      - id: telecom-base-station
+        tier: P0
+        specificity: 450
+        all_groups:
+          - [基站, 无线接入, 无线网, RAN, 室分]
+          - [建设, 新建, 共建共享, 招标, 集采, 部署, 开通, 改造, 商用]
+        reason: 基站或无线网络建设进展
+      - id: telecom-spectrum-and-permit
+        tier: P0
+        specificity: 400
+        all_groups:
+          - [频谱, 频段, 无线电许可, 用频]
+          - [分配, 规划, 划转, 核发, 许可, 调整]
+        reason: 频谱或许可直接影响网络能力
+      - id: telecom-advanced-network
+        tier: P0
+        specificity: 350
+        all_groups:
+          - [5G-A, 5G Advanced, 6G]
+          - [建设, 新建, 共建共享, 招标, 集采, 部署, 开通, 改造, 商用]
+        reason: 下一代网络商用进程
+      - id: telecom-operator-competition
+        tier: P1
+        specificity: 300
+        all_groups:
+          - [中国电信, 中国联通, AT&T, Verizon, Vodafone, Deutsche Telekom, NTT DOCOMO, KDDI, SK Telecom]
+          - [建设, 招标, 集采, 部署, 开通, 商用, 资费, 合作, 合同, 并购, 财报]
+        reason: 运营商竞争与经营动态
+      - id: telecom-huawei-zte-network-supply
+        tier: P2
+        specificity: 250
+        all_groups:
+          - [华为, 中兴]
+          - [商用, 部署, 供货, 交付, 招标, 集采, 合作, 发布, 扩产]
+        none_of: [手机, Mate, Pura, 鸿蒙, 汽车, 问界, 智界]
+        reason: 核心网络设备供给动态
+      - id: telecom-critical-supply
+        tier: P2
+        specificity: 240
+        all_groups:
+          - [光模块, 光芯片, 交换机, 路由器, 核心网, 卫星通信]
+          - [商用, 部署, 供货, 交付, 招标, 集采, 合作, 发布, 扩产]
+        reason: 关键网络供给动态
+      - id: telecom-policy-project-governance
+        tier: P3
+        specificity: 200
+        all_groups:
+          - [工信部, 通信管理局, 发改委, 国资委, 试点, 专项行动, 政策, 规划]
+          - [通信, 电信, 网络, 5G, 6G, 算力网络, 基站]
+        reason: 通信相关政策与项目治理
+      - id: telecom-supplier-market
+        tier: P4
+        specificity: 100
+        all_groups:
+          - [诺基亚, 爱立信, 高通, 博通, 思科, 三星网络, Marvell, 中际旭创, 新易盛, 亨通光电, 长飞光纤]
+          - [发布, 合作, 供货, 中标, 招标, 交付, 财报, 扩产]
+        reason: 供应商市场与交付动态
+      - id: telecom-global-industry-fallback
+        tier: P5
+        specificity: 50
+        all_groups:
+          - [GSMA, ITU, 3GPP, Mobile World Live]
+          - [network, mobile, coverage, spectrum, 5G, 6G, roaming, satellite, connectivity]
+        reason: 国际通信产业与监管兜底动态
+    fallback_any_of:
+      [通信业, 电信网, 运营商, 光通信, 卫星通信, 网络设备, 5G, 6G, 算力网络,
+       mobile network, mobile operator, wireless, spectrum, telecom, connectivity]
+    fallback_tier: P5
+    global_excludes: [电信诈骗, 反诈, 短信诈骗, 移动支付, 移动游戏, 移动应用]
+  ai:
+    tiers: [A0, A1, A2, A3]
+    # Prefer a shorter report to repeating one outlet's framing of the same event.
+    max_items_per_publisher: 1
+    rules:
+      - id: ai-model-development
+        tier: A0
+        specificity: 500
+        all_groups:
+          - [OpenAI, Anthropic, Google, DeepSeek, 通义, 阿里云, 智谱, 月之暗面, MiniMax, 百度, 腾讯, Meta, xAI, Mistral]
+          - [大模型, 语言模型, AI模型, 模型API, 模型 API, 推理模型]
+          - [发布, 开源, API, 推理, 上下文, 参数, 价格]
+        reason: 重点大模型产品与能力进展
+      - id: ai-private-local-device-deployment
+        tier: A1
+        specificity: 400
+        all_groups:
+          - [私有化部署, 本地部署, 离线部署, 端侧, 设备端, 边缘推理, on-premise, on premise, sovereign AI]
+        reason: 本地化或端侧部署进展
+      - id: ai-china-market-localisation
+        tier: A1
+        specificity: 350
+        all_groups:
+          - [中国市场, 国产芯片, 昇腾, 合规, 备案]
+          - [部署, 适配, 合作, 上线, 落地]
+        reason: 中国市场适配与本地化落地
+      - id: ai-application-ecosystem
+        tier: A2
+        specificity: 300
+        all_groups:
+          - [AI应用, 人工智能应用, 智能体, Agent, 开发者, 企业客户]
+          - [上线, 发布, 接入, 合作, 落地, 增长, 付费, 采用]
+        reason: AI 应用与生态落地
+      - id: ai-evidenced-hotspot
+        tier: A3
+        specificity: 200
+        all_groups:
+          - [AI应用, 人工智能, 大模型, 智能体, Agent]
+          - [爆火, 热度, 下载量, 活跃用户, 调用量, 登顶, 融资, 估值]
+        reason: 有公开数据支撑的 AI 热点
+    fallback_any_of: []
+    global_excludes: [汽车模型, 车模, 沙盘模型, 数学模型, 建筑模型]
+    paper_only_terms: [论文, 预印本, arXiv, 基准测试, 排行榜]

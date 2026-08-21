@@ -15,7 +15,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.core.config import load_settings
+from dailycast.core.config import WebResearchSettings, load_settings
+from dailycast.core.errors import ConfigurationError
 from dailycast.core.time import Clock
 from dailycast.db.models import (
     Article,
@@ -44,9 +45,11 @@ from dailycast.pipeline.contracts import TaskCommand
 from dailycast.pipeline.executor import InProcessTaskExecutor
 from dailycast.pipeline.orchestrator import PipelineOrchestrator, build_collection_pipeline
 from dailycast.pipeline.submission import TaskSubmissionService
+from dailycast.sources.bootstrap import _normalized_entry_url, load_configured_source_ids
 from dailycast.sources.contracts import ArticleCandidate, CollectionResult, CollectionWindow
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy, SafeHttpFetcher
 from dailycast.sources.html_list import HTMLListCollector
+from dailycast.sources.research import ResearchCollector, ResearchSourceOptions, _research_messages
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import (
     ArticleService,
@@ -255,6 +258,40 @@ def source() -> Source:
     return Source(**source_values())
 
 
+def test_web_research_source_uses_a_non_fetchable_internal_identity() -> None:
+    """Only the web-research collector may declare its stable research URI."""
+    assert _normalized_entry_url("research://telecom", SourceKind.WEB_RESEARCH) == (
+        "research://telecom"
+    )
+    with pytest.raises(ConfigurationError):
+        _normalized_entry_url("research://telecom", SourceKind.RSS)
+
+
+def test_briefing_source_configuration_keeps_web_research_out_of_podcast_seeds() -> None:
+    """The management research sources are selected only by the briefing allowlist."""
+    project_root = Path(__file__).resolve().parents[1]
+
+    briefing_ids = load_configured_source_ids(project_root / "config" / "briefing.sources.yaml")
+    podcast_ids = load_configured_source_ids(project_root / "config" / "sources.example.yaml")
+
+    expected_research_ids = {
+        "openai-web-research-telecom-management",
+        "openai-web-research-ai-management",
+    }
+    expected_verified_source_ids = {
+        "gsma-newsroom",
+        "light-reading-telecom",
+        "zte-official-news",
+        "rcr-wireless-ai",
+    }
+    assert expected_research_ids.issubset(briefing_ids)
+    assert expected_research_ids.isdisjoint(podcast_ids)
+    assert expected_verified_source_ids.issubset(briefing_ids)
+    assert expected_verified_source_ids.isdisjoint(podcast_ids)
+    assert "openai-web-research-telecom" not in briefing_ids
+    assert "openai-web-research-ai" not in briefing_ids
+
+
 def fixture_feed() -> bytes:
     """Load the static RSS document without contacting a public service."""
     return (Path(__file__).parent / "fixtures" / "feeds" / "hacker-news.xml").read_bytes()
@@ -298,8 +335,8 @@ def test_rss_collector_returns_article_candidates_from_fixture() -> None:
     asyncio.run(scenario())
 
 
-def test_rss_collector_treats_undated_entries_as_discovered_now() -> None:
-    """Feeds without pubDate fields still produce in-window, dated candidates."""
+def test_rss_collector_marks_undated_entries_for_one_time_persistence() -> None:
+    """An RSS entry without a date is retained but never gets a synthetic feed timestamp."""
 
     async def scenario() -> None:
         feed = (
@@ -334,9 +371,128 @@ def test_rss_collector_treats_undated_entries_as_discovered_now() -> None:
 
         assert result.error is None
         assert len(result.candidates) == 1
-        # No date fields exist on the entry, so the candidate carries the
-        # collection timestamp instead of an unverifiable None.
-        assert result.candidates[0].published_at == datetime(2026, 7, 22, 0, 0, tzinfo=UTC)
+        # Persistence assigns the first-discovery fallback exactly once.  The
+        # collector must keep the absence of an upstream timestamp explicit so
+        # later collection runs cannot make an old RSS entry look new again.
+        assert result.candidates[0].published_at is None
+        assert result.candidates[0].published_at_inferred is True
+
+    asyncio.run(scenario())
+
+
+def test_rss_collector_filters_configured_titles_before_persistence() -> None:
+    """A broad hot-list feed retains only configured topical titles in its original order."""
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "application/rss+xml"},
+                    content=fixture_feed(),
+                    request=request,
+                )
+            )
+        )
+        try:
+            configured_source = Source(
+                **source_values() | {"config_json": '{"include_title_keywords":["SECOND"]}'}
+            )
+            result = await RSSCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).collect(
+                configured_source,
+                CollectionWindow(
+                    start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert [candidate.title for candidate in result.candidates] == [
+            "Second collection candidate"
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_rsshub_route_requires_a_deployment_controlled_base_url() -> None:
+    """An RSSHub route never falls back to an arbitrary public mirror."""
+
+    async def scenario() -> None:
+        route_source = Source(
+            **source_values()
+            | {
+                "id": "kr36-hot-list",
+                "entry_url": "rsshub://36kr/hot-list?limit=100",
+                "normalized_entry_url": "rsshub://36kr/hot-list?limit=100",
+            }
+        )
+        result = await RSSCollector(SafeHttpFetcher()).collect(
+            route_source,
+            CollectionWindow(
+                start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+            ),
+        )
+
+        assert result.error is not None
+        assert result.error.code == "RSSHUB_BASE_URL_REQUIRED"
+
+    asyncio.run(scenario())
+
+
+def test_rsshub_route_is_a_stable_source_identity() -> None:
+    """The source seed accepts and canonicalizes RSSHub routes before database persistence."""
+    assert _normalized_entry_url("rsshub://36KR/hot-list?b=2&a=1#fragment") == (
+        "rsshub://36kr/hot-list?a=1&b=2"
+    )
+
+
+def test_rsshub_route_uses_configured_base_url_without_losing_its_query() -> None:
+    """The logical route resolves through the selected instance before safe fetching."""
+
+    async def scenario() -> None:
+        requested_urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_urls.append(str(request.url))
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/rss+xml"},
+                content=fixture_feed(),
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            route_source = Source(
+                **source_values()
+                | {
+                    "id": "kr36-hot-list",
+                    "entry_url": "rsshub://36kr/hot-list?limit=100",
+                    "normalized_entry_url": "rsshub://36kr/hot-list?limit=100",
+                }
+            )
+            result = await RSSCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls()),
+                rsshub_base_url="https://rsshub.example.test/private-instance",
+            ).collect(
+                route_source,
+                CollectionWindow(
+                    start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert requested_urls == [
+            "https://rsshub.example.test/private-instance/36kr/hot-list?limit=100"
+        ]
 
     asyncio.run(scenario())
 
@@ -404,6 +560,115 @@ def test_html_list_collector_discovers_only_matching_public_recruitment_announce
         assert candidate.published_at == datetime(2026, 7, 15, 16, tzinfo=UTC)
         assert candidate.language == "zh-CN"
         assert candidate.metadata == {"list_url": "https://rsj.changzhou.gov.cn/recruitment"}
+
+    asyncio.run(scenario())
+
+
+def test_html_list_collector_can_restrict_candidates_to_article_path_prefixes() -> None:
+    """A newsroom list must not mistake its dated product-navigation links for news."""
+
+    async def scenario() -> None:
+        html = """
+        <html><body><ul>
+        <li>
+          <a href="/content/zte-site/news/20260820.html">中兴通讯推进5G-A网络商用</a>
+          <span>2026-08-20</span>
+        </li>
+        <li><a href="/china/solutions/5g.html">5G网络解决方案</a><span>2026-08-20</span></li>
+        </ul></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            source = Source(
+                **source_values()
+                | {
+                    "id": "zte-official-news",
+                    "name": "中兴通讯新闻中心",
+                    "kind": SourceKind.HTML_LIST,
+                    "entry_url": "https://www.zte.com.cn/china/about/news.html",
+                    "normalized_entry_url": "https://www.zte.com.cn/china/about/news.html",
+                    "language": "zh-CN",
+                    "config_json": (
+                        '{"include_title_keywords":["5G","网络"],'
+                        '"article_url_path_prefixes":["/content/zte-site/"],'
+                        '"timezone":"Asia/Shanghai"}'
+                    ),
+                }
+            )
+            result = await HTMLListCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).collect(
+                source,
+                CollectionWindow(
+                    start=datetime(2026, 8, 19, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 8, 21, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert [candidate.url for candidate in result.candidates] == [
+            "https://www.zte.com.cn/content/zte-site/news/20260820.html"
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_html_list_collector_rejects_an_undated_matching_navigation_link() -> None:
+    """A list page's dated news cannot be diluted by an undated topic-navigation anchor."""
+
+    async def scenario() -> None:
+        html = """
+        <html><body><nav><a href="/topics/5g">5G 专题</a></nav></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            source = Source(
+                **source_values()
+                | {
+                    "id": "official-telecom-list",
+                    "name": "官方通信列表",
+                    "kind": SourceKind.HTML_LIST,
+                    "entry_url": "https://official.example.test/news",
+                    "normalized_entry_url": "https://official.example.test/news",
+                    "language": "zh-CN",
+                    "config_json": ('{"include_title_keywords":["5G"],"timezone":"Asia/Shanghai"}'),
+                }
+            )
+            result = await HTMLListCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).collect(
+                source,
+                CollectionWindow(
+                    start=datetime(2026, 7, 15, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 17, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.candidates == ()
+        assert [error.code for error in result.errors] == ["MISSING_PUBLICATION_DATE"]
 
     asyncio.run(scenario())
 
@@ -491,6 +756,155 @@ def test_content_extractor_returns_text_for_valid_html() -> None:
         assert result.content_text is not None
         assert "reliable news collection" in result.content_text
         assert result.http_status == 200
+        assert result.published_at is None
+
+    asyncio.run(scenario())
+
+
+def test_content_extractor_honors_a_meta_declared_legacy_charset() -> None:
+    """A legacy news page without an HTTP charset remains readable evidence."""
+
+    async def scenario() -> None:
+        html = """
+        <html><head><meta http-equiv="content-type" content="text/html; charset=gb2312" /></head>
+        <body><article><h1>通信网络建设进展</h1>
+        <p>中国移动启动网络设备集采，项目覆盖多个省份的通信基础设施建设。</p>
+        <p>此次采购明确了供货安排和后续交付节奏，相关单位将按计划推进。</p>
+        </article></body></html>
+        """.encode(
+            "gb2312"
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html"},
+                    content=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            result = await ContentExtractor(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).extract("https://article.example.test/legacy-charset", FetchPolicy(timeout_seconds=2))
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.content_text is not None
+        assert "中国移动启动网络设备集采" in result.content_text
+        assert "�" not in result.content_text
+
+    asyncio.run(scenario())
+
+
+def test_content_extractor_reads_a_verified_publication_time_from_article_metadata() -> None:
+    """Web-research sources may use only a publication time visible in the fetched page."""
+
+    async def scenario() -> None:
+        html = """
+        <html><head>
+        <meta property="article:published_time" content="2026-08-20T08:15:00+08:00">
+        </head><body><article><h1>DailyCast test</h1>
+        <p>This is a substantial extraction paragraph about reliable news collection.</p>
+        <p>It provides enough text for trafilatura to identify an article body.</p>
+        </article></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            result = await ContentExtractor(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).extract("https://article.example.test/published", FetchPolicy(timeout_seconds=2))
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.published_at == datetime(2026, 8, 20, 0, 15, tzinfo=UTC)
+
+    asyncio.run(scenario())
+
+
+def test_content_extractor_reads_a_labelled_visible_publication_time() -> None:
+    """A page may expose its publication time in a labelled visible element."""
+
+    async def scenario() -> None:
+        html = """
+        <html><body><article><h1>DailyCast test</h1>
+        <div class="article-public-date-label">发布日期:</div><span>2026-08-19 07:30</span>
+        <p>This is a substantial extraction paragraph about reliable news collection.</p>
+        <p>It provides enough text for trafilatura to identify an article body.</p>
+        </article></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            result = await ContentExtractor(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).extract(
+                "https://article.example.test/visible-published", FetchPolicy(timeout_seconds=2)
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.published_at == datetime(2026, 8, 19, 7, 30, tzinfo=UTC)
+
+    asyncio.run(scenario())
+
+
+def test_content_extractor_reads_the_c114_article_header_time() -> None:
+    """C114's unlabelled article-header time is verified only for its own article pages."""
+
+    async def scenario() -> None:
+        html = """
+        <html><body><article><div class="article_top">
+        <div class="time">2026/8/20 14:43</div>
+        <h1 class="article_title">中国移动网络建设动态</h1>
+        </div>
+        <p>This is a substantial extraction paragraph about reliable news collection.</p>
+        <p>It provides enough text for trafilatura to identify an article body.</p>
+        </article></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            result = await ContentExtractor(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).extract(
+                "https://www.c114.com.cn/news/118/a1316017.html",
+                FetchPolicy(timeout_seconds=2),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.published_at == datetime(2026, 8, 20, 6, 43, tzinfo=UTC)
 
     asyncio.run(scenario())
 
@@ -545,6 +959,38 @@ def test_content_extractor_rejects_invalid_content_type() -> None:
     asyncio.run(scenario())
 
 
+def test_content_extractor_rejects_a_verification_challenge_page() -> None:
+    """A 200 verification page must not masquerade as an accessible news article."""
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=(
+                        "<html><head><title>Just a moment...</title></head>"
+                        "<body><h1>Security check</h1><p>请完成验证码验证后继续访问。</p>"
+                        "</body></html>"
+                    ),
+                    request=request,
+                )
+            )
+        )
+        try:
+            result = await ContentExtractor(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).extract("https://article.example.test/challenge", FetchPolicy(timeout_seconds=1))
+        finally:
+            await client.aclose()
+
+        assert result.error is not None
+        assert result.error.code == "ACCESS_CHALLENGE"
+        assert result.error.retryable is False
+
+    asyncio.run(scenario())
+
+
 def test_content_extractor_blocks_loopback_url_before_request() -> None:
     """SSRF policy rejects loopback targets before an HTTP request can be attempted."""
 
@@ -558,6 +1004,292 @@ def test_content_extractor_blocks_loopback_url_before_request() -> None:
         assert result.error.retryable is False
 
     asyncio.run(scenario())
+
+
+def test_telecom_research_prompt_requires_multifacet_html_articles() -> None:
+    """Native search must cover the management facets instead of returning one PDF hit."""
+    messages = _research_messages(
+        ResearchSourceOptions(
+            briefing_category="telecom",
+            topic="telecom",
+            query="通信行业过去24小时重要动态",
+            publisher_preference="regulator_operator_vendor_first_party",
+            require_verified_publication_date=True,
+        ),
+        CollectionWindow(
+            start=datetime(2026, 8, 20, 9, tzinfo=UTC),
+            end=datetime(2026, 8, 21, 9, tzinfo=UTC),
+        ),
+    )
+
+    assert "分别检索" in messages[-1].content
+    assert "运营商" in messages[-1].content
+    assert "基站" in messages[-1].content
+    assert "竞争对手" in messages[-1].content
+    assert "政策" in messages[-1].content
+    assert "HTML" in messages[-1].content
+    assert "PDF" in messages[-1].content
+
+
+def test_research_collector_runs_bounded_search_calls_across_telecom_facets() -> None:
+    """A one-result native search cannot starve every management-relevant telecom direction."""
+
+    class FacetedWebResearchProvider:
+        provider_name = "openai_responses"
+        model = "test-model"
+
+        def __init__(self) -> None:
+            self.messages: list[tuple[LLMMessage, ...]] = []
+
+        async def generate_web_research(
+            self,
+            messages: tuple[LLMMessage, ...],
+            response_schema: type[BaseModel],
+            model_options: dict[str, object],
+        ) -> StructuredResult:
+            del response_schema, model_options
+            self.messages.append(messages)
+            index = len(self.messages)
+            return StructuredResult(
+                content={
+                    "candidates": [
+                        {
+                            "title": f"通信管理候选 {index}",
+                            "url": f"https://publisher.example.test/article-{index}",
+                            "publisher": "运营商公告",
+                            "finding": "运营商公告披露了网络建设和交付安排。",
+                            "published_at_hint": "2026-08-20T08:15:00+08:00",
+                        }
+                    ]
+                },
+                model=self.model,
+                usage=LLMUsage(input_tokens=1, output_tokens=1),
+                request_id=f"research-request-{index}",
+            )
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text="""
+                    <html><head><meta property="article:published_time"
+                    content="2026-08-20T08:15:00+08:00"></head><body><article>
+                    <p>运营商公告披露了网络建设和交付安排，正文提供足够事实供日报使用。</p>
+                    <p>第二段确保这是一篇可验证的新闻正文而不是搜索结果页。</p>
+                    </article></body></html>
+                    """,
+                    request=request,
+                )
+            )
+        )
+        provider = FacetedWebResearchProvider()
+        source = Source(
+            **{
+                **source_values(),
+                "id": "openai-web-research-telecom-facets",
+                "kind": SourceKind.WEB_RESEARCH,
+                "entry_url": "research://telecom-facets",
+                "normalized_entry_url": "research://telecom-facets",
+                "config_json": json.dumps(
+                    {
+                        "briefing_category": "telecom",
+                        "topic": "telecom",
+                        "query": "通信行业过去24小时重要动态",
+                        "publisher_preference": "regulator_operator_vendor_first_party",
+                        "require_verified_publication_date": True,
+                    }
+                ),
+            }
+        )
+        try:
+            result = await ResearchCollector(
+                provider,
+                ContentExtractor(SafeHttpFetcher(client, url_validator=AllowAllUrls())),
+                WebResearchSettings(enabled=True, max_search_calls_per_source=4),
+            ).collect(
+                source,
+                CollectionWindow(
+                    start=datetime(2026, 8, 19, 9, tzinfo=UTC),
+                    end=datetime(2026, 8, 20, 9, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert len(provider.messages) == 4
+        assert len(result.candidates) == 4
+        assert all("本轮重点" in messages[-1].content for messages in provider.messages)
+
+    asyncio.run(scenario())
+
+
+def test_research_collector_persists_only_a_locally_verified_final_article() -> None:
+    """A model candidate becomes a source candidate only after final-page verification."""
+
+    class FakeWebResearchProvider:
+        provider_name = "openai_responses"
+        model = "test-model"
+
+        async def generate_web_research(
+            self,
+            messages: tuple[LLMMessage, ...],
+            response_schema: type[BaseModel],
+            model_options: dict[str, object],
+        ) -> StructuredResult:
+            assert "通信行业" in messages[-1].content
+            assert "12 至 20 条" in messages[-1].content
+            assert "逐项覆盖" in messages[-1].content
+            assert model_options["search_context_size"] == "medium"
+            assert response_schema.__name__ == "WebResearchCandidateSet"
+            return StructuredResult(
+                content={
+                    "candidates": [
+                        {
+                            "title": "运营商发布网络升级计划",
+                            "url": "https://publisher.example.test/redirect",
+                            "publisher": "运营商公告",
+                            "finding": "网络升级计划已在当日公告中披露。",
+                            "published_at_hint": "2026-08-20T08:15:00+08:00",
+                        }
+                    ]
+                },
+                model=self.model,
+                usage=LLMUsage(input_tokens=1, output_tokens=1),
+                request_id="research-request",
+            )
+
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/redirect":
+                return httpx.Response(
+                    302,
+                    headers={"location": "/final"},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                text="""
+                <html><head>
+                <meta property="article:published_time" content="2026-08-20T08:15:00+08:00">
+                </head><body><article><h1>运营商发布网络升级计划</h1>
+                <p>运营商公告披露了网络升级计划和明确的落地安排。</p>
+                <p>第二段提供足够文本，确保正文提取可验证且不是跳转页面。</p>
+                </article></body></html>
+                """,
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            source = Source(
+                **{
+                    **source_values(),
+                    "id": "openai-web-research-telecom",
+                    "name": "网页研究·通信行业",
+                    "kind": SourceKind.WEB_RESEARCH,
+                    "entry_url": "research://telecom",
+                    "normalized_entry_url": "research://telecom",
+                    "config_json": json.dumps(
+                        {
+                            "briefing_category": "telecom",
+                            "topic": "telecom",
+                            "query": "通信行业过去24小时重要动态",
+                            "publisher_preference": "regulator_operator_vendor_first_party",
+                            "require_verified_publication_date": True,
+                        }
+                    ),
+                }
+            )
+            collector = ResearchCollector(
+                FakeWebResearchProvider(),
+                ContentExtractor(SafeHttpFetcher(client, url_validator=AllowAllUrls())),
+                WebResearchSettings(enabled=True),
+            )
+            result = await collector.collect(
+                source,
+                CollectionWindow(
+                    start=datetime(2026, 8, 19, 9, tzinfo=UTC),
+                    end=datetime(2026, 8, 20, 9, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.errors == ()
+        assert len(result.candidates) == 1
+        candidate = result.candidates[0]
+        assert candidate.url == "https://publisher.example.test/final"
+        assert candidate.published_at == datetime(2026, 8, 20, 0, 15, tzinfo=UTC)
+        assert candidate.http_status == 200
+        assert candidate.fetched_at is not None
+        assert candidate.metadata["request_id"] == "research-request"
+        assert candidate.metadata["candidate_url"] == "https://publisher.example.test/redirect"
+
+    asyncio.run(scenario())
+
+
+def test_research_collector_accepts_an_empty_discovery_result() -> None:
+    """A quiet day is a successful empty research result, not a malformed provider response."""
+
+    class EmptyWebResearchProvider:
+        provider_name = "openai_responses"
+        model = "test-model"
+
+        async def generate_web_research(
+            self,
+            messages: tuple[LLMMessage, ...],
+            response_schema: type[BaseModel],
+            model_options: dict[str, object],
+        ) -> StructuredResult:
+            del messages, response_schema, model_options
+            return StructuredResult(
+                content={"candidates": []},
+                model=self.model,
+                usage=LLMUsage(),
+                request_id="quiet-day",
+            )
+
+    source = Source(
+        **{
+            **source_values(),
+            "id": "openai-web-research-ai",
+            "kind": SourceKind.WEB_RESEARCH,
+            "entry_url": "research://ai",
+            "normalized_entry_url": "research://ai",
+            "config_json": json.dumps(
+                {
+                    "briefing_category": "ai",
+                    "topic": "ai",
+                    "query": "AI 行业过去24小时重要动态",
+                    "publisher_preference": "company_regulator_research_first_party",
+                    "require_verified_publication_date": True,
+                }
+            ),
+        }
+    )
+    collector = ResearchCollector(
+        EmptyWebResearchProvider(),
+        ContentExtractor(SafeHttpFetcher()),
+        WebResearchSettings(enabled=True),
+    )
+
+    result = asyncio.run(
+        collector.collect(
+            source,
+            CollectionWindow(
+                start=datetime(2026, 8, 19, 9, tzinfo=UTC),
+                end=datetime(2026, 8, 20, 9, tzinfo=UTC),
+            ),
+        )
+    )
+
+    assert result.error is None
+    assert result.candidates == ()
+    assert result.errors == ()
 
 
 def test_article_service_upserts_duplicate_normalized_url(app_config_path: Path) -> None:
@@ -598,6 +1330,41 @@ def test_article_service_upserts_duplicate_normalized_url(app_config_path: Path)
         with UnitOfWork(factory) as unit:
             assert unit.session is not None
             assert len(list(unit.session.scalars(select(Article)))) == 1
+    finally:
+        engine.dispose()
+
+
+def test_article_service_preserves_the_first_inferred_timestamp(app_config_path: Path) -> None:
+    """Repeated undated RSS observations cannot refresh an article into the current window."""
+    engine, factory = upgraded_factory(app_config_path)
+    try:
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            SourceRepository(unit.session).create(**source_values())
+
+        first_observed_at = datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+        later_observed_at = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
+        first = ArticleService(factory, clock=FixedClock(first_observed_at)).upsert_candidate(
+            ArticleCandidate(
+                source_id="hacker-news-rss",
+                url="https://article.example.test/undated",
+                title="Undated feed entry",
+                published_at_inferred=True,
+            )
+        )
+        refreshed = ArticleService(factory, clock=FixedClock(later_observed_at)).upsert_candidate(
+            ArticleCandidate(
+                source_id="hacker-news-rss",
+                url="https://article.example.test/undated",
+                title="Undated feed entry",
+                published_at_inferred=True,
+            )
+        )
+
+        assert first.published_at == first_observed_at
+        assert first.published_at_inferred is True
+        assert refreshed.published_at == first_observed_at.replace(tzinfo=None)
+        assert refreshed.published_at_inferred is True
     finally:
         engine.dispose()
 

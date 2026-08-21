@@ -8,6 +8,9 @@ import pytest
 from editorial_test_support import upgraded_session_factory
 from fastapi.testclient import TestClient
 
+from dailycast.db.models import SourceKind
+from dailycast.db.repositories import SourceRepository
+from dailycast.db.transactions import UnitOfWork
 from dailycast.main import create_app
 
 
@@ -48,6 +51,28 @@ def test_briefing_endpoints_are_wired_when_enabled(app_config_path: Path, tmp_pa
     # The only configured source is unreachable, so nothing can have been generated yet.
     assert latest_response.status_code == 404
     assert runtime.briefing_service is not None
+
+
+def test_briefing_runtime_seeds_the_two_management_web_research_sources(
+    app_config_path: Path,
+) -> None:
+    """Native web discovery is available only after the briefing runtime has been enabled."""
+    app_config_path.write_text(
+        app_config_path.read_text(encoding="utf-8") + "briefing:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    upgraded_session_factory(app_config_path)
+
+    with TestClient(create_app(config_path=app_config_path)) as client:
+        runtime = client.app.state.runtime
+        with UnitOfWork(runtime.session_factory) as unit:
+            assert unit.session is not None
+            sources = SourceRepository(unit.session)
+            telecom = sources.get("openai-web-research-telecom-management")
+            ai = sources.get("openai-web-research-ai-management")
+
+    assert telecom is not None and telecom.kind is SourceKind.WEB_RESEARCH
+    assert ai is not None and ai.kind is SourceKind.WEB_RESEARCH
 
 
 def test_briefing_generate_conflicts_when_disabled(app_config_path: Path) -> None:

@@ -16,7 +16,10 @@ DUPLICATE_NEAR_CONTENT = "DUPLICATE_NEAR_CONTENT"
 
 
 def deduplicate_articles(
-    articles: tuple[ProcessableArticle, ...], policy: ProcessingPolicy
+    articles: tuple[ProcessableArticle, ...],
+    policy: ProcessingPolicy,
+    *,
+    require_jaccard_for_near_duplicate: bool = False,
 ) -> DeduplicationResult:
     """Choose one quality winner per exact or near-duplicate group deterministically."""
     by_id = {article.id: article for article in articles}
@@ -59,6 +62,7 @@ def deduplicate_articles(
         reasons,
         simhashes,
         policy,
+        require_jaccard_for_near_duplicate=require_jaccard_for_near_duplicate,
     )
     return DeduplicationResult(
         primary_article_ids=tuple(sorted(active_ids)),
@@ -162,6 +166,8 @@ def _deduplicate_near(
     reasons: dict[int, str],
     simhashes: dict[int, str],
     policy: ProcessingPolicy,
+    *,
+    require_jaccard_for_near_duplicate: bool,
 ) -> None:
     """Apply bounded same-language SimHash/Jaccard comparison to surviving primary articles."""
     remaining = sorted((by_id[article_id] for article_id in active_ids), key=_quality_key)
@@ -176,9 +182,12 @@ def _deduplicate_near(
             assert candidate.content_text is not None
             distance = hamming_distance(simhashes[winner.id], simhashes[candidate.id])
             similarity = jaccard_similarity(winner.content_text, candidate.content_text)
-            if distance <= policy.near_duplicate_hamming_distance or (
-                similarity >= policy.near_duplicate_jaccard_threshold
-            ):
+            is_near_duplicate = similarity >= policy.near_duplicate_jaccard_threshold
+            if not require_jaccard_for_near_duplicate:
+                is_near_duplicate = (
+                    distance <= policy.near_duplicate_hamming_distance or is_near_duplicate
+                )
+            if is_near_duplicate:
                 duplicates.append(candidate)
         _mark_specific_duplicates(
             winner,

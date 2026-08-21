@@ -157,6 +157,19 @@ briefing:
   window_hours: 24
   max_items_per_category: 5
   max_evidence_chars_per_article: 800
+  # Set DAILYCAST_BRIEFING__RSSHUB_BASE_URL to a known-good RSSHub instance to
+  # enable configured rsshub:// sources such as 36Kr's 24-hour hot list.
+  rsshub_base_url: null
   webhook_enabled: true
-  # wecom_markdown | generic_json ({"text": ...}, Slack-style targets)
-  webhook_format: wecom_markdown
+  # wecom_markdown_v2 | wecom_markdown | generic_json ({"text": ...}, Slack-style targets)
+  webhook_format: wecom_markdown_v2
+
+# This local deployment has a Responses gateway with native web search. The two
+# research sources stay briefing-only, and their discovered links are still
+# independently fetched and date-verified before they can be selected.
+web_research:
+  enabled: true
+  max_candidates_per_source: 20
+  max_search_calls_per_source: 4
+  search_context_size: medium
+  max_article_chars: 12000

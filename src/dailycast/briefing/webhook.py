@@ -9,12 +9,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-WebhookFormat = Literal["wecom_markdown", "generic_json"]
+WebhookFormat = Literal["wecom_markdown", "wecom_markdown_v2", "generic_json"]
 """How one markdown message maps onto the target's JSON contract.
 
-`wecom_markdown` speaks the WeCom group-robot envelope and treats a non-zero
-`errcode` as a failure; `generic_json` posts `{"text": ...}` (the shape Slack
-and most bot webhooks accept) and treats any HTTP 200 as success.
+`wecom_markdown` and `wecom_markdown_v2` speak the respective WeCom
+group-robot envelopes and treat a non-zero `errcode` as a failure;
+`generic_json` posts a text envelope and treats any HTTP 200 as success.
 """
 
 
@@ -62,6 +62,8 @@ class WebhookNotifier:
         """Map the markdown onto the payload contract the target expects."""
         if self._payload_format == "wecom_markdown":
             return {"msgtype": "markdown", "markdown": {"content": markdown}}
+        if self._payload_format == "wecom_markdown_v2":
+            return {"msgtype": "markdown_v2", "markdown_v2": {"content": markdown}}
         return {"text": markdown}
 
     async def _send(self, payload: dict[str, object]) -> None:
@@ -78,7 +80,7 @@ class WebhookNotifier:
             raise WebhookPushError(f"webhook request failed: {error.__class__.__name__}") from error
         if response.status_code != 200:
             raise WebhookPushError(f"webhook returned HTTP {response.status_code}")
-        if self._payload_format != "wecom_markdown":
+        if self._payload_format not in {"wecom_markdown", "wecom_markdown_v2"}:
             # Generic targets own their response body; a 200 means delivered.
             return
         try:
@@ -88,5 +90,5 @@ class WebhookNotifier:
         errcode = body.get("errcode")
         if errcode != 0:
             raise WebhookPushError(
-                f"webhook rejected the message: errcode={errcode} " f"errmsg={body.get('errmsg')}"
+                f"webhook rejected the message: errcode={errcode} errmsg={body.get('errmsg')}"
             )

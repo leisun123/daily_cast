@@ -41,10 +41,23 @@ editorial:
 briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
+  selection_policy_path: ./config/briefing.selection.yaml
   cron_expression: "30 8 * * mon-fri"
   max_items_per_category: 5
+  # Inject DAILYCAST_BRIEFING__RSSHUB_BASE_URL as a Zeabur variable to enable
+  # configured rsshub:// sources. Use a controlled or self-hosted instance.
+  rsshub_base_url: null
   webhook_enabled: true
-  webhook_format: wecom_markdown
+  webhook_format: wecom_markdown_v2
+
+# The current testing deployment opts into native OpenAI web discovery. Every
+# returned URL is still fetched and verified locally before a briefing may use it.
+web_research:
+  enabled: true
+  max_candidates_per_source: 20
+  max_search_calls_per_source: 4
+  search_context_size: medium
+  max_article_chars: 12000
 
 publishing:
   auto_publish: true

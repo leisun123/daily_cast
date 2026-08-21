@@ -78,12 +78,14 @@ def _render_lines(
     """Render the header and complete item blocks with their final item count."""
     lines = [
         f"# {category_title}｜{briefing_date.month}月{briefing_date.day}日",
-        f'<font color="comment">今日精选 · {len(item_blocks)} 条</font>',
+        f"*今日精选 · {len(item_blocks)} 条*",
         "",
-        "**今日要点**",
-        overview.strip(),
+        "> **今日要点**",
+        f"> {overview.strip()}",
     ]
-    for block in item_blocks:
+    for index, block in enumerate(item_blocks):
+        if index:
+            lines.extend(["", "---"])
         lines.extend(block)
     return "\n".join(lines).rstrip("\n") + "\n"
 
@@ -93,11 +95,14 @@ def _item_block(number: int, item: BriefingItem, url: str) -> list[str]:
     source_name = _display_source_name(item.source_name)
     return [
         "",
-        f"**{number:02d}｜{item.headline.strip()}**",
-        '<font color="comment">发生了什么</font>',
-        item.summary.strip(),
-        '<font color="comment">为什么值得看</font>',
-        item.why_it_matters.strip(),
+        f"## {number:02d}｜{item.headline.strip()}",
+        "",
+        "> **发生了什么**",
+        f"> {item.summary.strip()}",
+        "",
+        "> **为什么值得看**",
+        f"> {item.why_it_matters.strip()}",
+        "",
         f"[{source_name} · 阅读原文 ↗]({url})",
     ]
 

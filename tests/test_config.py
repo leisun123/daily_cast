@@ -302,7 +302,10 @@ def test_default_llm_model_is_gpt_5_6_terra() -> None:
 
 def test_briefing_defaults_to_five_items_per_category() -> None:
     """Detailed prose reserves enough WeCom space by default."""
-    assert BriefingSettings().max_items_per_category == 5
+    settings = BriefingSettings()
+
+    assert settings.max_items_per_category == 5
+    assert settings.selection_policy_path == Path("config/briefing.selection.yaml")
 
 
 def test_briefing_rejects_more_than_five_items_per_category() -> None:
@@ -318,7 +321,7 @@ def test_web_research_defaults_to_disabled_with_bounded_discovery(
     settings = load_settings(config_path=app_config_path)
 
     assert settings.web_research.enabled is False
-    assert settings.web_research.max_candidates_per_source == 12
+    assert settings.web_research.max_candidates_per_source == 20
     assert settings.web_research.max_search_calls_per_source == 1
     assert settings.web_research.search_context_size == "medium"
     assert settings.web_research.max_article_chars == 12_000

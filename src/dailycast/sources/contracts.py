@@ -30,7 +30,10 @@ class ArticleCandidate:
     summary: str | None = None
     content_text: str | None = None
     published_at: datetime | None = None
+    published_at_inferred: bool = False
     language: str | None = None
+    fetched_at: datetime | None = None
+    http_status: int | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -73,6 +76,7 @@ class ExtractedArticle:
     http_status: int | None
     fetched_at: datetime | None
     error: SourceError | None = None
+    published_at: datetime | None = None
 
 
 class SourceCollector(Protocol):

@@ -16,6 +16,7 @@ from dailycast.core.errors import (
     LLMProviderResponseError,
     LLMProviderTimeoutError,
     LLMStructuredOutputUnsupportedError,
+    LLMWebSearchUnsupportedError,
 )
 from dailycast.core.hashes import sha256_text
 from dailycast.db.models import LLMOperation
@@ -117,6 +118,38 @@ class OpenAIResponsesLLMProvider:
         response = await self._post(payload, structured_output=response_mode == "json_schema")
         return self._parse_response(response)
 
+    async def generate_web_research(
+        self,
+        messages: Sequence[LLMMessage],
+        response_schema: type[BaseModel],
+        model_options: Mapping[str, JSONValue],
+    ) -> StructuredResult:
+        """Discover structured candidates through the native Responses web-search tool."""
+        if not self._api_key:
+            raise LLMProviderAuthenticationError()
+        options = self._semantic_options(model_options)
+        response_mode = options.pop("response_format", self._response_format)
+        search_context_size = options.pop("search_context_size", "medium")
+        if search_context_size not in {"low", "medium", "high"}:
+            msg = "web research search_context_size must be low, medium, or high"
+            raise ValueError(msg)
+        payload = self._request_payload(messages, response_schema, options, response_mode)
+        # Some OpenAI-compatible gateways support native web_search but reject a
+        # simultaneous Responses text.format request. JSON-object mode already
+        # embeds the schema contract in the developer prompt and is validated
+        # locally in _parse_response, so omit only this incompatible wire hint.
+        payload.pop("text", None)
+        payload["tools"] = [{"type": "web_search", "search_context_size": search_context_size}]
+        # Discovery is meaningless when the model elects to answer from memory;
+        # require at least one native web-search invocation for every research run.
+        payload["tool_choice"] = "required"
+        response = await self._post(
+            payload,
+            structured_output=response_mode == "json_schema",
+            web_search=True,
+        )
+        return self._parse_response(response)
+
     def _request_payload(
         self,
         messages: Sequence[LLMMessage],
@@ -172,7 +205,11 @@ class OpenAIResponsesLLMProvider:
         }
 
     async def _post(
-        self, payload: Mapping[str, object], *, structured_output: bool = False
+        self,
+        payload: Mapping[str, object],
+        *,
+        structured_output: bool = False,
+        web_search: bool = False,
     ) -> httpx.Response:
         """Perform bounded retry for transient transport and server failures."""
         headers = {"Authorization": f"Bearer {self._api_key}"}
@@ -199,6 +236,8 @@ class OpenAIResponsesLLMProvider:
                 continue
             if response.status_code in {401, 403}:
                 raise LLMProviderAuthenticationError()
+            if web_search and response.status_code in {400, 422}:
+                raise LLMWebSearchUnsupportedError()
             if structured_output and response.status_code in {400, 422}:
                 raise LLMStructuredOutputUnsupportedError()
             if response.is_error:

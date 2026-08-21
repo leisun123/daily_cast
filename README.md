@@ -160,6 +160,18 @@ Create the Zeabur password variable `DAILYCAST_BRIEFING__WEBHOOK_URL` with a WeC
 webhook (or any JSON webhook); the service refuses to start without it because briefing pushes
 are enabled. To verify the channel from outside, reuse the same bearer token:
 
+The bundled 36Kr 24-hour-hot-list source is an `rsshub://` route rather than a random public
+mirror. To enable it, set `DAILYCAST_BRIEFING__RSSHUB_BASE_URL` to the organization’s known-good
+or self-hosted RSSHub HTTP(S) endpoint. 36Kr titles are then filtered to AI topics before they
+enter the briefing; the rest of the briefing continues if that endpoint is unavailable.
+
+The same briefing configuration now contains two optional OpenAI web-research sources (telecom
+and AI). They use the existing OpenAI Responses primary model and its native `web_search` tool;
+set `DAILYCAST_WEB_RESEARCH__ENABLED=true` only when that API key/gateway supports the tool.
+Search results are never published directly: DailyCast validates every final article URL, readable
+HTML body, and on-page publication date itself. These sources remain briefing-only and do not
+change the podcast collection or audio schedule.
+
 ```bash
 curl --fail-with-body -X POST https://your-domain/briefing/test-push \
   -H 'Authorization: Bearer your-secret-token'

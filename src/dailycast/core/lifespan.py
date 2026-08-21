@@ -14,6 +14,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.scheduler import BriefingScheduler
+from dailycast.briefing.selection import load_selection_policy
 from dailycast.briefing.service import BriefingService
 from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.config import LLMProviderSettings, Settings, load_settings
@@ -23,7 +24,7 @@ from dailycast.db.revision import RevisionStatus, inspect_revision
 from dailycast.db.session import create_session_factory, create_sqlite_engine
 from dailycast.episodes.service import EpisodeService
 from dailycast.llm.budget import BudgetController
-from dailycast.llm.contracts import LLMProvider
+from dailycast.llm.contracts import LLMProvider, WebResearchProvider
 from dailycast.llm.editorial_service import AIEditorialService
 from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.llm.providers.openai_compatible import OpenAICompatibleLLMProvider
@@ -47,9 +48,10 @@ from dailycast.publishing.rss import RSSPublisher, RSSSettings
 from dailycast.publishing.service import PublicationService
 from dailycast.publishing.xiaoyuzhou import XiaoyuzhouPublisher
 from dailycast.scheduler.service import SchedulerService
-from dailycast.sources.bootstrap import seed_missing_sources
+from dailycast.sources.bootstrap import load_configured_source_ids, seed_missing_sources
 from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
 from dailycast.sources.html_list import HTMLListCollector
+from dailycast.sources.research import ResearchCollector, UnavailableWebResearchProvider
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import ArticleService, SourceCollectionService
 from dailycast.tts.merge import FFmpegMerger
@@ -156,15 +158,6 @@ def build_lifespan(
             )
             fetcher = SafeHttpFetcher()
             article_service = ArticleService(session_factory)
-            collection_service = SourceCollectionService(
-                session_factory,
-                {
-                    SourceKind.RSS: RSSCollector(fetcher),
-                    SourceKind.HTML_LIST: HTMLListCollector(fetcher),
-                },
-                article_service,
-                source_max_age_hours=settings.processing.source_max_age_hours,
-            )
             processing_policy = ProcessingPolicy(
                 max_age_hours=settings.processing.max_age_hours,
                 source_max_age_hours=settings.processing.source_max_age_hours,
@@ -177,7 +170,28 @@ def build_lifespan(
                 timezone=settings.app.timezone,
             )
             llm_client = httpx.AsyncClient()
-            llm_provider = build_llm_provider(settings, http_client=llm_client)
+            primary_llm_provider = _build_direct_llm_provider(settings.llm, http_client=llm_client)
+            llm_provider = build_llm_provider(
+                settings,
+                http_client=llm_client,
+                primary_provider=primary_llm_provider,
+            )
+            collection_service = SourceCollectionService(
+                session_factory,
+                {
+                    SourceKind.RSS: RSSCollector(
+                        fetcher, rsshub_base_url=settings.briefing.rsshub_base_url
+                    ),
+                    SourceKind.HTML_LIST: HTMLListCollector(fetcher),
+                    SourceKind.WEB_RESEARCH: ResearchCollector(
+                        build_web_research_provider(primary_llm_provider),
+                        ContentExtractor(fetcher),
+                        settings.web_research,
+                    ),
+                },
+                article_service,
+                source_max_age_hours=settings.processing.source_max_age_hours,
+            )
             editorial_service = AIEditorialService(
                 session_factory,
                 llm_provider,
@@ -354,10 +368,11 @@ def _build_briefing_runtime(
     llm_provider: LLMProvider,
 ) -> tuple[BriefingService, BriefingScheduler | None]:
     """Build the independent briefing flow, reusing the podcast's collectors and LLM."""
-    created_source_count = seed_missing_sources(
-        session_factory,
-        settings.resolve_path(settings.briefing.sources_config_path),
+    selection_policy = load_selection_policy(
+        settings.resolve_path(settings.briefing.selection_policy_path)
     )
+    source_config_path = settings.resolve_path(settings.briefing.sources_config_path)
+    created_source_count = seed_missing_sources(session_factory, source_config_path)
     logger.info(
         "briefing_source_seed_completed", extra={"created_source_count": created_source_count}
     )
@@ -385,6 +400,8 @@ def _build_briefing_runtime(
             max_input_tokens=settings.llm.budget.max_input_tokens,
             max_output_tokens=settings.llm.budget.max_output_tokens,
         ),
+        briefing_source_ids=load_configured_source_ids(source_config_path),
+        selection_policy=selection_policy,
         timezone=settings.app.timezone,
     )
     briefing_scheduler = BriefingScheduler(
@@ -403,13 +420,25 @@ def _build_briefing_runtime(
     return briefing_service, briefing_scheduler
 
 
-def build_llm_provider(settings: Settings, *, http_client: httpx.AsyncClient) -> LLMProvider:
+def build_llm_provider(
+    settings: Settings,
+    *,
+    http_client: httpx.AsyncClient,
+    primary_provider: LLMProvider | None = None,
+) -> LLMProvider:
     """Build the preferred provider and its optional ordered fallback."""
-    primary = _build_direct_llm_provider(settings.llm, http_client=http_client)
+    primary = primary_provider or _build_direct_llm_provider(settings.llm, http_client=http_client)
     if settings.llm.fallback is None:
         return primary
     fallback = _build_direct_llm_provider(settings.llm.fallback, http_client=http_client)
     return FailoverLLMProvider(primary, fallback)
+
+
+def build_web_research_provider(primary_provider: LLMProvider) -> WebResearchProvider:
+    """Expose native discovery only from the configured primary Responses provider."""
+    if isinstance(primary_provider, OpenAIResponsesLLMProvider):
+        return primary_provider
+    return UnavailableWebResearchProvider()
 
 
 def _build_direct_llm_provider(

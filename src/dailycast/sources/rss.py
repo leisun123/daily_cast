@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import calendar
+import json
 import re
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import feedparser
 
@@ -24,14 +25,22 @@ from dailycast.sources.extraction import FetchPolicy, SafeHttpFetcher, SourceFet
 class RSSCollector:
     """Discover bounded article candidates from one configured RSS or Atom feed."""
 
-    def __init__(self, fetcher: SafeHttpFetcher) -> None:
+    def __init__(self, fetcher: SafeHttpFetcher, *, rsshub_base_url: str | None = None) -> None:
         self._fetcher = fetcher
+        self._rsshub_base_url = rsshub_base_url
 
     async def collect(self, source: Source, window: CollectionWindow) -> CollectionResult:
         """Fetch, parse, window-filter, and map valid feed entries without database access."""
+        title_keywords, filter_error = _title_filter(source)
+        if filter_error is not None:
+            return CollectionResult(source_id=source.id, error=filter_error)
+        feed_url, route_error = _resolve_feed_url(source.entry_url, self._rsshub_base_url)
+        if route_error is not None:
+            return CollectionResult(source_id=source.id, error=route_error)
+        assert feed_url is not None
         try:
             response = await self._fetcher.fetch(
-                source.entry_url,
+                feed_url,
                 FetchPolicy(timeout_seconds=float(source.request_timeout_seconds or 20)),
             )
         except SourceFetchError as error:
@@ -54,13 +63,13 @@ class RSSCollector:
         for entry in entries:
             if len(candidates) >= (source.max_items_per_run or 50):
                 break
-            candidate, entry_error = self._to_candidate(
-                source, entry, response.final_url, window.end
-            )
+            candidate, entry_error = self._to_candidate(source, entry, response.final_url)
             if entry_error is not None:
                 errors.append(entry_error)
                 continue
             assert candidate is not None
+            if title_keywords and not _matches_title(candidate.title, title_keywords):
+                continue
             if window.includes(candidate.published_at):
                 candidates.append(candidate)
         return CollectionResult(
@@ -71,13 +80,13 @@ class RSSCollector:
 
     @staticmethod
     def _to_candidate(
-        source: Source, entry: Any, feed_url: str, discovered_at: datetime
+        source: Source, entry: Any, feed_url: str
     ) -> tuple[ArticleCandidate | None, SourceError | None]:
         """Map one feedparser entry while making malformed entries an isolated warning.
 
-        A feed entry without any date field counts as discovered at collection
-        time: undated feeds stay usable, and the age filter still retires each
-        stored article max_age_hours after its first ingest.
+        A feed entry without any date field stays explicitly undated here.
+        Persistence assigns a one-time first-discovery fallback so repeated
+        collection cannot refresh an old rolling-feed entry into the window.
         """
         raw_url = entry.get("link")
         raw_title = entry.get("title")
@@ -97,6 +106,7 @@ class RSSCollector:
         content_text = RSSCollector._entry_content(entry)
         raw_external_id = entry.get("id") or entry.get("guid")
         external_id = str(raw_external_id) if raw_external_id is not None else None
+        published_at = RSSCollector._entry_datetime(entry)
         return (
             ArticleCandidate(
                 source_id=source.id,
@@ -105,7 +115,8 @@ class RSSCollector:
                 title=RSSCollector._plain_text(raw_title) or raw_title.strip(),
                 summary=summary,
                 content_text=content_text,
-                published_at=RSSCollector._entry_datetime(entry) or discovered_at,
+                published_at=published_at,
+                published_at_inferred=published_at is None,
                 language=source.language,
                 metadata={"feed_url": feed_url},
             ),
@@ -143,6 +154,107 @@ class RSSCollector:
         text = " ".join(" ".join(parser.parts).split())
         text = re.sub(r"\s+([,.!?;:])", r"\1", text)
         return text or None
+
+
+def _title_filter(source: Source) -> tuple[tuple[str, ...], SourceError | None]:
+    """Read an optional source-level title allowlist without changing normal RSS feeds."""
+    try:
+        raw = json.loads(source.config_json)
+        if not isinstance(raw, dict):
+            raise ValueError("source config must be an object")
+        keywords = raw.get("include_title_keywords")
+        if keywords is None:
+            return (), None
+        if not isinstance(keywords, list) or not all(isinstance(value, str) for value in keywords):
+            raise ValueError("include_title_keywords must be a list of strings")
+        cleaned = tuple(value.strip() for value in keywords if value.strip())
+        if not cleaned:
+            raise ValueError("include_title_keywords must not be empty")
+        return cleaned, None
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return (), SourceError(
+            code="INVALID_RSS_FILTER_CONFIG",
+            summary="RSS title filter must be a non-empty list of strings",
+            retryable=False,
+        )
+
+
+def _matches_title(title: str, keywords: tuple[str, ...]) -> bool:
+    """Keep configured topical matches while preserving the original feed order."""
+    normalized_title = title.casefold()
+    return any(keyword.casefold() in normalized_title for keyword in keywords)
+
+
+def _resolve_feed_url(
+    entry_url: str, rsshub_base_url: str | None
+) -> tuple[str | None, SourceError | None]:
+    """Translate an RSSHub route only through a deployment-controlled HTTP(S) base URL."""
+    route = urlsplit(entry_url)
+    if route.scheme.lower() != "rsshub":
+        return entry_url, None
+    if rsshub_base_url is None:
+        return None, SourceError(
+            code="RSSHUB_BASE_URL_REQUIRED",
+            summary="RSSHub source requires briefing.rsshub_base_url",
+            retryable=False,
+        )
+    base = urlsplit(rsshub_base_url)
+    if (
+        base.scheme.lower() not in {"http", "https"}
+        or base.hostname is None
+        or base.username is not None
+        or base.password is not None
+        or route.username is not None
+        or route.password is not None
+        or route.hostname is None
+    ):
+        return None, SourceError(
+            code="INVALID_RSSHUB_BASE_URL",
+            summary="RSSHub base URL must be an absolute HTTP(S) URL without credentials",
+            retryable=False,
+        )
+    try:
+        _ = base.port
+        if route.port is not None:
+            return None, SourceError(
+                code="INVALID_RSSHUB_ROUTE",
+                summary="RSSHub route cannot include a port",
+                retryable=False,
+            )
+    except ValueError:
+        return None, SourceError(
+            code="INVALID_RSSHUB_BASE_URL",
+            summary="RSSHub base URL or route has an invalid port",
+            retryable=False,
+        )
+    if not route.path.startswith("/"):
+        return None, SourceError(
+            code="INVALID_RSSHUB_ROUTE",
+            summary="RSSHub route must include a path",
+            retryable=False,
+        )
+    resolved_path = "/".join(
+        part.strip("/") for part in (base.path, route.hostname, route.path) if part.strip("/")
+    )
+    if not resolved_path:
+        return None, SourceError(
+            code="INVALID_RSSHUB_ROUTE",
+            summary="RSSHub route must include a path",
+            retryable=False,
+        )
+    authority = base.netloc
+    return (
+        urlunsplit(
+            (
+                base.scheme.lower(),
+                authority,
+                f"/{resolved_path}",
+                route.query,
+                "",
+            )
+        ),
+        None,
+    )
 
 
 class _PlainTextParser(HTMLParser):

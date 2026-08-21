@@ -27,8 +27,8 @@ class BriefingItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     headline: str = Field(min_length=1, max_length=28)
-    summary: str = Field(min_length=1, max_length=110)
-    why_it_matters: str = Field(min_length=1, max_length=55)
+    summary: str = Field(min_length=1, max_length=160)
+    why_it_matters: str = Field(min_length=1, max_length=80)
     source_name: str = Field(min_length=1)
     source_url: str = Field(min_length=1)
 

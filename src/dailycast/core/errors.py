@@ -108,3 +108,16 @@ class LLMStructuredOutputUnsupportedError(LLMProviderError):
             status_code=502,
             retryable=False,
         )
+
+
+class LLMWebSearchUnsupportedError(LLMProviderError):
+    """Raised when a Responses-compatible endpoint does not expose native web search."""
+
+    def __init__(self) -> None:
+        DailyCastError.__init__(
+            self,
+            code="AI_PROVIDER_WEB_SEARCH_UNSUPPORTED",
+            message="LLM provider rejected native web search",
+            status_code=502,
+            retryable=False,
+        )

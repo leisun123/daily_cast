@@ -105,7 +105,7 @@ def test_upgrade_empty_database_creates_full_schema(app_config_path: Path) -> No
             database_url=database_url,
         )
         assert revision.is_current is True
-        assert revision.current == ("0007_publication_targets",)
+        assert revision.current == ("0008_web_research_source_kind",)
     finally:
         engine.dispose()
 

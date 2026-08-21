@@ -13,6 +13,7 @@ import pytest
 from dailycast.briefing.prompt import build_briefing_messages
 from dailycast.briefing.renderer import RENDER_BYTE_BUDGET, render_briefing, truncate_markdown
 from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
+from dailycast.briefing.selection import RankedBriefingEvidence
 from dailycast.briefing.service import _interleave_by_source, latest_briefing_date
 from dailycast.briefing.webhook import WebhookNotifier, WebhookPushError
 from dailycast.core.config import BriefingSettings, load_settings
@@ -31,6 +32,20 @@ def _evidence(
         published_at=datetime(2026, 8, 19, 10, tzinfo=UTC),
         excerpt="这是正文摘录。",
         source_url=source_url,
+    )
+
+
+def _ranked_evidence(evidence: BriefingEvidence) -> RankedBriefingEvidence:
+    """Attach the fixed local decision the prompt must expose to the editor model."""
+    return RankedBriefingEvidence(
+        evidence=evidence,
+        tier="P0",
+        specificity=500,
+        reason="中国移动直接动态",
+        source_id="mobile-source",
+        source_priority=100,
+        discovered_at=datetime(2026, 8, 21, 8, tzinfo=UTC),
+        article_id=1,
     )
 
 
@@ -78,19 +93,28 @@ def test_briefing_result_rejects_more_than_five_items() -> None:
 
 def test_briefing_item_allows_a_detailed_factual_summary() -> None:
     """A factual event summary can carry enough detail to stand on its own."""
-    detailed_summary = "甲" * 110
+    detailed_summary = "甲" * 160
 
     item = _item("https://news.example.test/a", summary=detailed_summary)
 
     assert item.summary == detailed_summary
 
 
+def test_briefing_item_allows_a_two_sentence_management_impact() -> None:
+    """The impact field has room to explain the concrete business consequence."""
+    detailed_impact = "甲" * 80
+
+    item = _item("https://news.example.test/a", why_it_matters=detailed_impact)
+
+    assert item.why_it_matters == detailed_impact
+
+
 def test_briefing_item_rejects_content_above_the_delivery_budget() -> None:
     """Longer prose belongs in the source article, not a single WeCom message."""
     with pytest.raises(ValueError, match="summary"):
-        _item("https://news.example.test/a", summary="甲" * 111)
+        _item("https://news.example.test/a", summary="甲" * 161)
     with pytest.raises(ValueError, match="why_it_matters"):
-        _item("https://news.example.test/a", why_it_matters="乙" * 56)
+        _item("https://news.example.test/a", why_it_matters="乙" * 81)
 
 
 def test_briefing_item_requires_an_absolute_http_source_url() -> None:
@@ -103,8 +127,8 @@ def test_briefing_item_requires_an_absolute_http_source_url() -> None:
         _item("news.example.test/a")
 
 
-def test_renderer_uses_a_scannable_briefing_hierarchy_and_reader_friendly_source() -> None:
-    """A reader can scan the context, the key point, and a clean original-source link."""
+def test_renderer_uses_spaced_quote_blocks_and_reader_friendly_source() -> None:
+    """A reader can scan one visual block at a time without losing the original source."""
     markdown = render_briefing(
         "通信行业日报",
         date(2026, 8, 20),
@@ -122,13 +146,34 @@ def test_renderer_uses_a_scannable_briefing_hierarchy_and_reader_friendly_source
     )
 
     assert markdown.startswith("# 通信行业日报｜8月20日\n")
-    assert '<font color="comment">今日精选 · 1 条</font>' in markdown
-    assert "**今日要点**\n概览一句话。" in markdown
-    assert "**01｜头条一句话**" in markdown
-    assert '<font color="comment">发生了什么</font>\n第一句摘要。第二句摘要。' in markdown
-    assert '<font color="comment">为什么值得看</font>\n企业部署模型时可少一道数据顾虑。' in markdown
+    assert "*今日精选 · 1 条*" in markdown
+    assert (
+        "> **今日要点**\n> 概览一句话。\n\n"
+        "## 01｜头条一句话\n\n"
+        "> **发生了什么**\n> 第一句摘要。第二句摘要。\n\n"
+        "> **为什么值得看**\n> 企业部署模型时可少一道数据顾虑。\n\n"
+    ) in markdown
     assert "[36氪快讯 · 阅读原文 ↗](https://news.example.test/a)" in markdown
     assert "RSSHub" not in markdown
+    assert "<font" not in markdown
+
+
+def test_renderer_places_a_markdown_v2_rule_between_briefing_items() -> None:
+    """Each selected item has a visible separator in WeCom's richer Markdown view."""
+    markdown = render_briefing(
+        "通信行业日报",
+        date(2026, 8, 20),
+        BriefingResult(
+            overview="概览一句话。",
+            items=[
+                _item("https://news.example.test/a"),
+                _item("https://news.example.test/b", source_name="C114"),
+            ],
+        ),
+        [_evidence(), _evidence("https://news.example.test/b", source_name="C114")],
+    )
+
+    assert "[量子位 · 阅读原文 ↗](https://news.example.test/a)\n\n---\n\n## 02｜" in markdown
 
 
 def test_renderer_replaces_a_hallucinated_url_with_the_evidence_url() -> None:
@@ -181,14 +226,14 @@ def test_renderer_keeps_five_detailed_items_inside_the_wecom_budget() -> None:
     result = BriefingResult(
         overview="今日多项通信与AI基础设施进展进入实质交付阶段。",
         items=[
-            _item(item.source_url, summary="甲" * 110, why_it_matters="乙" * 55)
+            _item(item.source_url, summary="甲" * 110, why_it_matters="乙" * 80)
             for item in evidence
         ],
     )
 
     markdown = render_briefing("通信行业日报", date(2026, 8, 20), result, evidence)
 
-    assert markdown.count("**0") == 5
+    assert markdown.count("## 0") == 5
     assert len(markdown.encode("utf-8")) <= RENDER_BYTE_BUDGET
 
 
@@ -243,13 +288,33 @@ def test_latest_briefing_date_falls_back_to_the_most_recent_persisted_day(
 
 def test_prompt_carries_bounded_evidence_and_forbids_invented_urls() -> None:
     """The prompt is the only evidence channel, so it must pin links to the evidence."""
-    messages = build_briefing_messages("通信行业日报", [_evidence()])
+    messages = build_briefing_messages("通信行业日报", [_ranked_evidence(_evidence())])
 
     assert messages[0].role == "system"
     user_content = messages[-1].content
     assert "https://news.example.test/a" in user_content
     assert "这是正文摘录。" in user_content
     assert "不得修改、拼接或编造" in user_content
+
+
+def test_prompt_receives_fixed_management_priority_and_reason() -> None:
+    """The generation model explains fixed evidence; it does not reselect or reorder it."""
+    evidence = _evidence(title="中国移动启动基站集采")
+    ranked = _ranked_evidence(evidence)
+
+    messages = build_briefing_messages("通信行业日报", [ranked])
+
+    assert "已确定优先级：P0" in messages[-1].content
+    assert "入选原因：中国移动直接动态" in messages[-1].content
+    assert "按以上固定顺序逐条生成" in messages[-1].content
+    assert "挑选最重要" not in messages[-1].content
+
+
+def test_prompt_requests_a_two_sentence_management_impact() -> None:
+    """The model must explain the business consequence instead of adding a slogan."""
+    messages = build_briefing_messages("通信行业日报", [_ranked_evidence(_evidence())])
+
+    assert "1-2 句、60-75 字为宜、不超过 80 字" in messages[-1].content
 
 
 def test_webhook_notifier_posts_the_wecom_markdown_envelope() -> None:
@@ -266,6 +331,40 @@ def test_webhook_notifier_posts_the_wecom_markdown_envelope() -> None:
     asyncio.run(notifier.push("# 日报"))
 
     assert requests == [{"msgtype": "markdown", "markdown": {"content": "# 日报"}}]
+
+
+def test_webhook_notifier_posts_the_wecom_markdown_v2_envelope() -> None:
+    """The richer group-bot format must select the matching v2 JSON keys."""
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"errcode": 0, "errmsg": "ok"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    notifier = WebhookNotifier(WEBHOOK_URL, payload_format="wecom_markdown_v2", client=client)
+
+    asyncio.run(notifier.push("## 日报\n\n---\n\n正文"))
+
+    assert requests == [
+        {
+            "msgtype": "markdown_v2",
+            "markdown_v2": {"content": "## 日报\n\n---\n\n正文"},
+        }
+    ]
+
+
+def test_webhook_notifier_treats_markdown_v2_rejection_as_a_push_failure() -> None:
+    """A v2 payload must not mistake an errcode response for successful delivery."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"errcode": 93000, "errmsg": "invalid webhook"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    notifier = WebhookNotifier(WEBHOOK_URL, payload_format="wecom_markdown_v2", client=client)
+
+    with pytest.raises(WebhookPushError, match="errcode=93000"):
+        asyncio.run(notifier.push("# 日报"))
 
 
 def test_webhook_notifier_generic_json_posts_text_and_owns_the_response_body() -> None:

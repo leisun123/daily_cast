@@ -69,6 +69,21 @@ class LLMProvider(Protocol):
         """Request provider JSON output without deciding any editorial workflow."""
 
 
+class WebResearchProvider(Protocol):
+    """A narrowly scoped provider capability for time-sensitive native web discovery."""
+
+    provider_name: str
+    model: str
+
+    async def generate_web_research(
+        self,
+        messages: Sequence[LLMMessage],
+        response_schema: type[BaseModel],
+        model_options: Mapping[str, JSONValue],
+    ) -> StructuredResult:
+        """Discover URL candidates using a provider-native web-search tool."""
+
+
 __all__ = [
     "JSONValue",
     "LLMMessage",
@@ -76,4 +91,5 @@ __all__ = [
     "LLMProviderTimeoutError",
     "LLMUsage",
     "StructuredResult",
+    "WebResearchProvider",
 ]

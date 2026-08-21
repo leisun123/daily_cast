@@ -16,6 +16,7 @@ from dailycast.db.repositories import ArticleRepository, SourceRepository
 from dailycast.db.revision import build_alembic_config
 from dailycast.db.session import create_session_factory, create_sqlite_engine
 from dailycast.db.transactions import UnitOfWork
+from dailycast.news import deduplication
 from dailycast.news.clustering import cluster_articles
 from dailycast.news.deduplication import deduplicate_articles
 from dailycast.news.filtering import filter_articles
@@ -30,9 +31,9 @@ from dailycast.news.normalization import (
 from dailycast.news.service import NewsProcessor
 from dailycast.news.types import ProcessableArticle, ProcessingPolicy
 
-RATE_CUT_TEXT = "central bank interest rate cut inflation slowing policy decision " "markets react "
+RATE_CUT_TEXT = "central bank interest rate cut inflation slowing policy decision markets react "
 RATE_REDUCTION_TEXT = (
-    "inflation cooling central bank announces rate reduction policy " "meeting markets react "
+    "inflation cooling central bank announces rate reduction policy meeting markets react "
 )
 
 
@@ -398,5 +399,100 @@ def test_news_processor_persists_filter_deduplication_and_events(app_config_path
             assert first_row.news_event.article_count == 2
             assert first_row.news_event.cluster_algorithm == "tfidf_char"
             assert first_row.news_event.cluster_version == "1"
+    finally:
+        engine.dispose()
+
+
+def test_news_processor_can_deduplicate_in_memory_without_mutating_articles(
+    app_config_path: Path,
+) -> None:
+    """Briefing selection may reuse deterministic duplicate rules without changing shared rows."""
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    engine, factory = upgraded_factory(app_config_path)
+    try:
+        create_source(factory, source_id="source-a", priority=80)
+        first = create_article(
+            factory,
+            source_id="source-a",
+            unique="duplicate-a",
+            title="Same verified article",
+            content="same verified evidence " * 20,
+            published_at=now - timedelta(hours=2),
+        )
+        second = create_article(
+            factory,
+            source_id="source-a",
+            unique="duplicate-b",
+            title="Same verified article",
+            content="same verified evidence " * 20,
+            published_at=now - timedelta(hours=1),
+        )
+        processor = NewsProcessor(
+            factory,
+            ProcessingPolicy(min_content_length=100, similarity_threshold=0.58),
+            clock=FixedClock(now),
+        )
+        filtered = processor.filter((first.id, second.id))
+
+        decision = processor.deduplicate_in_memory(filtered.eligible_article_ids)
+
+        assert len(decision.primary_article_ids) == 1
+        assert set(decision.primary_article_ids) | set(decision.duplicate_of_article_ids) == {
+            first.id,
+            second.id,
+        }
+        with UnitOfWork(factory) as unit:
+            assert unit.session is not None
+            first_row = ArticleRepository(unit.session).get(first.id)
+            second_row = ArticleRepository(unit.session).get(second.id)
+            assert first_row is not None and second_row is not None
+            assert first_row.status == ArticleStatus.ELIGIBLE
+            assert second_row.status == ArticleStatus.ELIGIBLE
+            assert first_row.duplicate_of_article_id is None
+            assert second_row.duplicate_of_article_id is None
+            assert first_row.simhash is None
+            assert second_row.simhash is None
+    finally:
+        engine.dispose()
+
+
+def test_briefing_local_deduplication_rejects_a_simhash_only_collision(
+    app_config_path: Path, monkeypatch: Any
+) -> None:
+    """Distinct reports must survive briefing-local deduplication despite a SimHash collision."""
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    engine, factory = upgraded_factory(app_config_path)
+    try:
+        create_source(factory, source_id="source-a", priority=80)
+        first = create_article(
+            factory,
+            source_id="source-a",
+            unique="network-procurement",
+            title="Operator opens a network cabinet tender",
+            content="network cabinet procurement tender supplier bid capacity delivery " * 12,
+            published_at=now - timedelta(hours=2),
+        )
+        second = create_article(
+            factory,
+            source_id="source-a",
+            unique="standards-meeting",
+            title="Operator joins an internet standards meeting",
+            content=(
+                "internet standards protocol engineering committee meeting technical roadmap " * 12
+            ),
+            published_at=now - timedelta(hours=1),
+        )
+        monkeypatch.setattr(deduplication, "hamming_distance", lambda *_: 0)
+        processor = NewsProcessor(
+            factory,
+            ProcessingPolicy(min_content_length=100, similarity_threshold=0.58),
+            clock=FixedClock(now),
+        )
+        filtered = processor.filter((first.id, second.id))
+
+        decision = processor.deduplicate_in_memory(filtered.eligible_article_ids)
+
+        assert decision.primary_article_ids == (first.id, second.id)
+        assert decision.duplicate_of_article_ids == {}
     finally:
         engine.dispose()

@@ -28,7 +28,115 @@ def test_initial_schema_revision_reaches_head(app_config_path: Path) -> None:
         engine.dispose()
 
     assert revision.is_current is True
-    assert revision.current == ("0007_publication_targets",)
+    assert revision.current == ("0008_web_research_source_kind",)
+
+
+def test_web_research_source_kind_migration_preserves_sources_referenced_by_articles(
+    app_config_path: Path,
+) -> None:
+    """The new source kind is accepted without disturbing existing source rows."""
+    settings = load_settings(config_path=app_config_path)
+    ini_path = Path(__file__).resolve().parents[1] / "alembic.ini"
+    config = build_alembic_config(ini_path=ini_path, database_url=settings.database.url)
+    command.upgrade(config, "0007_publication_targets")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO sources (
+                        id, name, kind, entry_url, normalized_entry_url, config_json,
+                        created_at, updated_at
+                    ) VALUES (
+                        'existing-rss', 'Existing RSS', 'rss',
+                        'https://example.test/rss', 'https://example.test/rss', '{}',
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO articles (
+                        source_id, url, normalized_url, url_hash, title, normalized_title,
+                        title_hash, discovered_at, status, metadata_json, created_at, updated_at
+                    ) VALUES (
+                        'existing-rss', 'https://example.test/article',
+                        'https://example.test/article', :url_hash, 'Existing article',
+                        'existing article', :title_hash, CURRENT_TIMESTAMP, 'extracted', '{}',
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {"url_hash": "a" * 64, "title_hash": "b" * 64},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO sources (
+                        id, name, kind, entry_url, normalized_entry_url, config_json,
+                        created_at, updated_at
+                    ) VALUES (
+                        'research-ai', 'Web Research AI', 'web_research',
+                        'research://ai', 'research://ai', '{}',
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            kinds = connection.execute(text("SELECT kind FROM sources ORDER BY id")).scalars().all()
+            article_source_id = connection.execute(
+                text("SELECT source_id FROM articles WHERE url_hash = :url_hash"),
+                {"url_hash": "a" * 64},
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert kinds == ["rss", "web_research"]
+    assert article_source_id == "existing-rss"
+
+
+def test_web_research_source_kind_migration_recovers_stale_batch_table(
+    app_config_path: Path,
+) -> None:
+    """A retry can safely discard only the stale table left by an interrupted batch run."""
+    settings = load_settings(config_path=app_config_path)
+    ini_path = Path(__file__).resolve().parents[1] / "alembic.ini"
+    config = build_alembic_config(ini_path=ini_path, database_url=settings.database.url)
+    command.upgrade(config, "0007_publication_targets")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE TABLE _alembic_tmp_sources (id TEXT)"))
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_sqlite_engine(settings.database)
+    try:
+        with engine.connect() as connection:
+            stale_table = connection.execute(
+                text(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = '_alembic_tmp_sources'"
+                )
+            ).scalar_one_or_none()
+    finally:
+        engine.dispose()
+
+    assert stale_table is None
 
 
 def test_production_metrics_migration_backfills_existing_episode_news_count(

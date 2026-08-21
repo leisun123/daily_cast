@@ -25,7 +25,7 @@ from dailycast.core.errors import (
     LLMStructuredOutputUnsupportedError,
 )
 from dailycast.core.hashes import sha256_text
-from dailycast.core.lifespan import build_llm_provider
+from dailycast.core.lifespan import build_llm_provider, build_web_research_provider
 from dailycast.db.models import LLMArtifact, LLMOperation, TaskRunStatus, TaskType, TriggerType
 from dailycast.db.repositories import TaskRunRepository, TaskStepRepository
 from dailycast.db.revision import build_alembic_config
@@ -727,6 +727,73 @@ def test_openai_responses_provider_requests_json_schema_and_reads_output_text() 
     assert result.content == {"score": 7}
     assert result.usage == LLMUsage(input_tokens=4, output_tokens=2)
     assert result.request_id == "response-request"
+
+
+def test_openai_responses_web_research_uses_the_existing_responses_client() -> None:
+    """Web discovery relies on the prompt contract, not Responses JSON formatting."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(
+            200,
+            json={
+                "id": "web-research-request",
+                "output": [
+                    {"type": "web_search_call", "status": "completed"},
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"score":7}'}],
+                    },
+                ],
+            },
+        )
+
+    async def scenario() -> StructuredResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAIResponsesLLMProvider(
+                base_url="https://models.example/v1",
+                api_key="test-key",
+                model="test-model",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_output_tokens=30,
+                response_format="json_object",
+                http_client=client,
+            )
+            return await provider.generate_web_research(
+                (LLMMessage(role="user", content="Find the latest news."),),
+                ScoreOutput,
+                {"search_context_size": "high"},
+            )
+
+    result = asyncio.run(scenario())
+
+    request = captured["request"]
+    assert isinstance(request, httpx.Request)
+    assert request.url == "https://models.example/v1/responses"
+    assert request.headers["authorization"] == "Bearer test-key"
+    payload = json.loads(request.content)
+    assert payload["tools"] == [{"type": "web_search", "search_context_size": "high"}]
+    assert payload["tool_choice"] == "required"
+    assert "text" not in payload
+    assert "Structured output contract" in payload["input"][0]["content"][0]["text"]
+    assert result.content == {"score": 7}
+    assert result.request_id == "web-research-request"
+
+
+def test_lifespan_reuses_the_primary_responses_provider_for_web_research() -> None:
+    """Briefing discovery must not construct a parallel client or silently choose the fallback."""
+    provider = OpenAIResponsesLLMProvider(
+        base_url="https://models.example/v1",
+        api_key="test-key",
+        model="test-model",
+        timeout_seconds=2,
+        temperature=0.1,
+        max_output_tokens=30,
+    )
+
+    assert build_web_research_provider(provider) is provider
 
 
 def test_openai_responses_provider_rejects_missing_output_text() -> None:

@@ -103,6 +103,7 @@ class ArticleService:
                 )
             existing = existing_by_external or articles.get_by_url_hash(url_hash)
             if existing is None:
+                first_published_at = candidate.published_at or now
                 return articles.upsert(
                     source_id=candidate.source_id,
                     external_id=candidate.external_id,
@@ -116,10 +117,13 @@ class ArticleService:
                     content_text=normalized_content,
                     content_hash=sha256_text(normalized_content) if normalized_content else None,
                     language=candidate.language,
-                    published_at=candidate.published_at,
+                    published_at=first_published_at,
+                    published_at_inferred=candidate.published_at is None,
                     discovered_at=now,
+                    fetched_at=candidate.fetched_at,
                     extracted_at=now if normalized_content else None,
                     content_updated_at=now if normalized_content else None,
+                    http_status=candidate.http_status,
                     status=(
                         ArticleStatus.EXTRACTED if normalized_content else ArticleStatus.DISCOVERED
                     ),
@@ -132,6 +136,10 @@ class ArticleService:
                 normalized_content is not None and normalized_content != existing.content_text
             )
             status = ArticleStatus.EXTRACTED if merged_content else existing.status
+            published_at = candidate.published_at or existing.published_at
+            published_at_inferred = (
+                False if candidate.published_at is not None else existing.published_at_inferred
+            )
             return articles.upsert(
                 source_id=existing.source_id,
                 external_id=existing.external_id or candidate.external_id,
@@ -145,10 +153,17 @@ class ArticleService:
                 content_text=merged_content,
                 content_hash=sha256_text(merged_content) if merged_content else None,
                 language=candidate.language or existing.language,
-                published_at=candidate.published_at or existing.published_at,
+                published_at=published_at,
+                published_at_inferred=published_at_inferred,
                 discovered_at=existing.discovered_at,
+                fetched_at=candidate.fetched_at or existing.fetched_at,
                 extracted_at=now if normalized_content else existing.extracted_at,
                 content_updated_at=now if content_changed else existing.content_updated_at,
+                http_status=(
+                    candidate.http_status
+                    if candidate.http_status is not None
+                    else existing.http_status
+                ),
                 status=status,
                 error_code=None if merged_content else existing.error_code,
                 error_summary=None if merged_content else existing.error_summary,
@@ -202,6 +217,10 @@ class ArticleService:
                 article,
                 content_text=content_text,
                 content_hash=sha256_text(content_text),
+                published_at=extracted.published_at or article.published_at,
+                published_at_inferred=(
+                    False if extracted.published_at is not None else article.published_at_inferred
+                ),
                 status=ArticleStatus.EXTRACTED,
                 fetched_at=extracted.fetched_at or now,
                 extracted_at=now,

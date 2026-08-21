@@ -158,10 +158,25 @@ logging:
 briefing:
   enabled: false
   sources_config_path: ./config/briefing.sources.yaml
+  selection_policy_path: ./config/briefing.selection.yaml
   cron_expression: "30 8 * * mon-fri"
   window_hours: 24
   max_items_per_category: 5
   max_evidence_chars_per_article: 800
+  # Optional HTTP(S) endpoint for configured rsshub:// feeds such as 36Kr
+  # 24-hour hot list. Use your known-good/self-hosted RSSHub instance; do not
+  # depend on a random public mirror.
+  rsshub_base_url: null
   webhook_enabled: false
-  # wecom_markdown | generic_json ({"text": ...}, Slack-style targets)
-  webhook_format: wecom_markdown
+  # wecom_markdown_v2 | wecom_markdown | generic_json ({"text": ...}, Slack-style targets)
+  webhook_format: wecom_markdown_v2
+
+# Native OpenAI web-search discovery is disabled in local development unless
+# explicitly enabled. It is used only by the briefing-specific web_research
+# source kind, never by the default podcast source pool.
+web_research:
+  enabled: false
+  max_candidates_per_source: 20
+  max_search_calls_per_source: 1
+  search_context_size: medium
+  max_article_chars: 12000

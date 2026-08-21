@@ -17,6 +17,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from dailycast.briefing.prompt import build_briefing_messages
 from dailycast.briefing.renderer import render_briefing, truncate_markdown
 from dailycast.briefing.schemas import BriefingEvidence, BriefingResult
+from dailycast.briefing.selection import (
+    BriefingSelectionCandidate,
+    BriefingSelectionPolicy,
+    RankedBriefingEvidence,
+    select_evidence,
+)
 from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.time import Clock
 from dailycast.db.models import LLMOperation, Source
@@ -88,6 +94,8 @@ class BriefingService:
         max_evidence_chars_per_article: int = 800,
         output_dir: Path,
         budget_factory: Callable[[], BudgetController],
+        briefing_source_ids: frozenset[str] | None = None,
+        selection_policy: BriefingSelectionPolicy,
         timezone: str = "Asia/Shanghai",
         clock: Clock | None = None,
     ) -> None:
@@ -103,6 +111,8 @@ class BriefingService:
         self._max_evidence_chars_per_article = max_evidence_chars_per_article
         self._output_dir = output_dir
         self._budget_factory = budget_factory
+        self._briefing_source_ids = briefing_source_ids
+        self._selection_policy = selection_policy
         self._timezone = ZoneInfo(timezone)
         self._clock = clock or Clock()
         self._run_reserved = False
@@ -160,7 +170,8 @@ class BriefingService:
         collection = await self._collection_service.collect_sources(sources, window)
         await self._extract_missing_bodies(collection.article_ids)
         filtered = self._news_processor.filter(collection.article_ids)
-        evidence_by_category = self._build_evidence(filtered.eligible_article_ids)
+        deduplicated = self._news_processor.deduplicate_in_memory(filtered.eligible_article_ids)
+        evidence_by_category = self._build_evidence(deduplicated.primary_article_ids, window)
         reports: list[BriefingCategoryReport] = []
         for category in CATEGORY_TITLES:
             evidence = evidence_by_category.get(category, ())
@@ -170,13 +181,15 @@ class BriefingService:
         return BriefingRunReport(date=briefing_date.isoformat(), categories=tuple(reports))
 
     def _briefing_sources(self) -> tuple[Source, ...]:
-        """Select only enabled sources whose config opts into a known briefing category."""
+        """Select enabled, current-policy sources whose config opts into a briefing category."""
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             return tuple(
                 source
                 for source in SourceRepository(unit.session).list()
-                if source.enabled and briefing_category_for_source(source) in CATEGORY_TITLES
+                if source.enabled
+                and briefing_category_for_source(source) in CATEGORY_TITLES
+                and (self._briefing_source_ids is None or source.id in self._briefing_source_ids)
             )
 
     async def _extract_missing_bodies(self, article_ids: tuple[int, ...]) -> None:
@@ -192,14 +205,16 @@ class BriefingService:
                 self._article_service.record_extraction_failure(target.article_id, extracted)
 
     def _build_evidence(
-        self, eligible_article_ids: tuple[int, ...]
-    ) -> dict[str, tuple[BriefingEvidence, ...]]:
-        """Group bounded evidence by category, best sources and newest articles first."""
-        grouped: dict[str, list[tuple[tuple[int, float, int], BriefingEvidence]]] = {}
+        self, eligible_article_ids: tuple[int, ...], window: CollectionWindow
+    ) -> dict[str, tuple[RankedBriefingEvidence, ...]]:
+        """Build only in-window candidates, then apply fixed local management ordering."""
+        grouped: dict[str, list[BriefingSelectionCandidate]] = {}
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             for article in ArticleRepository(unit.session).list_by_ids(eligible_article_ids):
                 if not article.content_text:
+                    continue
+                if article.published_at_inferred or not window.includes(article.published_at):
                     continue
                 category = briefing_category_for_source(article.source)
                 if category is None or category not in CATEGORY_TITLES:
@@ -211,22 +226,29 @@ class BriefingService:
                     excerpt=article.content_text[: self._max_evidence_chars_per_article],
                     source_url=article.url,
                 )
-                sort_key = (
-                    -article.source.priority,
-                    -_utc_timestamp(article.published_at or article.discovered_at),
-                    -article.id,
+                candidate = BriefingSelectionCandidate(
+                    article_id=article.id,
+                    source_id=article.source_id,
+                    source_priority=article.source.priority,
+                    discovered_at=article.discovered_at,
+                    evidence=evidence,
                 )
-                grouped.setdefault(category, []).append((sort_key, evidence))
+                grouped.setdefault(category, []).append(candidate)
         return {
-            category: _interleave_by_source(entries)[: self._max_items_per_category]
-            for category, entries in grouped.items()
+            category: select_evidence(
+                category,
+                candidates,
+                self._selection_policy,
+                limit=self._max_items_per_category,
+            )
+            for category, candidates in grouped.items()
         }
 
     async def _run_category(
         self,
         category: str,
         briefing_date: date,
-        evidence: tuple[BriefingEvidence, ...],
+        evidence: tuple[RankedBriefingEvidence, ...],
         provider: LLMProvider,
         *,
         force: bool,
@@ -277,7 +299,7 @@ class BriefingService:
         self,
         category: str,
         briefing_date: date,
-        evidence: tuple[BriefingEvidence, ...],
+        evidence: tuple[RankedBriefingEvidence, ...],
         provider: LLMProvider,
     ) -> str:
         """Ask the LLM for prose, then render links deterministically from evidence."""
@@ -290,7 +312,12 @@ class BriefingService:
         )
         result = BriefingResult.model_validate(structured.content)
         return truncate_markdown(
-            render_briefing(CATEGORY_TITLES[category], briefing_date, result, evidence)
+            render_briefing(
+                CATEGORY_TITLES[category],
+                briefing_date,
+                result,
+                [entry.evidence for entry in evidence],
+            )
         )
 
     def _write_markdown(self, briefing_date: date, category: str, markdown: str) -> Path:

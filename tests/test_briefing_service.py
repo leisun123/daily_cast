@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.renderer import RENDER_BYTE_BUDGET
+from dailycast.briefing.selection import BriefingSelectionPolicy, load_selection_policy
 from dailycast.briefing.service import (
     ALREADY_COMPLETED,
     BriefingRunInProgressError,
@@ -22,6 +23,7 @@ from dailycast.briefing.service import (
 )
 from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.errors import LLMProviderError
+from dailycast.core.time import Clock
 from dailycast.db.models import LLMOperation, Source, SourceKind
 from dailycast.db.repositories import SourceRepository
 from dailycast.db.transactions import UnitOfWork
@@ -38,6 +40,8 @@ from dailycast.sources.contracts import (
 )
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy
 from dailycast.sources.service import ArticleService, SourceCollectionService
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeRSSCollector:
@@ -57,11 +61,22 @@ class FakeRSSCollector:
         )
 
 
+class FixedClock(Clock):
+    """Return one deterministic instant for briefing freshness tests."""
+
+    def __init__(self, value: datetime) -> None:
+        self._value = value
+
+    def now(self) -> datetime:
+        return self._value
+
+
 class FakeExtractor(ContentExtractor):
     """Return a canned body for any article that still lacks one."""
 
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, *, published_at: datetime | None = None) -> None:
         self._content = content
+        self._published_at = published_at
 
     async def extract(self, url: str, policy: FetchPolicy) -> ExtractedArticle:
         """Pretend every fetch succeeded so tests never touch the network."""
@@ -72,6 +87,7 @@ class FakeExtractor(ContentExtractor):
             content_text=self._content,
             http_status=200,
             fetched_at=datetime.now(UTC),
+            published_at=self._published_at,
         )
 
 
@@ -162,13 +178,21 @@ def _seed_source(
         )
 
 
-def _candidate(source_id: str, key: str) -> ArticleCandidate:
+def _candidate(
+    source_id: str,
+    key: str,
+    *,
+    title: str | None = None,
+    content_text: str | None = None,
+    published_at: datetime | None = None,
+) -> ArticleCandidate:
+    is_ai = "ai" in source_id
     return ArticleCandidate(
         source_id=source_id,
-        url=f"https://news.example.test/{key}",
-        title=f"新闻 {key}",
-        content_text=f"这是 {key} 的正文内容，足够通过长度过滤。" * 3,
-        published_at=datetime.now(UTC),
+        url=f"https://{source_id}.example.test/{key}",
+        title=title or (f"DeepSeek 发布大模型 {key}" if is_ai else f"中国移动 {key} 网络建设进展"),
+        content_text=content_text or (f"evidence-{key} " * 100),
+        published_at=published_at or datetime.now(UTC),
     )
 
 
@@ -212,28 +236,35 @@ def _build_service(
     collector: FakeRSSCollector,
     llm: LLMProvider,
     notifier: WebhookNotifier | None,
+    extractor: ContentExtractor | None = None,
     budget_factory: Callable[[], BudgetController] = BudgetController,
     briefing_source_ids: frozenset[str] | None = None,
+    selection_policy: BriefingSelectionPolicy | None = None,
+    clock: Clock | None = None,
 ) -> BriefingService:
-    article_service = ArticleService(factory)
+    article_service = ArticleService(factory, clock=clock)
     collection_service = SourceCollectionService(
-        factory, {SourceKind.RSS: collector}, article_service
+        factory, {SourceKind.RSS: collector}, article_service, clock=clock
     )
     news_processor = NewsProcessor(
         factory,
         ProcessingPolicy(max_age_hours=72, min_content_length=10, similarity_threshold=0.58),
+        clock=clock,
     )
     return BriefingService(
         factory,
         collection_service,
         article_service,
-        FakeExtractor("抓取的正文内容。" * 10),
+        extractor or FakeExtractor("抓取的正文内容。" * 10),
         news_processor,
         llm,
         notifier,
         output_dir=output_dir,
         budget_factory=budget_factory,
         briefing_source_ids=briefing_source_ids,
+        selection_policy=selection_policy
+        or load_selection_policy(PROJECT_ROOT / "config" / "briefing.selection.yaml"),
+        clock=clock,
     )
 
 
@@ -252,9 +283,7 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
     _seed_source(session_factory, "podcast-source", category=None)
     collector = FakeRSSCollector(
         {
-            "telecom-source": [
-                _candidate("telecom-source", f"t{index}") for index in range(1, 6)
-            ],
+            "telecom-source": [_candidate("telecom-source", f"t{index}") for index in range(1, 6)],
             "ai-source": [_candidate("ai-source", f"a{index}") for index in range(1, 6)],
             "podcast-source": [_candidate("podcast-source", "p1")],
         }
@@ -262,11 +291,11 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
     llm = FakeBriefingLLM(
         {
             "通信行业日报": _llm_payloads(
-                [f"https://news.example.test/t{index}" for index in range(1, 6)],
+                [f"https://telecom-source.example.test/t{index}" for index in range(1, 6)],
                 "来源 telecom-source",
             ),
             "AI 动态日报": _llm_payloads(
-                [f"https://news.example.test/a{index}" for index in range(1, 6)],
+                [f"https://ai-source.example.test/a{index}" for index in range(1, 6)],
                 "来源 ai-source",
             ),
         }
@@ -290,11 +319,73 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
     assert set(briefings) == {"telecom", "ai"}
     assert "# 通信行业日报" in briefings["telecom"]
-    assert "https://news.example.test/t1" in briefings["telecom"]
-    assert "https://news.example.test/a1" in briefings["ai"]
+    assert (
+        sum(
+            f"https://telecom-source.example.test/t{index}" in briefings["telecom"]
+            for index in range(1, 6)
+        )
+        == 2
+    )
+    assert (
+        sum(f"https://ai-source.example.test/a{index}" in briefings["ai"] for index in range(1, 6))
+        == 1
+    )
     assert notifier.pushed[0].startswith("# 通信行业日报")
     assert notifier.pushed[1].startswith("# AI 动态日报")
     assert all(len(markdown.encode("utf-8")) <= RENDER_BYTE_BUDGET for markdown in notifier.pushed)
+
+
+def test_briefing_run_passes_fixed_policy_order_to_generation(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The briefing model receives the locally decided P0-before-P3 evidence order."""
+    _seed_source(session_factory, "policy-source", category="telecom", priority=100)
+    _seed_source(session_factory, "mobile-source", category="telecom", priority=10)
+    collector = FakeRSSCollector(
+        {
+            "policy-source": [
+                _candidate(
+                    "policy-source",
+                    "policy",
+                    title="工信部发布通信规划",
+                    content_text="通信网络专项政策文件" * 10,
+                )
+            ],
+            "mobile-source": [
+                _candidate(
+                    "mobile-source",
+                    "mobile",
+                    title="中国移动启动基站集采",
+                    content_text="无线网建设项目启动" * 10,
+                )
+            ],
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payload(
+                "https://mobile-source.example.test/mobile", "来源 mobile-source"
+            )
+        }
+    )
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+    )
+
+    report = asyncio.run(service.run())
+
+    assert {entry.category: entry.status for entry in report.categories} == {
+        "telecom": "generated",
+        "ai": "skipped",
+    }
+    telecom_prompt = llm.user_prompts[0]
+    assert telecom_prompt.index("中国移动启动基站集采") < telecom_prompt.index("工信部发布通信规划")
+    assert "已确定优先级：P0" in telecom_prompt
+    assert "已确定优先级：P3" in telecom_prompt
 
 
 def test_briefing_run_ignores_historical_sources_absent_from_current_policy(
@@ -314,7 +405,7 @@ def test_briefing_run_ignores_historical_sources_absent_from_current_policy(
         tmp_path / "briefings",
         collector=collector,
         llm=FakeBriefingLLM(
-            {"AI 动态日报": _llm_payload("https://news.example.test/curated", "精选来源")}
+            {"AI 动态日报": _llm_payload("https://curated-ai.example.test/curated", "精选来源")}
         ),
         notifier=None,
         briefing_source_ids=frozenset({"curated-ai"}),
@@ -344,7 +435,7 @@ def test_briefing_run_isolates_one_category_failure(
     llm = FakeBriefingLLM(
         {
             "通信行业日报": RuntimeError("llm unavailable"),
-            "AI 动态日报": _llm_payload("https://news.example.test/a1", "来源 ai-source"),
+            "AI 动态日报": _llm_payload("https://ai-source.example.test/a1", "来源 ai-source"),
         }
     )
     output_dir = tmp_path / "briefings"
@@ -371,7 +462,11 @@ def test_briefing_run_skips_a_category_without_eligible_articles(
     _seed_source(session_factory, "ai-source", category="ai")
     collector = FakeRSSCollector({"telecom-source": [_candidate("telecom-source", "t1")]})
     llm = FakeBriefingLLM(
-        {"通信行业日报": _llm_payload("https://news.example.test/t1", "来源 telecom-source")}
+        {
+            "通信行业日报": _llm_payload(
+                "https://telecom-source.example.test/t1", "来源 telecom-source"
+            )
+        }
     )
     output_dir = tmp_path / "briefings"
     service = _build_service(
@@ -390,6 +485,126 @@ def test_briefing_run_skips_a_category_without_eligible_articles(
     assert set(briefings) == {"telecom"}
 
 
+def test_briefing_run_rejects_article_outside_its_24_hour_window(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Briefing freshness is enforced even if a collector returns an old article."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate(
+                    "telecom-source",
+                    "stale",
+                    published_at=datetime.now(UTC) - timedelta(hours=25),
+                )
+            ]
+        }
+    )
+    llm = FakeBriefingLLM({})
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(item for item in report.categories if item.category == "telecom")
+    assert telecom.status == "skipped"
+    assert telecom.reason == "no_eligible_articles"
+    assert llm.operations == []
+
+
+def test_briefing_run_rejects_stale_date_found_during_body_extraction(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """An extracted publication date replaces the temporary discovery timestamp."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                ArticleCandidate(
+                    source_id="telecom-source",
+                    url="https://telecom-source.example.test/extracted-stale",
+                    title="中国移动历史业绩公告",
+                )
+            ]
+        }
+    )
+    now = datetime(2026, 8, 21, 9, tzinfo=UTC)
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payload(
+                "https://telecom-source.example.test/extracted-stale", "来源 telecom-source"
+            )
+        }
+    )
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        extractor=FakeExtractor(
+            "已提取正文。" * 100,
+            published_at=now - timedelta(days=8),
+        ),
+        clock=FixedClock(now),
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(item for item in report.categories if item.category == "telecom")
+    assert telecom.status == "skipped"
+    assert telecom.reason == "no_eligible_articles"
+    assert llm.operations == []
+
+
+def test_briefing_run_rejects_article_without_verified_publication_date(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A discovery timestamp must never stand in for a briefing publication time."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                ArticleCandidate(
+                    source_id="telecom-source",
+                    url="https://telecom-source.example.test/undated",
+                    title="中国移动未标日期公告",
+                )
+            ]
+        }
+    )
+    now = datetime(2026, 8, 21, 9, tzinfo=UTC)
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payload(
+                "https://telecom-source.example.test/undated", "来源 telecom-source"
+            )
+        }
+    )
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        extractor=FakeExtractor("已提取正文。" * 100),
+        clock=FixedClock(now),
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(item for item in report.categories if item.category == "telecom")
+    assert telecom.status == "skipped"
+    assert telecom.reason == "no_eligible_articles"
+    assert llm.operations == []
+
+
 def _two_category_setup(
     session_factory: sessionmaker[Session],
 ) -> tuple[FakeRSSCollector, FakeBriefingLLM]:
@@ -404,8 +619,10 @@ def _two_category_setup(
     )
     llm = FakeBriefingLLM(
         {
-            "通信行业日报": _llm_payload("https://news.example.test/t1", "来源 telecom-source"),
-            "AI 动态日报": _llm_payload("https://news.example.test/a1", "来源 ai-source"),
+            "通信行业日报": _llm_payload(
+                "https://telecom-source.example.test/t1", "来源 telecom-source"
+            ),
+            "AI 动态日报": _llm_payload("https://ai-source.example.test/a1", "来源 ai-source"),
         }
     )
     return collector, llm
@@ -671,7 +888,7 @@ def _telecom_only_setup(session_factory: sessionmaker[Session]) -> FakeRSSCollec
 
 
 def _telecom_payload() -> dict[str, object]:
-    return _llm_payload("https://news.example.test/t1", "来源 telecom-source")
+    return _llm_payload("https://telecom-source.example.test/t1", "来源 telecom-source")
 
 
 def _recording_budget_factory(

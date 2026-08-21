@@ -109,6 +109,23 @@ class NewsProcessor:
                     )
         return decision
 
+    def deduplicate_in_memory(self, article_ids: tuple[int, ...]) -> DeduplicationResult:
+        """Reuse deterministic duplicate rules without persisting any Article mutation.
+
+        Briefing selection shares Article rows with the podcast workflow. It needs
+        primary evidence only, so it must not mark the losing Article as duplicate
+        or persist a SimHash as the regular processing pipeline does.
+        """
+        snapshots = self._load_articles(article_ids, status=ArticleStatus.ELIGIBLE)
+        # A report must not disappear because a template-heavy publisher produces a
+        # SimHash collision. For briefing-local selection, only high textual overlap
+        # proves a near duplicate; exact URL/content/title rules are unchanged.
+        return deduplicate_articles(
+            tuple(snapshots),
+            self._policy,
+            require_jaccard_for_near_duplicate=True,
+        )
+
     def cluster(self, article_ids: tuple[int, ...]) -> PersistedClusterResult:
         """Create or refresh deterministic NewsEvents and assign their primary Articles."""
         snapshots = self._load_articles(article_ids, status=ArticleStatus.ELIGIBLE)

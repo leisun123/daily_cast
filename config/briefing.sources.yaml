@@ -1,41 +1,148 @@
 # Briefing-only source seeds for the daily telecom + AI text briefing pushed to
 # a webhook target. Each entry carries `config.briefing_category` ("telecom" | "ai"); RSS
 # collectors ignore that key, so these rows are safe to also exist for the
-# podcast pipeline. Seeding is idempotent: existing database rows stay
-# authoritative.
+# podcast pipeline. Seeding is idempotent: historical database rows are kept,
+# while this file is the current allowlist for briefing collection.
 #
 # Verified 2026-08 (DailyCast UA):
 # - C114 sub-feeds are gb2312 RSS 2.0; feedparser handles the declared encoding.
 # - qbitai.com/feed returns full RSS with article content.
-# - The 36kr route is a third-party RSSHub mirror: flaky and flash items are
-#   often shorter than processing.min_content_length, so it is a low-priority
-#   fallback only.
+# - miit.gov.cn returns a dated, UTF-8 HTML news list. Its explicit title
+#   keywords retain information-communications policy, regulation, and
+#   operational signals rather than general industrial news.
+# - `rsshub://36kr/hot-list` is the documented RSSHub route for 36Kr's
+#   24-hour hot list. DailyCast resolves it only through the deployment's
+#   `briefing.rsshub_base_url`, then filters titles before persistence so broad
+#   commercial stories do not enter the AI briefing.
+# - C114 operators/equipment sub-feeds are used for the telecom brief; the
+#   broader C114 top-news feed is deliberately excluded because its rolling
+#   entries can be stale or too general for a daily operational briefing.
+# - GSMA's official RSS and ZTE's official newsroom are directly reachable and
+#   retain their own public article URLs. The ZTE URL-path boundary excludes
+#   its dated solution-navigation links from being mistaken for news.
 #
 # Excluded on purpose:
-# - chinamobileltd.com/en/global/rss.php returns HTML, not a feed; Unicom /
-#   China Telecom newsrooms answer 404/412; miit.gov.cn answers 403.
-# - news.cctv.com/rss/keji.xml is 404; 36kr official feeds return HTML.
+# - China Telecom's newsroom currently answers HTTP 412 to the collection
+#   request; China Mobile and China Unicom need a separate stable retrieval
+#   check before becoming default sources. CAICT sources are valuable but are
+#   likewise held back until their public list endpoint is stable end-to-end.
+# - news.cctv.com/rss/keji.xml is 404. 36Kr's own RSS center is retained as a
+#   fallback option, but current direct requests receive an anti-bot HTML page.
 # - Google News keyword RSS links are JS interstitials (no server redirect, no
 #   extractable body) and require VPN to open - violates the "links must be
 #   reachable without VPN" requirement.
 # - OpenAI / Hugging Face / Google AI blog feeds work technically, but their
 #   links need VPN from mainland China. Re-add only if deploying overseas.
+# - OpenAI Responses web search is a discovery capability, not a source of
+#   evidence. Its two internal source identities below are fetched and verified
+#   by DailyCast before they may enter either briefing category.
 sources:
+  - id: openai-web-research-telecom-management
+    name: 网页研究·通信管理视角
+    kind: web_research
+    entry_url: research://telecom-management
+    priority: 95
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 20
+    config:
+      briefing_category: telecom
+      topic: telecom
+      query: >-
+        过去24小时中国及全球通信行业中，中国移动管理层应优先关注的直接动态：
+        中国移动、基站与无线网/RAN建设、频谱/许可、5G-A/6G、国内外运营商竞争、
+        华为中兴及光模块/核心网等关键供给、通信政策和地方项目。优先监管机构、
+        运营商或供应商第一方公告及可直达原文；排除电信诈骗、消费电子和泛民生内容。
+      publisher_preference: regulator_operator_vendor_first_party
+      require_verified_publication_date: true
+  - id: openai-web-research-ai-management
+    name: 网页研究·AI管理视角
+    kind: web_research
+    entry_url: research://ai-management
+    priority: 95
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 20
+    config:
+      briefing_category: ai
+      topic: ai
+      query: >-
+        过去24小时国内外 AI 行业中，管理层应关注的动态：重点大模型发布/开源/API与推理
+        能力，本地化、私有化、端侧部署，中国市场适配，企业应用与生态落地，以及有公开
+        数据支撑的产品热点。优先公司、监管机构或可直达原文；排除纯论文、预印本和榜单。
+      publisher_preference: company_regulator_research_first_party
+      require_verified_publication_date: true
+  - id: miit-information-communications
+    name: 工信部信息通信
+    kind: html_list
+    entry_url: https://www.miit.gov.cn/
+    priority: 100
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 20
+    config:
+      briefing_category: telecom
+      include_title_keywords:
+        - 通信业
+        - 通信管理局
+        - 电信
+        - 5G
+        - 6G
+        - 卫星互联网
+        - 频谱
+        - 电信服务
+        - 互联网
+      timezone: Asia/Shanghai
+  - id: gsma-newsroom
+    name: GSMA 新闻中心
+    kind: rss
+    entry_url: https://www.gsma.com/newsroom/?cat=3&feed=rss
+    priority: 90
+    language: en
+    request_timeout_seconds: 20
+    max_items_per_run: 20
+    config:
+      briefing_category: telecom
+  - id: light-reading-telecom
+    name: Light Reading 通信行业报道
+    kind: rss
+    entry_url: https://www.lightreading.com/rss.xml
+    priority: 88
+    language: en
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      briefing_category: telecom
+  - id: zte-official-news
+    name: 中兴通讯新闻中心
+    kind: html_list
+    entry_url: https://www.zte.com.cn/china/about/news.html
+    priority: 90
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 20
+    config:
+      briefing_category: telecom
+      include_title_keywords:
+        - 5G
+        - 6G
+        - 网络
+        - 算力
+        - 基站
+        - 通信
+        - 光
+        - AI
+        - 人工智能
+        - 运营商
+        - 合作
+      article_url_path_prefixes:
+        - /content/zte-site/www-zte-com-cn/china/about/news/
+      timezone: Asia/Shanghai
   - id: c114-operators
     name: C114 电信运营商
     kind: rss
     entry_url: https://www.c114.com.cn/rss/rss_news_21.xml
     priority: 85
-    language: zh-CN
-    request_timeout_seconds: 20
-    max_items_per_run: 30
-    config:
-      briefing_category: telecom
-  - id: c114-top-news
-    name: C114 通信要闻
-    kind: rss
-    entry_url: https://www.c114.com.cn/rss/rss_news_17.xml
-    priority: 80
     language: zh-CN
     request_timeout_seconds: 20
     max_items_per_run: 30
@@ -61,13 +168,35 @@ sources:
     max_items_per_run: 30
     config:
       briefing_category: ai
-  - id: kr36-newsflashes
-    name: 36氪快讯（RSSHub 镜像）
+  - id: rcr-wireless-ai
+    name: RCR Wireless AI与通信报道
     kind: rss
-    entry_url: https://rsshub.rssforever.com/36kr/newsflashes
-    priority: 50
-    language: zh-CN
+    entry_url: https://www.rcrwireless.com/feed
+    priority: 82
+    language: en
     request_timeout_seconds: 20
     max_items_per_run: 30
     config:
       briefing_category: ai
+  - id: kr36-hot-list
+    name: 36氪 24小时热榜
+    kind: rss
+    entry_url: rsshub://36kr/hot-list?limit=100
+    priority: 75
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 100
+    config:
+      briefing_category: ai
+      include_title_keywords:
+        - 人工智能
+        - AI
+        - 大模型
+        - 模型
+        - 智能体
+        - Agent
+        - 算力
+        - 芯片
+        - GPU
+        - 机器人
+        - 自动驾驶

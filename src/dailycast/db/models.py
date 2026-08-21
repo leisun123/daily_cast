@@ -51,6 +51,7 @@ class SourceKind(StrEnum):
 
     RSS = "rss"
     HTML_LIST = "html_list"
+    WEB_RESEARCH = "web_research"
 
 
 class ArticleStatus(StrEnum):
