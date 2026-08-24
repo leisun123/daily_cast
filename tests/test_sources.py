@@ -1040,6 +1040,7 @@ def test_research_collector_runs_bounded_search_calls_across_telecom_facets() ->
 
         def __init__(self) -> None:
             self.messages: list[tuple[LLMMessage, ...]] = []
+            self.model_options: list[dict[str, object]] = []
 
         async def generate_web_research(
             self,
@@ -1047,8 +1048,9 @@ def test_research_collector_runs_bounded_search_calls_across_telecom_facets() ->
             response_schema: type[BaseModel],
             model_options: dict[str, object],
         ) -> StructuredResult:
-            del response_schema, model_options
+            del response_schema
             self.messages.append(messages)
+            self.model_options.append(model_options)
             index = len(self.messages)
             return StructuredResult(
                 content={
@@ -1121,6 +1123,10 @@ def test_research_collector_runs_bounded_search_calls_across_telecom_facets() ->
         assert len(provider.messages) == 4
         assert len(result.candidates) == 4
         assert all("本轮重点" in messages[-1].content for messages in provider.messages)
+        assert all(
+            "发布时间：2026-08-19 至 2026-08-20" in options["search_query"]
+            for options in provider.model_options
+        )
 
     asyncio.run(scenario())
 

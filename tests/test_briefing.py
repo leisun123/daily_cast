@@ -109,16 +109,16 @@ def test_briefing_item_allows_a_two_sentence_management_impact() -> None:
     assert item.why_it_matters == detailed_impact
 
 
-def test_briefing_item_compacts_content_above_the_display_budget() -> None:
-    """Verbose model prose is shortened locally instead of discarding the category."""
+def test_briefing_item_never_makes_an_unfinished_sentence_look_complete() -> None:
+    """A size guard may omit an item later, but it must not publish a fabricated ending."""
     item = _item(
         "https://news.example.test/a",
         summary="甲" * 161,
         why_it_matters="乙" * 81,
     )
 
-    assert item.summary == "甲" * 159 + "…"
-    assert item.why_it_matters == "乙" * 79 + "…"
+    assert item.summary == "甲" * 161
+    assert item.why_it_matters == "乙" * 81
 
 
 def test_briefing_item_requires_an_absolute_http_source_url() -> None:

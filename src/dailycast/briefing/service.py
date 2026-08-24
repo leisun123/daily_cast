@@ -9,6 +9,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from math import ceil
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -163,13 +164,15 @@ class BriefingService:
         sources = self._briefing_sources()
         if not sources:
             logger.warning("briefing found no enabled sources tagged with briefing_category")
-        window = CollectionWindow(
-            start=now - timedelta(hours=self._window_hours),
-            end=now,
-        )
+        window = self._collection_window(now)
         collection = await self._collection_service.collect_sources(sources, window)
         await self._extract_missing_bodies(collection.article_ids)
-        filtered = self._news_processor.filter(collection.article_ids)
+        verified_article_ids = await self._verify_reader_links(collection.article_ids)
+        minimum_freshness_hours = ceil((window.end - window.start).total_seconds() / 3600)
+        filtered = self._news_processor.filter(
+            verified_article_ids,
+            minimum_max_age_hours=minimum_freshness_hours,
+        )
         deduplicated = self._news_processor.deduplicate_in_memory(filtered.eligible_article_ids)
         evidence_by_category = self._build_evidence(deduplicated.primary_article_ids, window)
         reports: list[BriefingCategoryReport] = []
@@ -179,6 +182,17 @@ class BriefingService:
                 await self._run_category(category, briefing_date, evidence, provider, force=force)
             )
         return BriefingRunReport(date=briefing_date.isoformat(), categories=tuple(reports))
+
+    def _collection_window(self, now: datetime) -> CollectionWindow:
+        """Cover Friday through the current time for the Monday management briefing."""
+        start = now - timedelta(hours=self._window_hours)
+        local_now = now.astimezone(self._timezone)
+        if local_now.weekday() == 0:
+            friday_start = (local_now - timedelta(days=3)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            start = min(start, friday_start.astimezone(UTC))
+        return CollectionWindow(start=start, end=now)
 
     def _briefing_sources(self) -> tuple[Source, ...]:
         """Select enabled, current-policy sources whose config opts into a briefing category."""
@@ -203,6 +217,26 @@ class BriefingService:
                 self._article_service.apply_extraction(target.article_id, extracted)
             else:
                 self._article_service.record_extraction_failure(target.article_id, extracted)
+
+    async def _verify_reader_links(self, article_ids: tuple[int, ...]) -> tuple[int, ...]:
+        """Keep only source pages that can be opened from the delivery environment."""
+        verified: list[int] = []
+        for target in self._article_service.verification_targets(article_ids):
+            extracted = await self._extractor.extract(
+                target.url,
+                FetchPolicy(timeout_seconds=target.timeout_seconds),
+            )
+            if extracted.error is None:
+                verified.append(target.article_id)
+                continue
+            logger.warning(
+                "briefing dropped article with unreachable reader link",
+                extra={
+                    "article_id": target.article_id,
+                    "source_error_code": extracted.error.code,
+                },
+            )
+        return tuple(verified)
 
     def _build_evidence(
         self, eligible_article_ids: tuple[int, ...], window: CollectionWindow

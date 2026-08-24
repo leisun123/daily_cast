@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date
 from zoneinfo import ZoneInfo
 
@@ -49,10 +49,23 @@ class NewsProcessor:
         self._clock = clock or Clock()
         self._timezone = ZoneInfo(timezone)
 
-    def filter(self, article_ids: tuple[int, ...]) -> FilterResult:
+    def filter(
+        self, article_ids: tuple[int, ...], *, minimum_max_age_hours: int | None = None
+    ) -> FilterResult:
         """Persist `eligible` or `filtered` status for the supplied Article checkpoint set."""
         snapshots = self._load_articles(article_ids)
-        decision = filter_articles(snapshots, self._policy, self._clock.now())
+        policy = self._policy
+        if minimum_max_age_hours is not None:
+            source_max_age_hours = {
+                source_id: max(max_age_hours, minimum_max_age_hours)
+                for source_id, max_age_hours in policy.source_max_age_hours.items()
+            }
+            policy = replace(
+                policy,
+                max_age_hours=max(policy.max_age_hours, minimum_max_age_hours),
+                source_max_age_hours=source_max_age_hours,
+            )
+        decision = filter_articles(snapshots, policy, self._clock.now())
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             articles = ArticleRepository(unit.session)

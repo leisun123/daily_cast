@@ -37,6 +37,7 @@ from dailycast.sources.contracts import (
     CollectionResult,
     CollectionWindow,
     ExtractedArticle,
+    SourceError,
 )
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy
 from dailycast.sources.service import ArticleService, SourceCollectionService
@@ -50,11 +51,12 @@ class FakeRSSCollector:
     def __init__(self, candidates_by_source: Mapping[str, Sequence[ArticleCandidate]]) -> None:
         self._candidates_by_source = candidates_by_source
         self.collected_source_ids: list[str] = []
+        self.collection_windows: list[CollectionWindow] = []
 
     async def collect(self, source: Source, window: CollectionWindow) -> CollectionResult:
         """Record which sources the briefing flow actually asked to collect."""
-        del window
         self.collected_source_ids.append(source.id)
+        self.collection_windows.append(window)
         return CollectionResult(
             source_id=source.id,
             candidates=tuple(self._candidates_by_source.get(source.id, ())),
@@ -88,6 +90,25 @@ class FakeExtractor(ContentExtractor):
             http_status=200,
             fetched_at=datetime.now(UTC),
             published_at=self._published_at,
+        )
+
+
+class UnreachableLinkExtractor:
+    """Reject an article page that cannot be opened by the delivery environment."""
+
+    async def extract(self, url: str, policy: FetchPolicy) -> ExtractedArticle:
+        del policy
+        return ExtractedArticle(
+            requested_url=url,
+            final_url=None,
+            content_text=None,
+            http_status=None,
+            fetched_at=None,
+            error=SourceError(
+                code="NETWORK_ERROR",
+                summary="source request failed: ReadError",
+                retryable=True,
+            ),
         )
 
 
@@ -524,6 +545,7 @@ def test_briefing_run_rejects_article_outside_its_24_hour_window(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
     """Briefing freshness is enforced even if a collector returns an old article."""
+    now = datetime(2026, 8, 25, 0, tzinfo=UTC)
     _seed_source(session_factory, "telecom-source", category="telecom")
     collector = FakeRSSCollector(
         {
@@ -531,7 +553,7 @@ def test_briefing_run_rejects_article_outside_its_24_hour_window(
                 _candidate(
                     "telecom-source",
                     "stale",
-                    published_at=datetime.now(UTC) - timedelta(hours=25),
+                    published_at=now - timedelta(hours=25),
                 )
             ]
         }
@@ -543,6 +565,7 @@ def test_briefing_run_rejects_article_outside_its_24_hour_window(
         collector=collector,
         llm=llm,
         notifier=None,
+        clock=FixedClock(now),
     )
 
     report = asyncio.run(service.run())
@@ -551,6 +574,70 @@ def test_briefing_run_rejects_article_outside_its_24_hour_window(
     assert telecom.status == "skipped"
     assert telecom.reason == "no_eligible_articles"
     assert llm.operations == []
+
+
+def test_briefing_run_on_monday_includes_articles_from_the_previous_friday(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Monday's management briefing covers the complete weekend rather than only Sunday."""
+    now = datetime(2026, 8, 24, 0, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate(
+                    "telecom-source",
+                    "friday-network",
+                    published_at=datetime(2026, 8, 20, 16, 30, tzinfo=UTC),
+                )
+            ]
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payload(
+                "https://telecom-source.example.test/friday-network", "来源 telecom-source"
+            )
+        }
+    )
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        clock=FixedClock(now),
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(item for item in report.categories if item.category == "telecom")
+    assert collector.collection_windows[0] == CollectionWindow(
+        start=datetime(2026, 8, 20, 16, tzinfo=UTC), end=now
+    )
+    assert telecom.status == "generated"
+
+
+def test_briefing_run_drops_an_article_whose_source_page_cannot_be_opened(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Feed text alone must not allow a broken reader-facing source URL into WeCom."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    collector = FakeRSSCollector({"telecom-source": [_candidate("telecom-source", "broken-link")]})
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=FakeBriefingLLM({}),
+        notifier=None,
+        extractor=UnreachableLinkExtractor(),
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(item for item in report.categories if item.category == "telecom")
+    assert telecom.status == "skipped"
+    assert telecom.reason == "no_eligible_articles"
 
 
 def test_briefing_run_rejects_stale_date_found_during_body_extraction(

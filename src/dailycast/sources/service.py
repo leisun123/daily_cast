@@ -199,6 +199,28 @@ class ArticleService:
                 )
         return tuple(targets)
 
+    def verification_targets(self, article_ids: tuple[int, ...]) -> tuple[ExtractionTarget, ...]:
+        """Return every current article page that must be reachable before reader delivery."""
+        if not article_ids:
+            return ()
+        targets: list[ExtractionTarget] = []
+        with UnitOfWork(self._session_factory) as unit:
+            assert unit.session is not None
+            articles = ArticleRepository(unit.session)
+            sources = SourceRepository(unit.session)
+            for article in articles.list_by_ids(article_ids):
+                source = sources.get(article.source_id)
+                if source is None:
+                    continue
+                targets.append(
+                    ExtractionTarget(
+                        article_id=article.id,
+                        url=article.url,
+                        timeout_seconds=float(source.request_timeout_seconds),
+                    )
+                )
+        return tuple(targets)
+
     def apply_extraction(self, article_id: int, extracted: ExtractedArticle) -> Article:
         """Store a successful clean-text extraction in a short transaction."""
         if extracted.error is not None or extracted.content_text is None:

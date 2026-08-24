@@ -17,6 +17,17 @@ def _trim_for_delivery(value: object, max_length: int) -> object:
     return value[: max_length - 1].rstrip() + "…"
 
 
+def _compact_complete_sentence(value: object, max_length: int) -> object:
+    """Compact only at an existing sentence boundary; never invent a false ending."""
+    if not isinstance(value, str) or len(value) <= max_length:
+        return value
+    bounded = value[:max_length]
+    last_sentence_end = max((bounded.rfind(mark) for mark in "。！？!?"), default=-1)
+    if last_sentence_end >= 0:
+        return bounded[: last_sentence_end + 1].rstrip()
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class BriefingEvidence:
     """One collected article presented to the LLM as bounded briefing evidence."""
@@ -34,8 +45,11 @@ class BriefingItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     headline: str = Field(min_length=1, max_length=28)
-    summary: str = Field(min_length=1, max_length=160)
-    why_it_matters: str = Field(min_length=1, max_length=80)
+    # The preferred lengths are controlled by the generation prompt.  These are
+    # deliberately roomy hard limits: a renderer may omit a whole over-budget
+    # item, but must never cut a factual sentence in half to make it fit.
+    summary: str = Field(min_length=1, max_length=2_000)
+    why_it_matters: str = Field(min_length=1, max_length=1_000)
     source_name: str = Field(min_length=1)
     source_url: str = Field(min_length=1)
 
@@ -48,14 +62,14 @@ class BriefingItem(BaseModel):
     @field_validator("summary", mode="before")
     @classmethod
     def trim_summary_for_delivery(cls, value: object) -> object:
-        """Preserve the usable lead of verbose factual prose for the webhook payload."""
-        return _trim_for_delivery(value, 160)
+        """Keep factual prose complete when the webhook-safe summary limit is exceeded."""
+        return _compact_complete_sentence(value, 160)
 
     @field_validator("why_it_matters", mode="before")
     @classmethod
     def trim_impact_for_delivery(cls, value: object) -> object:
         """Prevent a verbose impact sentence from discarding an entire item."""
-        return _trim_for_delivery(value, 80)
+        return _compact_complete_sentence(value, 80)
 
     @field_validator("source_url")
     @classmethod
@@ -71,11 +85,11 @@ class BriefingResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    overview: str = Field(min_length=1, max_length=120)
+    overview: str = Field(min_length=1, max_length=600)
     items: list[BriefingItem] = Field(max_length=MAX_BRIEFING_ITEMS)
 
     @field_validator("overview", mode="before")
     @classmethod
     def trim_overview_for_delivery(cls, value: object) -> object:
         """Keep the complete category eligible when the model over-explains its overview."""
-        return _trim_for_delivery(value, 120)
+        return _compact_complete_sentence(value, 120)
