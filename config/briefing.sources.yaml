@@ -6,7 +6,6 @@
 #
 # Verified 2026-08 (DailyCast UA):
 # - C114 sub-feeds are gb2312 RSS 2.0; feedparser handles the declared encoding.
-# - qbitai.com/feed returns full RSS with article content.
 # - miit.gov.cn returns a dated, UTF-8 HTML news list. Its explicit title
 #   keywords retain information-communications policy, regulation, and
 #   operational signals rather than general industrial news.
@@ -158,16 +157,6 @@ sources:
     max_items_per_run: 30
     config:
       briefing_category: telecom
-  - id: qbitai
-    name: 量子位
-    kind: rss
-    entry_url: https://www.qbitai.com/feed
-    priority: 80
-    language: zh-CN
-    request_timeout_seconds: 20
-    max_items_per_run: 30
-    config:
-      briefing_category: ai
   - id: rcr-wireless-ai
     name: RCR Wireless AI与通信报道
     kind: rss

@@ -50,14 +50,11 @@ briefing:
   webhook_enabled: true
   webhook_format: wecom_markdown_v2
 
-# Search discovery runs through the DailyCast project's private SearXNG service.
-# Every returned URL is still fetched, publication-date checked, and link-verified
-# locally before a briefing may use it.
+# Search discovery uses the configured GPT Responses provider's native web-search
+# tool. Every returned URL is still fetched, publication-date checked, and
+# link-verified locally before a briefing may use it.
 web_research:
   enabled: true
-  provider: searxng
-  searxng_url: http://searxng.zeabur.internal:8080
-  timeout_seconds: 15
   max_candidates_per_source: 20
   max_search_calls_per_source: 4
   search_context_size: medium

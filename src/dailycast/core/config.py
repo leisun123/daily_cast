@@ -4,7 +4,6 @@ import os
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -122,30 +121,10 @@ class WebResearchSettings(BaseModel):
     """Bound native web-search discovery for briefing-only sources."""
 
     enabled: bool = False
-    provider: Literal["native", "searxng"] = "native"
-    searxng_url: str | None = None
-    timeout_seconds: int = Field(default=15, ge=1, le=60)
     max_candidates_per_source: int = Field(default=20, ge=1, le=20)
     max_search_calls_per_source: int = Field(default=1, ge=1, le=4)
     search_context_size: Literal["low", "medium", "high"] = "medium"
     max_article_chars: int = Field(default=12_000, ge=1_000, le=50_000)
-
-    @model_validator(mode="after")
-    def require_valid_searxng_url(self) -> "WebResearchSettings":
-        """Keep the optional self-hosted discovery endpoint explicit and credential-free."""
-        if self.provider != "searxng":
-            return self
-        if not self.searxng_url:
-            raise ValueError("web_research.searxng_url is required for the searxng provider")
-        parsed = urlsplit(self.searxng_url)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ValueError("web_research.searxng_url must be an absolute HTTP(S) URL")
-        return self
 
 
 class TaskExecutionSettings(BaseModel):

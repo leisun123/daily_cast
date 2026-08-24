@@ -17,7 +17,7 @@ from dailycast.briefing.scheduler import BriefingScheduler
 from dailycast.briefing.selection import load_selection_policy
 from dailycast.briefing.service import BriefingService
 from dailycast.briefing.webhook import WebhookNotifier
-from dailycast.core.config import LLMProviderSettings, Settings, WebResearchSettings, load_settings
+from dailycast.core.config import LLMProviderSettings, Settings, load_settings
 from dailycast.core.logging import configure_logging
 from dailycast.db.models import SourceKind, TaskType, TriggerType
 from dailycast.db.revision import RevisionStatus, inspect_revision
@@ -51,11 +51,7 @@ from dailycast.scheduler.service import SchedulerService
 from dailycast.sources.bootstrap import load_configured_source_ids, seed_missing_sources
 from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
 from dailycast.sources.html_list import HTMLListCollector
-from dailycast.sources.research import (
-    ResearchCollector,
-    SearxngWebResearchProvider,
-    UnavailableWebResearchProvider,
-)
+from dailycast.sources.research import ResearchCollector, UnavailableWebResearchProvider
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import ArticleService, SourceCollectionService
 from dailycast.tts.merge import FFmpegMerger
@@ -188,11 +184,7 @@ def build_lifespan(
                     ),
                     SourceKind.HTML_LIST: HTMLListCollector(fetcher),
                     SourceKind.WEB_RESEARCH: ResearchCollector(
-                        build_web_research_provider(
-                            primary_llm_provider,
-                            settings.web_research,
-                            http_client=llm_client,
-                        ),
+                        build_web_research_provider(primary_llm_provider),
                         ContentExtractor(fetcher),
                         settings.web_research,
                     ),
@@ -442,20 +434,8 @@ def build_llm_provider(
     return FailoverLLMProvider(primary, fallback)
 
 
-def build_web_research_provider(
-    primary_provider: LLMProvider,
-    settings: WebResearchSettings | None = None,
-    *,
-    http_client: httpx.AsyncClient | None = None,
-) -> WebResearchProvider:
-    """Choose the explicit discovery backend without altering editorial-model fallback."""
-    if settings is not None and settings.provider == "searxng":
-        assert settings.searxng_url is not None
-        return SearxngWebResearchProvider(
-            base_url=settings.searxng_url,
-            timeout_seconds=settings.timeout_seconds,
-            http_client=http_client,
-        )
+def build_web_research_provider(primary_provider: LLMProvider) -> WebResearchProvider:
+    """Expose native discovery only from the configured primary Responses provider."""
     if isinstance(primary_provider, OpenAIResponsesLLMProvider):
         return primary_provider
     return UnavailableWebResearchProvider()

@@ -8,22 +8,18 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC
 from typing import Literal
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
 
-import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from dailycast.core.config import WebResearchSettings
 from dailycast.core.errors import (
     LLMProviderError,
-    LLMProviderResponseError,
     LLMWebSearchUnsupportedError,
 )
 from dailycast.db.models import Source
 from dailycast.llm.contracts import (
     JSONValue,
     LLMMessage,
-    LLMUsage,
     StructuredResult,
     WebResearchProvider,
 )
@@ -46,6 +42,7 @@ _DISCOVERY_HOSTS = frozenset(
         "www.baidu.com",
     }
 )
+_READER_BLOCKED_HOSTS = frozenset({"qbitai.com", "www.qbitai.com"})
 _RESEARCH_FACETS: dict[Literal["telecom", "ai"], tuple[str, ...]] = {
     "telecom": (
         "中国移动及国内外运营商、竞争对手的经营与网络建设动态",
@@ -60,9 +57,6 @@ _RESEARCH_FACETS: dict[Literal["telecom", "ai"], tuple[str, ...]] = {
         "企业 AI 应用、生态合作和有公开数据支撑的产品热点",
     ),
 }
-_SEARCH_TIMEZONE = ZoneInfo("Asia/Shanghai")
-
-
 class WebResearchCandidate(BaseModel):
     """One untrusted discovery record returned by the model after native web search."""
 
@@ -81,98 +75,6 @@ class WebResearchCandidateSet(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidates: list[WebResearchCandidate] = Field(max_length=20)
-
-
-class SearxngWebResearchProvider:
-    """Use a deployment-owned SearXNG endpoint for resilient news discovery."""
-
-    provider_name = "searxng"
-    model = "searxng"
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        timeout_seconds: int,
-        http_client: httpx.AsyncClient | None = None,
-    ) -> None:
-        self._endpoint = f"{base_url.rstrip('/')}/search"
-        self._timeout_seconds = timeout_seconds
-        self._client = http_client
-
-    async def generate_web_research(
-        self,
-        messages: Sequence[LLMMessage],
-        response_schema: type[BaseModel],
-        model_options: Mapping[str, JSONValue],
-    ) -> StructuredResult:
-        """Convert bounded public search hits into the normal candidate contract."""
-        del messages
-        search_query = model_options.get("search_query")
-        if not isinstance(search_query, str) or not search_query.strip():
-            raise ValueError("searxng web research requires a non-empty search_query")
-        parameters = {"q": search_query.strip(), "format": "json", "safesearch": "1"}
-        try:
-            if self._client is None:
-                async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                    response = await client.get(self._endpoint, params=parameters)
-            else:
-                response = await self._client.get(
-                    self._endpoint, params=parameters, timeout=self._timeout_seconds
-                )
-        except httpx.RequestError as error:
-            raise LLMProviderError() from error
-        if response.is_error:
-            raise LLMProviderError()
-        try:
-            payload = response.json()
-        except ValueError as error:
-            raise LLMProviderResponseError() from error
-        if not isinstance(payload, Mapping):
-            raise LLMProviderResponseError()
-        raw_results = payload.get("results")
-        if not isinstance(raw_results, list):
-            raw_results = []
-        candidates: list[dict[str, str | None]] = []
-        for raw in raw_results:
-            if not isinstance(raw, Mapping):
-                continue
-            title = str(raw.get("title") or "").strip()
-            url = str(raw.get("url") or "").strip()
-            finding = str(raw.get("content") or raw.get("snippet") or "").strip()
-            parsed = urlsplit(url)
-            if (
-                not title
-                or not finding
-                or parsed.scheme not in {"http", "https"}
-                or not parsed.hostname
-            ):
-                continue
-            published_at_hint = str(
-                raw.get("publishedDate") or raw.get("published_at") or raw.get("date") or ""
-            ).strip()
-            candidates.append(
-                {
-                    "title": title[:300],
-                    "url": url[:2_000],
-                    "publisher": parsed.hostname[:160],
-                    "finding": finding[:500],
-                    "published_at_hint": published_at_hint[:100] or None,
-                }
-            )
-            if len(candidates) == 20:
-                break
-        content = {"candidates": candidates}
-        try:
-            validated = response_schema.model_validate(content)
-        except ValidationError as error:
-            raise LLMProviderResponseError() from error
-        return StructuredResult(
-            content=validated.model_dump(mode="json"),
-            model=self.model,
-            usage=LLMUsage(),
-            request_id=response.headers.get("x-request-id"),
-        )
 
 
 class ResearchSourceOptions(BaseModel):
@@ -226,10 +128,7 @@ class ResearchCollector:
                 self._provider.generate_web_research(
                     _research_messages(options, window, focus=facet),
                     WebResearchCandidateSet,
-                    {
-                        "search_context_size": self._settings.search_context_size,
-                        "search_query": _search_query(options, facet, window),
-                    },
+                    {"search_context_size": self._settings.search_context_size},
                 )
                 for facet in facets
             ),
@@ -340,7 +239,7 @@ class ResearchCollector:
                     http_status=extracted.http_status,
                     metadata={
                         "candidate_url": discovered_candidate.url,
-                        "discovery_method": self._provider.provider_name,
+                        "discovery_method": "openai_web_search",
                         "final_url": extracted.final_url,
                         "model": structured.model,
                         "publisher": discovered_candidate.publisher,
@@ -437,14 +336,6 @@ def _research_call_facets(
     return _RESEARCH_FACETS[topic][:max_search_calls]
 
 
-def _search_query(options: ResearchSourceOptions, focus: str, window: CollectionWindow) -> str:
-    """Give a direct search backend one facet query with the actual briefing date range."""
-    topic = options.query.replace("过去24小时", "").strip(" ：:，,。")
-    start = window.start.astimezone(_SEARCH_TIMEZONE).date().isoformat()
-    end = window.end.astimezone(_SEARCH_TIMEZONE).date().isoformat()
-    return f"{topic} {focus} 发布时间：{start} 至 {end}"
-
-
 def _candidate_url_error(raw_url: str) -> SourceError | None:
     """Reject obvious discovery surfaces before the safe fetcher handles network safety."""
     parsed = urlsplit(raw_url)
@@ -460,6 +351,12 @@ def _candidate_url_error(raw_url: str) -> SourceError | None:
             retryable=False,
         )
     host = parsed.hostname.lower()
+    if host in _READER_BLOCKED_HOSTS:
+        return SourceError(
+            code="READER_URL_BLOCKED",
+            summary="web-search candidate domain is not reliable for reader-facing links",
+            retryable=False,
+        )
     if host in _DISCOVERY_HOSTS or parsed.path.lower().startswith("/search"):
         return SourceError(
             code="WEB_RESEARCH_DISCOVERY_PAGE",
@@ -471,7 +368,6 @@ def _candidate_url_error(raw_url: str) -> SourceError | None:
 
 __all__ = [
     "ResearchCollector",
-    "SearxngWebResearchProvider",
     "UnavailableWebResearchProvider",
     "WebResearchCandidateSet",
 ]

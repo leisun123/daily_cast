@@ -49,7 +49,12 @@ from dailycast.sources.bootstrap import _normalized_entry_url, load_configured_s
 from dailycast.sources.contracts import ArticleCandidate, CollectionResult, CollectionWindow
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy, SafeHttpFetcher
 from dailycast.sources.html_list import HTMLListCollector
-from dailycast.sources.research import ResearchCollector, ResearchSourceOptions, _research_messages
+from dailycast.sources.research import (
+    ResearchCollector,
+    ResearchSourceOptions,
+    _candidate_url_error,
+    _research_messages,
+)
 from dailycast.sources.rss import RSSCollector
 from dailycast.sources.service import (
     ArticleService,
@@ -290,6 +295,7 @@ def test_briefing_source_configuration_keeps_web_research_out_of_podcast_seeds()
     assert expected_verified_source_ids.isdisjoint(podcast_ids)
     assert "openai-web-research-telecom" not in briefing_ids
     assert "openai-web-research-ai" not in briefing_ids
+    assert "qbitai" not in briefing_ids
 
 
 def fixture_feed() -> bytes:
@@ -1031,6 +1037,14 @@ def test_telecom_research_prompt_requires_multifacet_html_articles() -> None:
     assert "PDF" in messages[-1].content
 
 
+def test_research_rejects_a_reader_domain_known_to_be_unreachable() -> None:
+    """A server-reachable page is not enough when the audience cannot open its source link."""
+    error = _candidate_url_error("https://www.qbitai.com/2026/08/478191.html")
+
+    assert error is not None
+    assert error.code == "READER_URL_BLOCKED"
+
+
 def test_research_collector_runs_bounded_search_calls_across_telecom_facets() -> None:
     """A one-result native search cannot starve every management-relevant telecom direction."""
 
@@ -1124,8 +1138,7 @@ def test_research_collector_runs_bounded_search_calls_across_telecom_facets() ->
         assert len(result.candidates) == 4
         assert all("本轮重点" in messages[-1].content for messages in provider.messages)
         assert all(
-            "发布时间：2026-08-19 至 2026-08-20" in options["search_query"]
-            for options in provider.model_options
+            options == {"search_context_size": "medium"} for options in provider.model_options
         )
 
     asyncio.run(scenario())

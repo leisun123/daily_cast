@@ -28,6 +28,13 @@ def _compact_complete_sentence(value: object, max_length: int) -> object:
     return value
 
 
+def _require_no_ellipsis(value: object) -> object:
+    """Reject visibly unfinished model prose so the service falls back to source evidence."""
+    if isinstance(value, str) and ("…" in value or "..." in value):
+        raise ValueError("briefing prose must not contain an ellipsis")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class BriefingEvidence:
     """One collected article presented to the LLM as bounded briefing evidence."""
@@ -63,13 +70,13 @@ class BriefingItem(BaseModel):
     @classmethod
     def trim_summary_for_delivery(cls, value: object) -> object:
         """Keep factual prose complete when the webhook-safe summary limit is exceeded."""
-        return _compact_complete_sentence(value, 160)
+        return _require_no_ellipsis(_compact_complete_sentence(value, 160))
 
     @field_validator("why_it_matters", mode="before")
     @classmethod
     def trim_impact_for_delivery(cls, value: object) -> object:
         """Prevent a verbose impact sentence from discarding an entire item."""
-        return _compact_complete_sentence(value, 80)
+        return _require_no_ellipsis(_compact_complete_sentence(value, 80))
 
     @field_validator("source_url")
     @classmethod
@@ -92,4 +99,4 @@ class BriefingResult(BaseModel):
     @classmethod
     def trim_overview_for_delivery(cls, value: object) -> object:
         """Keep the complete category eligible when the model over-explains its overview."""
-        return _compact_complete_sentence(value, 120)
+        return _require_no_ellipsis(_compact_complete_sentence(value, 120))

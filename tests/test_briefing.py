@@ -121,6 +121,12 @@ def test_briefing_item_never_makes_an_unfinished_sentence_look_complete() -> Non
     assert item.why_it_matters == "乙" * 81
 
 
+def test_briefing_item_rejects_model_supplied_ellipsis() -> None:
+    """A model must retry through the factual fallback instead of publishing a half-sentence."""
+    with pytest.raises(ValueError, match="ellipsis"):
+        _item("https://news.example.test/a", summary="公司发布新产品，后续细节仍待确认…")
+
+
 def test_briefing_item_requires_an_absolute_http_source_url() -> None:
     """A non-web or empty link must never reach a WeCom message."""
     with pytest.raises(ValueError, match="source_url"):
