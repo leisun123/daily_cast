@@ -23,10 +23,10 @@
 #   aggregator with a public RSS feed (feed/all.xml, 7-day deduplicated
 #   window). Its entries link to the original article ("阅读原文"); candidates
 #   whose original needs VPN are rejected by the briefing reachability rule.
-# - IT之家 main RSS (ithome.com/rss) and 量子位 (qbitai.com/feed) verified
-#   2026-08-24 without proxy: both return zh-CN RSS 2.0 directly. IT之家 is a
-#   broad consumer-tech feed, so title keywords gate AI entries before
-#   persistence; 量子位 is AI-vertical and needs no keyword filter.
+# - 量子位 (qbitai.com/feed) verified 2026-08-24 without proxy: it returns
+#   zh-CN RSS 2.0 directly and is AI-vertical, so it needs no keyword filter.
+#   IT之家's same RSS URL already belongs to the default `ithome-rss` source;
+#   it must not be declared again under a briefing-only identity.
 # - 雷峰网 (leiphone.com/feed) verified 2026-08-24 without proxy: full-text
 #   zh-CN RSS with strong AI/robotics coverage; title keywords filter out its
 #   consumer and capital-market stories.
@@ -190,29 +190,6 @@ sources:
     max_items_per_run: 60
     config:
       briefing_category: ai
-  - id: ithome-ai
-    name: IT之家 AI 资讯
-    kind: rss
-    entry_url: https://www.ithome.com/rss/
-    priority: 72
-    language: zh-CN
-    request_timeout_seconds: 20
-    max_items_per_run: 100
-    config:
-      briefing_category: ai
-      include_title_keywords:
-        - 人工智能
-        - AI
-        - 大模型
-        - 模型
-        - 智能体
-        - Agent
-        - 算力
-        - 芯片
-        - GPU
-        - 机器人
-        - 自动驾驶
-        - 开源
   - id: qbitai
     name: 量子位
     kind: rss

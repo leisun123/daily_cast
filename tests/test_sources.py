@@ -45,7 +45,11 @@ from dailycast.pipeline.contracts import TaskCommand
 from dailycast.pipeline.executor import InProcessTaskExecutor
 from dailycast.pipeline.orchestrator import PipelineOrchestrator, build_collection_pipeline
 from dailycast.pipeline.submission import TaskSubmissionService
-from dailycast.sources.bootstrap import _normalized_entry_url, load_configured_source_ids
+from dailycast.sources.bootstrap import (
+    _load_source_configuration,
+    _normalized_entry_url,
+    load_configured_source_ids,
+)
 from dailycast.sources.contracts import ArticleCandidate, CollectionResult, CollectionWindow
 from dailycast.sources.extraction import ContentExtractor, FetchPolicy, SafeHttpFetcher
 from dailycast.sources.html_list import HTMLListCollector
@@ -287,7 +291,6 @@ def test_briefing_source_configuration_keeps_web_research_out_of_podcast_seeds()
         "gsma-newsroom",
         "light-reading-telecom",
         "zte-official-news",
-        "rcr-wireless-ai",
     }
     assert expected_research_ids.issubset(briefing_ids)
     assert expected_research_ids.isdisjoint(podcast_ids)
@@ -295,7 +298,28 @@ def test_briefing_source_configuration_keeps_web_research_out_of_podcast_seeds()
     assert expected_verified_source_ids.isdisjoint(podcast_ids)
     assert "openai-web-research-telecom" not in briefing_ids
     assert "openai-web-research-ai" not in briefing_ids
-    assert "qbitai" not in briefing_ids
+    assert "qbitai" in briefing_ids
+
+
+def test_briefing_sources_do_not_redeclare_a_default_seed_url_under_a_new_id() -> None:
+    """A briefing source must not collide with an existing persistent source identity."""
+    project_root = Path(__file__).resolve().parents[1]
+    briefing_sources = _load_source_configuration(project_root / "config" / "briefing.sources.yaml")
+    default_sources = _load_source_configuration(project_root / "config" / "sources.example.yaml")
+    default_ids_by_url = {
+        _normalized_entry_url(source.entry_url, source.kind): source.id
+        for source in default_sources.sources
+    }
+
+    collisions = [
+        (source.id, default_ids_by_url[normalized_url])
+        for source in briefing_sources.sources
+        if (normalized_url := _normalized_entry_url(source.entry_url, source.kind))
+        in default_ids_by_url
+        and default_ids_by_url[normalized_url] != source.id
+    ]
+
+    assert collisions == []
 
 
 def fixture_feed() -> bytes:
