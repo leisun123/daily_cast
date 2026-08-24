@@ -451,10 +451,10 @@ def test_briefing_run_ignores_historical_sources_absent_from_current_policy(
     }
 
 
-def test_briefing_run_isolates_one_category_failure(
+def test_briefing_run_uses_evidence_fallback_when_model_fails(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """An LLM failure in one category must not block the other category's briefing."""
+    """A model outage still ships an evidence-backed briefing for that category."""
     _seed_source(session_factory, "telecom-source", category="telecom")
     _seed_source(session_factory, "ai-source", category="ai")
     collector = FakeRSSCollector(
@@ -470,19 +470,23 @@ def test_briefing_run_isolates_one_category_failure(
         }
     )
     output_dir = tmp_path / "briefings"
+    notifier = RecordingNotifier()
     service = _build_service(
-        session_factory, output_dir, collector=collector, llm=llm, notifier=None
+        session_factory, output_dir, collector=collector, llm=llm, notifier=notifier
     )
 
     report = asyncio.run(service.run())
 
     by_category = {entry.category: entry for entry in report.categories}
-    assert by_category["telecom"].status == "failed"
-    assert by_category["telecom"].error == "llm unavailable"
+    assert by_category["telecom"].status == "generated"
+    assert by_category["telecom"].push_status == "sent"
     assert by_category["ai"].status == "generated"
-    assert by_category["ai"].push_status == "disabled"
+    assert by_category["ai"].push_status == "sent"
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
-    assert set(briefings) == {"ai"}
+    assert set(briefings) == {"telecom", "ai"}
+    assert "入选原因" in briefings["telecom"]
+    assert "https://telecom-source.example.test/t1" in briefings["telecom"]
+    assert len(notifier.pushed) == 2
 
 
 def test_briefing_run_skips_a_category_without_eligible_articles(
@@ -814,10 +818,10 @@ def test_concurrent_run_raises_briefing_run_in_progress(
     assert service.run_in_progress is False
 
 
-def test_exhausted_llm_budget_fails_categories_before_any_provider_call(
+def test_exhausted_llm_budget_uses_evidence_fallback_without_provider_calls(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """A depleted budget fails every category without invoking the LLM provider."""
+    """A depleted budget still ships evidence-backed briefings without an LLM call."""
     collector, llm = _two_category_setup(session_factory)
     output_dir = tmp_path / "briefings"
     service = _build_service(
@@ -831,9 +835,12 @@ def test_exhausted_llm_budget_fails_categories_before_any_provider_call(
 
     report = asyncio.run(service.run())
 
-    assert all(entry.status == "failed" for entry in report.categories)
-    assert all("budget" in (entry.error or "") for entry in report.categories)
+    assert all(entry.status == "generated" for entry in report.categories)
     assert llm.operations == []
+    assert set(read_briefings_for_date(output_dir, date.fromisoformat(report.date))) == {
+        "telecom",
+        "ai",
+    }
 
 
 def test_llm_budget_reservations_accumulate_per_run(
@@ -935,10 +942,10 @@ def _recording_budget_factory(
     return factory
 
 
-def test_failover_fallback_attempt_is_not_made_when_budget_is_exhausted(
+def test_failover_uses_evidence_fallback_when_budget_prevents_second_attempt(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """With one call left, a failed primary must not trigger the fallback attempt."""
+    """With one call left, fallback stays uncalled and evidence still reaches readers."""
     collector = _telecom_only_setup(session_factory)
     primary = StubProvider(name="primary", max_output_tokens=100, error=LLMProviderError())
     fallback = StubProvider(name="fallback", max_output_tokens=200, payload=_telecom_payload())
@@ -955,8 +962,7 @@ def test_failover_fallback_attempt_is_not_made_when_budget_is_exhausted(
     report = asyncio.run(service.run())
 
     by_category = {entry.category: entry for entry in report.categories}
-    assert by_category["telecom"].status == "failed"
-    assert "budget" in (by_category["telecom"].error or "")
+    assert by_category["telecom"].status == "generated"
     assert primary.calls == 1
     assert fallback.calls == 0
     assert budgets[0].call_count == 1
@@ -1021,10 +1027,10 @@ def test_failover_reserves_each_attempt_with_its_own_output_allowance(
     assert budgets[0].input_tokens == expected_input
 
 
-def test_failover_double_failure_still_reserves_both_attempts(
+def test_failover_double_failure_still_reserves_both_attempts_before_evidence_fallback(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """Two failed attempts both consume budget before the category is marked failed."""
+    """Two failed attempts consume their budget before the evidence fallback is rendered."""
     collector = _telecom_only_setup(session_factory)
     primary = StubProvider(name="primary", max_output_tokens=100, error=LLMProviderError())
     fallback = StubProvider(name="fallback", max_output_tokens=200, error=LLMProviderError())
@@ -1041,8 +1047,7 @@ def test_failover_double_failure_still_reserves_both_attempts(
     report = asyncio.run(service.run())
 
     by_category = {entry.category: entry for entry in report.categories}
-    assert by_category["telecom"].status == "failed"
-    assert "budget" not in (by_category["telecom"].error or "")
+    assert by_category["telecom"].status == "generated"
     assert primary.calls == 1
     assert fallback.calls == 1
     assert budgets[0].call_count == 2

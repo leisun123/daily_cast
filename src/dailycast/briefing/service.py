@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.prompt import build_briefing_messages
 from dailycast.briefing.renderer import render_briefing, truncate_markdown
-from dailycast.briefing.schemas import BriefingEvidence, BriefingResult
+from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
 from dailycast.briefing.selection import (
     BriefingSelectionCandidate,
     BriefingSelectionPolicy,
@@ -273,9 +273,16 @@ class BriefingService:
             )
         try:
             markdown = await self._generate_markdown(category, briefing_date, evidence, provider)
+        except Exception as error:
+            logger.exception(
+                "briefing model generation failed; using evidence fallback",
+                extra={"category": category, "error": str(error)},
+            )
+            markdown = self._fallback_markdown(category, briefing_date, evidence)
+        try:
             file_path = self._write_markdown(briefing_date, category, markdown)
         except Exception as error:
-            logger.exception("briefing category generation failed", extra={"category": category})
+            logger.exception("briefing category persistence failed", extra={"category": category})
             return BriefingCategoryReport(
                 category=category,
                 status="failed",
@@ -311,6 +318,38 @@ class BriefingService:
             model_options={},
         )
         result = BriefingResult.model_validate(structured.content)
+        return self._render_markdown(category, briefing_date, result, evidence)
+
+    def _fallback_markdown(
+        self,
+        category: str,
+        briefing_date: date,
+        evidence: tuple[RankedBriefingEvidence, ...],
+    ) -> str:
+        """Render verified source evidence when no model returns usable structured prose."""
+        result = BriefingResult(
+            overview=f"今日{CATEGORY_TITLES[category]}重点如下。",
+            items=[
+                BriefingItem(
+                    headline=entry.evidence.title,
+                    summary=" ".join(entry.evidence.excerpt.split()),
+                    why_it_matters=f"入选原因：{entry.reason}。",
+                    source_name=entry.evidence.source_name,
+                    source_url=entry.evidence.source_url,
+                )
+                for entry in evidence
+            ],
+        )
+        return self._render_markdown(category, briefing_date, result, evidence)
+
+    def _render_markdown(
+        self,
+        category: str,
+        briefing_date: date,
+        result: BriefingResult,
+        evidence: tuple[RankedBriefingEvidence, ...],
+    ) -> str:
+        """Render and enforce the one actual WeCom byte limit for any valid briefing."""
         return truncate_markdown(
             render_briefing(
                 CATEGORY_TITLES[category],
