@@ -51,6 +51,38 @@ The composed communication query covers China Mobile and network/base stations,
 domestic and overseas operator competition, network-critical equipment/supply,
 and local policy/projects. The AI query covers models, private/device
 deployment, China-market localisation, applications, and verified hotspots.
+Both queries request Simplified-Chinese-first reporting and name mainland
+publishers, because the audience opens every displayed link from inside
+mainland China.
+
+### Displayed-link reachability
+
+A candidate whose verified original URL is not reachable from mainland China
+without a VPN is rejected before ranking, regardless of tier. The rule is an
+explicit denylist of domains (initially `x.com`, `twitter.com`, `youtube.com`,
+`google.com`, `openai.com`, `anthropic.com`, and `huggingface.co`), extended
+only with a test. Reachability was verified by direct mainland probes:
+`rcrwireless.com`, `gsma.com`, and `lightreading.com` are all reachable
+without a VPN, so none belongs on the denylist. A reachable aggregation page
+never substitutes for an unreachable original: the evidence link must be the
+verified original article.
+
+Separately from reachability, the briefings are Chinese-language reports for a
+Chinese management audience. English-only article pages are excluded from the
+AI category by language policy even when reachable; telecom keeps GSMA and
+Light Reading because overseas-operator and vendor coverage there has no
+mainland first-party equivalent, and generation writes the Chinese summary.
+
+### AI RSS source addition
+
+The AI category gains the AIHOT feed `https://aihot.virxact.com/feed/all.xml`
+as a standard RSS source (verified 2026-08, DailyCast UA: UTF-8 RSS 2.0,
+zh-CN, seven-day deduplicated window, mainland-hosted with an ICP filing).
+Its entries carry category labels (模型/产品/行业/论文) that map naturally
+onto A0--A3, and `paper_only_terms` already excludes its 论文 stream unless a
+positive rule matches. Because AIHOT links out to both mainland-reachable and
+VPN-required originals, the reachability denylist above applies to its
+`阅读原文` target exactly as it does to web-research candidates.
 
 The web-research result schema already permits 20 candidates. The configured
 per-source limit will move from 12 to 20, including the matching source
@@ -253,6 +285,8 @@ Tests must cover:
   `模型 API` satisfy the same configured A0 entity term;
 - the single composed research query, a 20-candidate result cap, and unchanged
   search-call count;
+- the mainland-reachability denylist rejects VPN-required originals across
+  both web research and the AIHOT feed, with no aggregation-page substitution;
 - link/date/window rejection and podcast-category isolation;
 - prompt preservation of established tier/reason plus factual-detail and
   bounded-management-impact requirements; and

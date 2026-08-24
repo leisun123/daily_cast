@@ -19,8 +19,30 @@
 # - GSMA's official RSS and ZTE's official newsroom are directly reachable and
 #   retain their own public article URLs. The ZTE URL-path boundary excludes
 #   its dated solution-navigation links from being mistaken for news.
+# - AIHOT (aihot.virxact.com) is a mainland-hosted, ICP-filed Chinese AI news
+#   aggregator with a public RSS feed (feed/all.xml, 7-day deduplicated
+#   window). Its entries link to the original article ("阅读原文"); candidates
+#   whose original needs VPN are rejected by the briefing reachability rule.
+# - IT之家 main RSS (ithome.com/rss) and 量子位 (qbitai.com/feed) verified
+#   2026-08-24 without proxy: both return zh-CN RSS 2.0 directly. IT之家 is a
+#   broad consumer-tech feed, so title keywords gate AI entries before
+#   persistence; 量子位 is AI-vertical and needs no keyword filter.
+# - 雷峰网 (leiphone.com/feed) verified 2026-08-24 without proxy: full-text
+#   zh-CN RSS with strong AI/robotics coverage; title keywords filter out its
+#   consumer and capital-market stories.
+# - 机器之心 (jiqizhixin.com) has retired its public RSS and gates its data
+#   API behind a paid "数据服务" offering (/rss 302s to a marketing page,
+#   API returns 403/404). Do not scrape it. Its articles stay reachable via
+#   web research: the AI query names it as a preferred Chinese AI outlet,
+#   and each discovered original link still passes the normal direct-page
+#   verification before ranking.
 #
 # Excluded on purpose:
+# - RCR Wireless is directly reachable from mainland China (verified
+#   2026-08-24 without proxy: feed and article pages return HTTP 200 behind
+#   Cloudflare), but it is English-language. The briefings are Chinese-language
+#   reports for a Chinese management audience, so English-only sources are kept
+#   out of the AI category regardless of reachability.
 # - China Telecom's newsroom currently answers HTTP 412 to the collection
 #   request; China Mobile and China Unicom need a separate stable retrieval
 #   check before becoming default sources. CAICT sources are valuable but are
@@ -68,7 +90,8 @@ sources:
       query: >-
         过去24小时国内外 AI 行业中，管理层应关注的动态：重点大模型发布/开源/API与推理
         能力，本地化、私有化、端侧部署，中国市场适配，企业应用与生态落地，以及有公开
-        数据支撑的产品热点。优先公司、监管机构或可直达原文；排除纯论文、预印本和榜单。
+        数据支撑的产品热点。优先公司、监管机构或可直达原文，机器之心等中文 AI 媒体的
+        深度报道也可作为来源；排除纯论文、预印本和榜单。
       publisher_preference: company_regulator_research_first_party
       require_verified_publication_date: true
   - id: miit-information-communications
@@ -157,16 +180,73 @@ sources:
     max_items_per_run: 30
     config:
       briefing_category: telecom
-  - id: rcr-wireless-ai
-    name: RCR Wireless AI与通信报道
+  - id: aihot-all
+    name: AIHOT 全部 AI 动态
     kind: rss
-    entry_url: https://www.rcrwireless.com/feed
-    priority: 82
-    language: en
+    entry_url: https://aihot.virxact.com/feed/all.xml
+    priority: 78
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 60
+    config:
+      briefing_category: ai
+  - id: ithome-ai
+    name: IT之家 AI 资讯
+    kind: rss
+    entry_url: https://www.ithome.com/rss/
+    priority: 72
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 100
+    config:
+      briefing_category: ai
+      include_title_keywords:
+        - 人工智能
+        - AI
+        - 大模型
+        - 模型
+        - 智能体
+        - Agent
+        - 算力
+        - 芯片
+        - GPU
+        - 机器人
+        - 自动驾驶
+        - 开源
+  - id: qbitai
+    name: 量子位
+    kind: rss
+    entry_url: https://www.qbitai.com/feed
+    priority: 80
+    language: zh-CN
     request_timeout_seconds: 20
     max_items_per_run: 30
     config:
       briefing_category: ai
+  - id: leiphone-feed
+    name: 雷峰网
+    kind: rss
+    entry_url: https://www.leiphone.com/feed
+    priority: 70
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 60
+    config:
+      briefing_category: ai
+      include_title_keywords:
+        - 人工智能
+        - AI
+        - 大模型
+        - 模型
+        - 智能体
+        - Agent
+        - 算力
+        - 芯片
+        - GPU
+        - 机器人
+        - 具身智能
+        - 自动驾驶
+        - 开源
   - id: kr36-hot-list
     name: 36氪 24小时热榜
     kind: rss
