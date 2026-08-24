@@ -55,6 +55,9 @@ class CategorySelectionPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tiers: tuple[str, ...] = Field(min_length=1)
+    editorial_selection: bool = False
+    editorial_candidate_limit: int = Field(default=20, ge=1, le=50)
+    editorial_max_candidates_per_source: int = Field(default=5, ge=1, le=20)
     max_items_per_publisher: int = Field(default=1, ge=1)
     fallback_max_items_per_publisher: int | None = Field(default=None, ge=1)
     rules: tuple[SelectionRule, ...] = ()
@@ -158,10 +161,12 @@ def select_evidence(
     *,
     limit: int,
 ) -> tuple[RankedBriefingEvidence, ...]:
-    """Select at most ``limit`` candidates using only literal policy matches."""
+    """Select a bounded evidence set using configured local or editorial policy."""
     if limit < 1:
         return ()
     category_policy = policy.category(category)
+    if category_policy.editorial_selection:
+        return _editorial_candidate_pool(candidates, category_policy, limit=limit)
     ranked = [
         item
         for candidate in candidates
@@ -186,6 +191,42 @@ def select_evidence(
             publisher_cap=fallback_cap,
         )
     return selected
+
+
+def _editorial_candidate_pool(
+    candidates: Sequence[BriefingSelectionCandidate],
+    policy: CategorySelectionPolicy,
+    *,
+    limit: int,
+) -> tuple[RankedBriefingEvidence, ...]:
+    """Give the editor a bounded, source-balanced pool without topical keyword gates."""
+    queues: dict[str, list[BriefingSelectionCandidate]] = {}
+    for candidate in sorted(candidates, key=_candidate_source_recency_key):
+        queue = queues.setdefault(candidate.source_id, [])
+        if len(queue) < policy.editorial_max_candidates_per_source:
+            queue.append(candidate)
+    source_ids = list(queues)
+    prepared: list[RankedBriefingEvidence] = []
+    pool_limit = min(limit, policy.editorial_candidate_limit)
+    while queues and len(prepared) < pool_limit:
+        for source_id in source_ids[:]:
+            queue = queues.get(source_id)
+            if not queue:
+                queues.pop(source_id, None)
+                source_ids.remove(source_id)
+                continue
+            candidate = queue.pop(0)
+            prepared.append(
+                _ranked(
+                    candidate,
+                    tier="LLM",
+                    specificity=0,
+                    reason="已通过时间、正文和原文链接核验，交由编辑模型判断管理价值",
+                )
+            )
+            if len(prepared) == pool_limit:
+                break
+    return tuple(prepared)
 
 
 def _select_with_publisher_cap(
@@ -317,6 +358,17 @@ def _source_recency_key(entry: RankedBriefingEvidence) -> tuple[int, float, int]
         -entry.source_priority,
         -_utc_timestamp(entry.evidence.published_at or entry.discovered_at),
         entry.article_id,
+    )
+
+
+def _candidate_source_recency_key(
+    candidate: BriefingSelectionCandidate,
+) -> tuple[int, float, int]:
+    """Prefer trusted and fresh sources while retaining every topical decision for the LLM."""
+    return (
+        -candidate.source_priority,
+        -_utc_timestamp(candidate.evidence.published_at or candidate.discovered_at),
+        candidate.article_id,
     )
 
 

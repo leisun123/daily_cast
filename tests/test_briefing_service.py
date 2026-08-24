@@ -349,7 +349,7 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
     )
     assert (
         sum(f"https://ai-source.example.test/a{index}" in briefings["ai"] for index in range(1, 6))
-        == 1
+        == 5
     )
     assert notifier.pushed[0].startswith("# 通信行业日报")
     assert notifier.pushed[1].startswith("# AI 动态日报")
@@ -438,6 +438,42 @@ def test_briefing_run_passes_fixed_policy_order_to_generation(
     assert telecom_prompt.index("中国移动启动基站集采") < telecom_prompt.index("工信部发布通信规划")
     assert "已确定优先级：P0" in telecom_prompt
     assert "已确定优先级：P3" in telecom_prompt
+
+
+def test_ai_briefing_delegates_candidate_selection_to_the_llm(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A verified AI-source candidate is shown to the editor without a local keyword gate."""
+    _seed_source(session_factory, "ai-source", category="ai")
+    source_url = "https://ai-source.example.test/editorial-choice"
+    collector = FakeRSSCollector(
+        {
+            "ai-source": [
+                _candidate(
+                    "ai-source",
+                    "editorial-choice",
+                    title="自动化客服接入新服务",
+                    content_text="机构推出多轮对话服务，已接入软件平台并覆盖三个城市。" * 10,
+                )
+            ]
+        }
+    )
+    llm = FakeBriefingLLM({"AI 动态日报": _llm_payload(source_url, "来源 ai-source")})
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+    )
+
+    report = asyncio.run(service.run())
+
+    ai_report = next(entry for entry in report.categories if entry.category == "ai")
+    assert ai_report.status == "generated"
+    assert source_url in llm.user_prompts[0]
+    assert "由你自行挑选" in llm.user_prompts[0]
+    assert "不得重新挑选" not in llm.user_prompts[0]
 
 
 def test_briefing_run_ignores_historical_sources_absent_from_current_policy(

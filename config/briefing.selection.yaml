@@ -87,45 +87,14 @@ categories:
     fallback_tier: P5
     global_excludes: [电信诈骗, 反诈, 短信诈骗, 移动支付, 移动游戏, 移动应用]
   ai:
-    tiers: [A0, A1, A2, A3]
-    # Prefer a shorter report to repeating one outlet's framing of the same event.
-    max_items_per_publisher: 1
-    rules:
-      - id: ai-model-development
-        tier: A0
-        specificity: 500
-        all_groups:
-          - [OpenAI, Anthropic, Google, DeepSeek, 通义, 阿里云, 智谱, 月之暗面, MiniMax, 百度, 腾讯, Meta, xAI, Mistral]
-          - [大模型, 语言模型, AI模型, 模型API, 模型 API, 推理模型]
-          - [发布, 开源, API, 推理, 上下文, 参数, 价格]
-        reason: 重点大模型产品与能力进展
-      - id: ai-private-local-device-deployment
-        tier: A1
-        specificity: 400
-        all_groups:
-          - [私有化部署, 本地部署, 离线部署, 端侧, 设备端, 边缘推理, on-premise, on premise, sovereign AI]
-        reason: 本地化或端侧部署进展
-      - id: ai-china-market-localisation
-        tier: A1
-        specificity: 350
-        all_groups:
-          - [中国市场, 国产芯片, 昇腾, 合规, 备案]
-          - [部署, 适配, 合作, 上线, 落地]
-        reason: 中国市场适配与本地化落地
-      - id: ai-application-ecosystem
-        tier: A2
-        specificity: 300
-        all_groups:
-          - [AI应用, 人工智能应用, 智能体, Agent, 开发者, 企业客户]
-          - [上线, 发布, 接入, 合作, 落地, 增长, 付费, 采用]
-        reason: AI 应用与生态落地
-      - id: ai-evidenced-hotspot
-        tier: A3
-        specificity: 200
-        all_groups:
-          - [AI应用, 人工智能, 大模型, 智能体, Agent]
-          - [爆火, 热度, 下载量, 活跃用户, 调用量, 登顶, 融资, 估值]
-        reason: 有公开数据支撑的 AI 热点
+    # AI relevance is editorial rather than keyword-gated: candidate links have
+    # already passed freshness and reader-link verification, then the LLM selects
+    # the 3-5 management-relevant items from a source-balanced pool.
+    tiers: [LLM]
+    editorial_selection: true
+    editorial_candidate_limit: 20
+    editorial_max_candidates_per_source: 5
+    rules: []
     fallback_any_of: []
-    global_excludes: [汽车模型, 车模, 沙盘模型, 数学模型, 建筑模型]
-    paper_only_terms: [论文, 预印本, arXiv, 基准测试, 排行榜]
+    global_excludes: []
+    paper_only_terms: []

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from dailycast.briefing.prompt import build_briefing_messages
 from dailycast.briefing.schemas import BriefingEvidence
 from dailycast.briefing.selection import (
     BriefingSelectionCandidate,
@@ -107,7 +108,8 @@ def test_checked_in_management_policy_is_valid() -> None:
     assert policy.category("telecom").fallback_tier == "P5"
     assert policy.category("telecom").max_items_per_publisher == 1
     assert policy.category("telecom").fallback_max_items_per_publisher == 2
-    assert policy.category("ai").fallback_any_of == ()
+    assert policy.category("ai").editorial_selection is True
+    assert policy.category("ai").editorial_candidate_limit == 20
 
 
 @pytest.fixture
@@ -306,17 +308,25 @@ def test_telecom_false_positives_are_excluded(title: str, content: str, policy) 
     )
 
 
-def test_ai_model_false_positive_is_excluded(policy) -> None:
-    """A non-AI physical model cannot enter the AI briefing through a short token."""
+def test_ai_editorial_pool_keeps_a_candidate_without_keyword_match(policy) -> None:
+    """AI candidates reach the editor even when no local keyword rule matches them."""
     selected = select_evidence(
-        "ai", [_candidate(title="汽车模型大赛", content="车模展示活动")], policy, limit=5
+        "ai",
+        [
+            _candidate(
+                title="自动化客服接入新服务",
+                content="机构推出多轮对话服务，已接入软件平台并覆盖三个城市。",
+            )
+        ],
+        policy,
+        limit=5,
     )
 
-    assert selected == ()
+    assert [(item.article_id, item.tier) for item in selected] == [(1, "LLM")]
 
 
-def test_private_deployment_outranks_a_generic_application(policy) -> None:
-    """Local deployment is more decision-relevant than a generic application release."""
+def test_ai_editorial_pool_defers_priority_to_the_llm(policy) -> None:
+    """The AI pool keeps verified candidates rather than encoding topical priority locally."""
     selected = select_evidence(
         "ai",
         [
@@ -337,7 +347,8 @@ def test_private_deployment_outranks_a_generic_application(policy) -> None:
         limit=5,
     )
 
-    assert [item.tier for item in selected] == ["A1", "A2"]
+    assert [item.article_id for item in selected] == [1, 2]
+    assert [item.tier for item in selected] == ["LLM", "LLM"]
 
 
 def test_global_industry_body_is_a_last_resort_telecom_signal(policy) -> None:
@@ -358,40 +369,40 @@ def test_global_industry_body_is_a_last_resort_telecom_signal(policy) -> None:
     assert [item.tier for item in selected] == ["P5"]
 
 
-def test_on_premise_sovereign_ai_is_local_deployment(policy) -> None:
-    """An overseas operator's on-premise model server is relevant AI deployment evidence."""
+def test_ai_editorial_pool_caps_each_source_before_prompting(policy) -> None:
+    """One prolific feed cannot consume the complete context window before editorial review."""
     selected = select_evidence(
         "ai",
         [
             _candidate(
-                source_id="rcr-wireless-ai",
-                title="KT unveils NPU LLM Station, a fully on-premise sovereign AI server",
-                content=(
-                    "The operator launched an on-premise sovereign AI server for enterprise use."
-                ),
+                article_id=index,
+                source_id="prolific-source",
+                title=f"候选文章 {index}",
+                content="经过核验的 AI 行业候选。",
+            )
+            for index in range(1, 7)
+        ]
+        + [
+            _candidate(
+                article_id=7,
+                source_id="other-source",
+                title="另一来源候选",
+                content="经过核验的 AI 行业候选。",
             )
         ],
         policy,
-        limit=5,
+        limit=20,
     )
 
-    assert [item.tier for item in selected] == ["A1"]
+    assert [item.article_id for item in selected] == [1, 7, 2, 3, 4, 5]
 
 
-def test_paper_needs_an_independent_positive_rule(policy) -> None:
-    """Academic-only coverage stays out, while a model release remains eligible evidence."""
-    assert (
-        select_evidence(
-            "ai", [_candidate(title="论文预印本", content="基准测试结果")], policy, limit=5
-        )
-        == ()
+def test_ai_editorial_prompt_excludes_papers_after_candidates_are_collected(policy) -> None:
+    """Paper exclusion is an editorial instruction, not a brittle pre-selection keyword gate."""
+    evidence = select_evidence(
+        "ai", [_candidate(title="论文预印本", content="基准测试结果")], policy, limit=5
     )
 
-    selected = select_evidence(
-        "ai",
-        [_candidate(title="DeepSeek 发布大模型论文", content="模型API 开源")],
-        policy,
-        limit=5,
-    )
+    messages = build_briefing_messages("AI 动态日报", evidence, editorial_selection=True)
 
-    assert selected[0].tier == "A0"
+    assert "排除纯论文、预印本、榜单" in messages[-1].content

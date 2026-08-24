@@ -273,7 +273,11 @@ class BriefingService:
                 category,
                 candidates,
                 self._selection_policy,
-                limit=self._max_items_per_category,
+                limit=(
+                    self._selection_policy.category(category).editorial_candidate_limit
+                    if self._selection_policy.category(category).editorial_selection
+                    else self._max_items_per_category
+                ),
             )
             for category, candidates in grouped.items()
         }
@@ -344,7 +348,11 @@ class BriefingService:
         provider: LLMProvider,
     ) -> str:
         """Ask the LLM for prose, then render links deterministically from evidence."""
-        messages = build_briefing_messages(CATEGORY_TITLES[category], evidence)
+        messages = build_briefing_messages(
+            CATEGORY_TITLES[category],
+            evidence,
+            editorial_selection=self._selection_policy.category(category).editorial_selection,
+        )
         structured = await provider.generate_structured(
             operation=LLMOperation.GENERATE_BRIEFING,
             messages=messages,
