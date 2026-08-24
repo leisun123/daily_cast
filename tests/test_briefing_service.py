@@ -335,6 +335,37 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
     assert all(len(markdown.encode("utf-8")) <= RENDER_BYTE_BUDGET for markdown in notifier.pushed)
 
 
+def test_briefing_run_trims_overlong_model_prose_and_still_pushes(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A verbose model response is compacted for delivery instead of losing its category."""
+    _seed_source(session_factory, "ai-source", category="ai")
+    source_url = "https://ai-source.example.test/a1"
+    payload = _llm_payload(source_url, "来源 ai-source")
+    item = payload["items"][0]  # type: ignore[index]
+    assert isinstance(item, dict)
+    item["summary"] = "本地部署进展" * 100
+    collector = FakeRSSCollector({"ai-source": [_candidate("ai-source", "a1")]})
+    llm = FakeBriefingLLM({"AI 动态日报": payload})
+    notifier = RecordingNotifier()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=notifier,
+    )
+
+    report = asyncio.run(service.run())
+
+    ai_report = next(entry for entry in report.categories if entry.category == "ai")
+    assert ai_report.status == "generated"
+    assert ai_report.push_status == "sent"
+    assert len(notifier.pushed) == 1
+    assert source_url in notifier.pushed[0]
+    assert len(notifier.pushed[0].encode("utf-8")) <= RENDER_BYTE_BUDGET
+
+
 def test_briefing_run_passes_fixed_policy_order_to_generation(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
