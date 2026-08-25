@@ -311,6 +311,54 @@ def test_generated_briefing_audit_fills_omitted_verified_evidence() -> None:
     assert all("…" not in item.summary for item in audited.items)
 
 
+def test_generated_briefing_audit_drops_an_omitted_long_raw_title() -> None:
+    """A filler may not turn a publisher's long headline into a broken chat title."""
+    published_at = datetime(2026, 8, 24, 8, tzinfo=UTC)
+    evidence = tuple(
+        RankedBriefingEvidence(
+            evidence=BriefingEvidence(
+                title=(
+                    f"中国移动网络建设进展 {index}"
+                    if index < 5
+                    else "半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司"
+                ),
+                source_name=f"来源 {index}",
+                published_at=published_at,
+                excerpt=f"第 {index} 个已核验原文的完整事实。",
+                source_url=f"https://source-{index}.example.test/article",
+            ),
+            tier="P0",
+            specificity=500,
+            reason="中国移动直接动态",
+            rule_id="telecom-china-mobile",
+            source_id=f"source-{index}",
+            source_priority=100,
+            discovered_at=published_at,
+            article_id=index,
+        )
+        for index in range(1, 6)
+    )
+    result = BriefingResult(
+        overview="今日重点聚焦网络建设。",
+        items=[
+            BriefingItem(
+                headline=f"第 {index} 条完整标题",
+                summary="模型已完成的完整摘要。",
+                why_it_matters="它反映网络建设进展。",
+                source_name=f"来源 {index}",
+                source_url=f"https://source-{index}.example.test/article",
+            )
+            for index in range(1, 5)
+        ],
+    )
+
+    audited = _audit_generated_result(result, evidence)
+
+    assert len(audited.items) == 4
+    assert all(item.source_url != "https://source-5.example.test/article" for item in audited.items)
+    assert all("…" not in item.headline for item in audited.items)
+
+
 def _build_service(
     factory: sessionmaker[Session],
     output_dir: Path,

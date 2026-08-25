@@ -10,13 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 MAX_BRIEFING_ITEMS = 5
 
 
-def _trim_for_delivery(value: object, max_length: int) -> object:
-    """Compact verbose model prose instead of rejecting an otherwise usable briefing."""
-    if not isinstance(value, str) or len(value) <= max_length:
-        return value
-    return value[: max_length - 1].rstrip() + "…"
-
-
 def _compact_complete_sentence(value: object, max_length: int) -> object:
     """Compact only at an existing sentence boundary; never invent a false ending."""
     if not isinstance(value, str) or len(value) <= max_length:
@@ -67,8 +60,13 @@ class BriefingItem(BaseModel):
     @field_validator("headline", mode="before")
     @classmethod
     def trim_headline_for_delivery(cls, value: object) -> object:
-        """Keep an overlong headline renderable instead of failing the whole category."""
-        return _trim_for_delivery(value, 28)
+        """Reject an incomplete headline instead of making it look like a title."""
+        if not isinstance(value, str):
+            return value
+        headline = value.strip()
+        if "…" in headline or "..." in headline or len(headline) > 28:
+            raise ValueError("headline must be a complete sentence of at most 28 characters")
+        return headline
 
     @field_validator("theme", mode="before")
     @classmethod

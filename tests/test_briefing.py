@@ -174,6 +174,18 @@ def test_briefing_item_rejects_model_supplied_ellipsis() -> None:
         _item("https://news.example.test/a", summary="公司发布新产品，后续细节仍待确认…")
 
 
+def test_briefing_item_rejects_an_incomplete_headline() -> None:
+    """A compact list must never shorten a headline into an ellipsis."""
+    with pytest.raises(ValueError, match="headline"):
+        BriefingItem(
+            headline="半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司",
+            summary="原文已完成事实核验。",
+            why_it_matters="它反映机器人行业融资进展。",
+            source_name="量子位",
+            source_url="https://news.example.test/a",
+        )
+
+
 def test_briefing_item_requires_an_absolute_http_source_url() -> None:
     """A non-web or empty link must never reach a WeCom message."""
     with pytest.raises(ValueError, match="source_url"):

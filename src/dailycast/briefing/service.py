@@ -414,18 +414,24 @@ class BriefingService:
         evidence: tuple[RankedBriefingEvidence, ...],
     ) -> BriefingResult:
         """Build verified source evidence when no model returns usable structured prose."""
+        items: list[BriefingItem] = []
+        for entry in evidence:
+            title = entry.evidence.title.strip().rstrip("。！？!?")
+            try:
+                items.append(
+                    BriefingItem(
+                        headline=title,
+                        summary=" ".join(entry.evidence.excerpt.split()),
+                        why_it_matters=f"入选原因：{entry.reason}。",
+                        source_name=entry.evidence.source_name,
+                        source_url=entry.evidence.source_url,
+                    )
+                )
+            except ValueError:
+                _log_incomplete_fallback_title(entry)
         return BriefingResult(
             overview=f"今日{CATEGORY_TITLES[category]}重点如下。",
-            items=[
-                BriefingItem(
-                    headline=entry.evidence.title,
-                    summary=" ".join(entry.evidence.excerpt.split()),
-                    why_it_matters=f"入选原因：{entry.reason}。",
-                    source_name=entry.evidence.source_name,
-                    source_url=entry.evidence.source_url,
-                )
-                for entry in evidence
-            ],
+            items=items,
         )
 
     def _render_markdown(
@@ -549,7 +555,10 @@ def _audit_generated_result(
             break
         if entry.evidence.source_url in seen_urls:
             continue
-        accepted.append(_fallback_item_from_evidence(entry))
+        fallback_item = _fallback_item_from_evidence(entry)
+        if fallback_item is None:
+            continue
+        accepted.append(fallback_item)
         seen_urls.add(entry.evidence.source_url)
         fallback_count += 1
 
@@ -566,15 +575,30 @@ def _audit_generated_result(
     return BriefingResult(overview=result.overview, items=accepted)
 
 
-def _fallback_item_from_evidence(entry: RankedBriefingEvidence) -> BriefingItem:
-    """Render one omitted verified candidate without inventing facts or a link."""
+def _fallback_item_from_evidence(entry: RankedBriefingEvidence) -> BriefingItem | None:
+    """Render an omitted candidate only when its source title is already complete."""
     title = entry.evidence.title.strip().rstrip("。！？!?")
-    return BriefingItem(
-        headline=title,
-        summary=f"原文报道：{title}。",
-        why_it_matters=f"管理关注：{entry.reason}。",
-        source_name=entry.evidence.source_name,
-        source_url=entry.evidence.source_url,
+    try:
+        return BriefingItem(
+            headline=title,
+            summary=f"原文报道：{title}。",
+            why_it_matters=f"管理关注：{entry.reason}。",
+            source_name=entry.evidence.source_name,
+            source_url=entry.evidence.source_url,
+        )
+    except ValueError:
+        _log_incomplete_fallback_title(entry)
+        return None
+
+
+def _log_incomplete_fallback_title(entry: RankedBriefingEvidence) -> None:
+    """Record a discarded raw title without publishing its incomplete text."""
+    logger.warning(
+        "briefing omitted an incomplete evidence fallback title",
+        extra={
+            "source_url": entry.evidence.source_url,
+            "source_name": entry.evidence.source_name,
+        },
     )
 
 
