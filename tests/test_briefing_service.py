@@ -14,11 +14,17 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.renderer import RENDER_BYTE_BUDGET
-from dailycast.briefing.selection import BriefingSelectionPolicy, load_selection_policy
+from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
+from dailycast.briefing.selection import (
+    BriefingSelectionPolicy,
+    RankedBriefingEvidence,
+    load_selection_policy,
+)
 from dailycast.briefing.service import (
     ALREADY_COMPLETED,
     BriefingRunInProgressError,
     BriefingService,
+    _audit_generated_result,
     read_briefings_for_date,
 )
 from dailycast.briefing.webhook import WebhookNotifier
@@ -248,6 +254,61 @@ def _llm_payloads(source_urls: Sequence[str], source_name: str) -> dict[str, obj
             for index, source_url in enumerate(source_urls, start=1)
         ],
     }
+
+
+def test_generated_briefing_audit_fills_omitted_verified_evidence() -> None:
+    """A short or partly hallucinated model response cannot silently shrink a briefing."""
+    published_at = datetime(2026, 8, 24, 8, tzinfo=UTC)
+    evidence = tuple(
+        RankedBriefingEvidence(
+            evidence=BriefingEvidence(
+                title=f"中国移动网络建设进展 {index}",
+                source_name=f"来源 {index}",
+                published_at=published_at,
+                excerpt=f"第 {index} 个已核验原文的完整事实。",
+                source_url=f"https://source-{index}.example.test/article",
+            ),
+            tier="P0",
+            specificity=500,
+            reason="中国移动直接动态",
+            rule_id="telecom-china-mobile",
+            source_id=f"source-{index}",
+            source_priority=100,
+            discovered_at=published_at,
+            article_id=index,
+        )
+        for index in range(1, 6)
+    )
+    result = BriefingResult(
+        overview="今日重点聚焦网络建设。",
+        items=[
+            BriefingItem(
+                headline="模型已选中的第一条",
+                summary="第一条已由模型完成概述。",
+                why_it_matters="它反映网络建设进展。",
+                source_name="来源 1",
+                source_url="https://source-1.example.test/article",
+            ),
+            BriefingItem(
+                headline="不可验证条目",
+                summary="这个链接不应进入最终消息。",
+                why_it_matters="没有对应原文。",
+                source_name="来源 9",
+                source_url="https://fabricated.example.test/article",
+            ),
+        ],
+    )
+
+    audited = _audit_generated_result(result, evidence)
+
+    assert len(audited.items) == 5
+    assert [item.source_url for item in audited.items] == [
+        entry.evidence.source_url for entry in evidence
+    ]
+    assert "https://fabricated.example.test/article" not in {
+        item.source_url for item in audited.items
+    }
+    assert all("…" not in item.summary for item in audited.items)
 
 
 def _build_service(

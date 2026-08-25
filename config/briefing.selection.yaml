@@ -4,6 +4,8 @@
 categories:
   telecom:
     tiers: [P0, P1, P2, P3, P4, P5]
+    # Within P0, show one signal from each management subtopic before repeating one.
+    diversify_first_tiers: [P0]
     # A single outlet must not fill the management briefing, even through multiple feeds.
     max_items_per_publisher: 1
     # If distinct verified outlets cannot fill the report, one outlet may contribute
@@ -13,6 +15,7 @@ categories:
       - id: telecom-china-mobile
         tier: P0
         specificity: 500
+        max_items_per_briefing: 2
         all_groups:
           - [中国移动, 中国移动通信, 中国移动集团, 中移]
         none_of: [移动支付, 移动应用, 移动游戏, 移动办公]

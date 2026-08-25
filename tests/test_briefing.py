@@ -42,6 +42,7 @@ def _ranked_evidence(evidence: BriefingEvidence) -> RankedBriefingEvidence:
         tier="P0",
         specificity=500,
         reason="中国移动直接动态",
+        rule_id="telecom-china-mobile",
         source_id="mobile-source",
         source_priority=100,
         discovered_at=datetime(2026, 8, 21, 8, tzinfo=UTC),

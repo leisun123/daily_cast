@@ -26,6 +26,7 @@ class SelectionRule(BaseModel):
     id: str = Field(min_length=1)
     tier: str = Field(min_length=1)
     specificity: int = Field(ge=0)
+    max_items_per_briefing: int | None = Field(default=None, ge=1)
     all_groups: tuple[tuple[str, ...], ...] = Field(min_length=1)
     none_of: tuple[str, ...] = ()
     reason: str = Field(min_length=1)
@@ -58,6 +59,7 @@ class CategorySelectionPolicy(BaseModel):
     editorial_selection: bool = False
     editorial_candidate_limit: int = Field(default=20, ge=1, le=50)
     editorial_max_candidates_per_source: int = Field(default=5, ge=1, le=20)
+    diversify_first_tiers: tuple[str, ...] = ()
     max_items_per_publisher: int = Field(default=1, ge=1)
     fallback_max_items_per_publisher: int | None = Field(default=None, ge=1)
     rules: tuple[SelectionRule, ...] = ()
@@ -78,6 +80,11 @@ class CategorySelectionPolicy(BaseModel):
     def validate_rule_tiers(self) -> CategorySelectionPolicy:
         """Reject an unorderable rule or a fallback whose tier is not declared."""
         declared = set(self.tiers)
+        unknown_diversity_tiers = set(self.diversify_first_tiers) - declared
+        if unknown_diversity_tiers:
+            raise ValueError(
+                f"unknown diversity tier: {', '.join(sorted(unknown_diversity_tiers))}"
+            )
         unknown = {rule.tier for rule in self.rules} - declared
         if unknown:
             raise ValueError(f"unknown tier: {', '.join(sorted(unknown))}")
@@ -137,6 +144,7 @@ class RankedBriefingEvidence:
     tier: str
     specificity: int
     reason: str
+    rule_id: str
     source_id: str
     source_priority: int
     discovered_at: datetime
@@ -222,6 +230,7 @@ def _editorial_candidate_pool(
                     tier="LLM",
                     specificity=0,
                     reason="已通过时间、正文和原文链接核验，交由编辑模型判断管理价值",
+                    rule_id="editorial-llm",
                 )
             )
             if len(prepared) == pool_limit:
@@ -238,20 +247,41 @@ def _select_with_publisher_cap(
 ) -> tuple[RankedBriefingEvidence, ...]:
     """Retain tier order while applying one explicit per-publisher ceiling."""
     selected: list[RankedBriefingEvidence] = []
+    selected_article_ids: set[int] = set()
     publisher_counts: dict[str, int] = {}
+    rule_counts: dict[str, int] = {}
+    rule_limits = {rule.id: rule.max_items_per_briefing for rule in category_policy.rules}
     for tier in category_policy.tiers:
-        for specificity in sorted(
-            {item.specificity for item in ranked if item.tier == tier}, reverse=True
-        ):
-            bucket = [
-                item for item in ranked if item.tier == tier and item.specificity == specificity
-            ]
+        tier_entries = [item for item in ranked if item.tier == tier]
+        if tier in category_policy.diversify_first_tiers:
+            for rule_id in _rule_ids_in_priority_order(tier_entries):
+                for item in _interleave_same_bucket(
+                    [entry for entry in tier_entries if entry.rule_id == rule_id]
+                ):
+                    if not _publisher_capacity_available(
+                        item, publisher_counts, publisher_cap
+                    ) or not _rule_capacity_available(item, rule_counts, rule_limits):
+                        continue
+                    selected.append(item)
+                    selected_article_ids.add(item.article_id)
+                    _record_publisher(item, publisher_counts)
+                    _record_rule(item, rule_counts)
+                    break
+                if len(selected) == limit:
+                    return tuple(selected)
+        for specificity in sorted({item.specificity for item in tier_entries}, reverse=True):
+            bucket = [item for item in tier_entries if item.specificity == specificity]
             for item in _interleave_same_bucket(bucket):
-                publisher_key = _publisher_key(item.evidence.source_url)
-                if publisher_counts.get(publisher_key, 0) >= publisher_cap:
+                if item.article_id in selected_article_ids:
+                    continue
+                if not _publisher_capacity_available(
+                    item, publisher_counts, publisher_cap
+                ) or not _rule_capacity_available(item, rule_counts, rule_limits):
                     continue
                 selected.append(item)
-                publisher_counts[publisher_key] = publisher_counts.get(publisher_key, 0) + 1
+                selected_article_ids.add(item.article_id)
+                _record_publisher(item, publisher_counts)
+                _record_rule(item, rule_counts)
                 if len(selected) == limit:
                     return tuple(selected)
     return tuple(selected)
@@ -272,7 +302,13 @@ def _classify_candidate(
             matching_rules,
             key=lambda item: (tier_order[item.tier], -item.specificity, item.id),
         )
-        return _ranked(candidate, tier=rule.tier, specificity=rule.specificity, reason=rule.reason)
+        return _ranked(
+            candidate,
+            tier=rule.tier,
+            specificity=rule.specificity,
+            reason=rule.reason,
+            rule_id=rule.id,
+        )
     if _matches_any(text, policy.paper_only_terms):
         return None
     if policy.fallback_tier is not None and _matches_any(text, policy.fallback_any_of):
@@ -281,6 +317,7 @@ def _classify_candidate(
             tier=policy.fallback_tier,
             specificity=0,
             reason="通信产业兜底关注",
+            rule_id=f"fallback-{policy.fallback_tier}",
         )
     return None
 
@@ -291,6 +328,7 @@ def _ranked(
     tier: str,
     specificity: int,
     reason: str,
+    rule_id: str,
 ) -> RankedBriefingEvidence:
     """Attach deterministic rule output while retaining the source-ordering inputs."""
     return RankedBriefingEvidence(
@@ -298,6 +336,7 @@ def _ranked(
         tier=tier,
         specificity=specificity,
         reason=reason,
+        rule_id=rule_id,
         source_id=candidate.source_id,
         source_priority=candidate.source_priority,
         discovered_at=candidate.discovered_at,
@@ -342,6 +381,40 @@ def _interleave_same_bucket(
             if not queue:
                 rotation.remove(queue)
     return tuple(selected)
+
+
+def _rule_ids_in_priority_order(entries: Sequence[RankedBriefingEvidence]) -> tuple[str, ...]:
+    """Return one deterministic first-pass slot per matching management subtopic."""
+    rule_priority = {item.rule_id: item.specificity for item in entries}
+    return tuple(sorted(rule_priority, key=lambda rule_id: (-rule_priority[rule_id], rule_id)))
+
+
+def _publisher_capacity_available(
+    item: RankedBriefingEvidence, publisher_counts: dict[str, int], publisher_cap: int
+) -> bool:
+    """Keep every pass subject to the same cross-feed publisher ceiling."""
+    return publisher_counts.get(_publisher_key(item.evidence.source_url), 0) < publisher_cap
+
+
+def _record_publisher(item: RankedBriefingEvidence, publisher_counts: dict[str, int]) -> None:
+    """Count a selected item against the normalized outlet domain."""
+    publisher_key = _publisher_key(item.evidence.source_url)
+    publisher_counts[publisher_key] = publisher_counts.get(publisher_key, 0) + 1
+
+
+def _rule_capacity_available(
+    item: RankedBriefingEvidence,
+    rule_counts: dict[str, int],
+    rule_limits: dict[str, int | None],
+) -> bool:
+    """Apply an explicit per-rule ceiling without weakening tier ordering."""
+    limit = rule_limits.get(item.rule_id)
+    return limit is None or rule_counts.get(item.rule_id, 0) < limit
+
+
+def _record_rule(item: RankedBriefingEvidence, rule_counts: dict[str, int]) -> None:
+    """Track a selected item against its literal policy rule."""
+    rule_counts[item.rule_id] = rule_counts.get(item.rule_id, 0) + 1
 
 
 def _publisher_key(url: str) -> str:

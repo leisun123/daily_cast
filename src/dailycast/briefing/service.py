@@ -17,7 +17,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.prompt import build_briefing_messages
 from dailycast.briefing.renderer import render_briefing, truncate_markdown
-from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
+from dailycast.briefing.schemas import (
+    MAX_BRIEFING_ITEMS,
+    BriefingEvidence,
+    BriefingItem,
+    BriefingResult,
+)
 from dailycast.briefing.selection import (
     BriefingSelectionCandidate,
     BriefingSelectionPolicy,
@@ -360,6 +365,7 @@ class BriefingService:
             model_options={},
         )
         result = BriefingResult.model_validate(structured.content)
+        result = _audit_generated_result(result, evidence)
         return self._render_markdown(category, briefing_date, result, evidence)
 
     def _fallback_markdown(
@@ -440,6 +446,79 @@ class BriefingService:
             logger.exception("briefing webhook push failed")
             return "failed"
         return "sent"
+
+
+def _audit_generated_result(
+    result: BriefingResult,
+    evidence: tuple[RankedBriefingEvidence, ...],
+) -> BriefingResult:
+    """Retain only exact evidence links, then fill any omitted verified candidates.
+
+    Link reachability and publication date are checked before generation.  This
+    final local gate handles a different failure mode: a valid model response
+    can still silently omit several verified candidates or point an item at a
+    publisher-level fallback URL.  Every delivered item must therefore map to
+    one exact evidence URL; when it does not, a compact source-backed entry
+    fills the vacant slot instead.
+    """
+    target_count = min(MAX_BRIEFING_ITEMS, len(evidence))
+    if target_count == 0:
+        return BriefingResult(overview=result.overview, items=[])
+
+    evidence_by_url = {entry.evidence.source_url: entry for entry in evidence}
+    accepted: list[BriefingItem] = []
+    seen_urls: set[str] = set()
+    dropped_count = 0
+    for item in result.items:
+        entry = evidence_by_url.get(item.source_url)
+        if entry is None or item.source_url in seen_urls:
+            dropped_count += 1
+            continue
+        accepted.append(
+            item.model_copy(
+                update={
+                    "source_name": entry.evidence.source_name,
+                    "source_url": entry.evidence.source_url,
+                }
+            )
+        )
+        seen_urls.add(item.source_url)
+        if len(accepted) == target_count:
+            break
+
+    fallback_count = 0
+    for entry in evidence:
+        if len(accepted) == target_count:
+            break
+        if entry.evidence.source_url in seen_urls:
+            continue
+        accepted.append(_fallback_item_from_evidence(entry))
+        seen_urls.add(entry.evidence.source_url)
+        fallback_count += 1
+
+    if dropped_count or fallback_count:
+        logger.warning(
+            "briefing output audit adjusted generated items",
+            extra={
+                "model_item_count": len(result.items),
+                "accepted_item_count": len(accepted),
+                "dropped_item_count": dropped_count,
+                "fallback_item_count": fallback_count,
+            },
+        )
+    return BriefingResult(overview=result.overview, items=accepted)
+
+
+def _fallback_item_from_evidence(entry: RankedBriefingEvidence) -> BriefingItem:
+    """Render one omitted verified candidate without inventing facts or a link."""
+    title = entry.evidence.title.strip().rstrip("。！？!?")
+    return BriefingItem(
+        headline=title,
+        summary=f"原文报道：{title}。",
+        why_it_matters=f"管理关注：{entry.reason}。",
+        source_name=entry.evidence.source_name,
+        source_url=entry.evidence.source_url,
+    )
 
 
 def read_briefings_for_date(output_dir: Path, briefing_date: date) -> dict[str, str]:

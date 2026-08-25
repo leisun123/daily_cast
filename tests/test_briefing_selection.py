@@ -106,10 +106,16 @@ def test_checked_in_management_policy_is_valid() -> None:
     policy = load_selection_policy(PROJECT_ROOT / "config" / "briefing.selection.yaml")
 
     assert policy.category("telecom").fallback_tier == "P5"
+    assert policy.category("telecom").diversify_first_tiers == ("P0",)
     assert policy.category("telecom").max_items_per_publisher == 1
     assert policy.category("telecom").fallback_max_items_per_publisher == 2
     assert policy.category("ai").editorial_selection is True
     assert policy.category("ai").editorial_candidate_limit == 20
+    mobile_rule = next(
+        rule for rule in policy.category("telecom").rules if rule.id == "telecom-china-mobile"
+    )
+    assert mobile_rule.max_items_per_briefing == 2
+    assert policy.category("ai").fallback_any_of == ()
 
 
 @pytest.fixture
@@ -180,8 +186,106 @@ def test_global_specificity_precedes_source_priority(policy) -> None:
     assert [item.article_id for item in selected] == [2, 1]
 
 
+def test_p0_covers_each_management_subtopic_before_repeating_one_rule(policy) -> None:
+    """P0 should show China Mobile, radio, spectrum, and 6G signals before a repeat."""
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                article_id=1,
+                source_id="mobile-primary",
+                title="中国移动启动核心网升级",
+                content="网络能力建设项目启动",
+            ),
+            _candidate(
+                article_id=2,
+                source_id="radio-source",
+                title="基站建设招标启动",
+                content="无线网新建项目推进",
+            ),
+            _candidate(
+                article_id=3,
+                source_id="spectrum-source",
+                title="频谱许可核发",
+                content="无线电频段调整方案公布",
+            ),
+            _candidate(
+                article_id=4,
+                source_id="six-g-source",
+                title="5G-A 商用开通",
+                content="6G 网络建设计划发布",
+            ),
+            _candidate(
+                article_id=5,
+                source_id="mobile-secondary",
+                title="中国移动发布算力网络规划",
+                content="公司公布网络建设安排",
+            ),
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.article_id for item in selected] == [1, 2, 3, 4, 5]
+
+
+def test_china_mobile_rule_is_capped_at_two_items_per_briefing(policy) -> None:
+    """Several distinct China Mobile stories cannot crowd out the next management priority."""
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                article_id=1,
+                source_id="mobile-primary",
+                title="中国移动启动核心网升级",
+                content="网络能力建设项目启动",
+            ),
+            _candidate(
+                article_id=2,
+                source_id="mobile-secondary",
+                title="中国移动发布算力网络规划",
+                content="公司公布网络建设安排",
+            ),
+            _candidate(
+                article_id=3,
+                source_id="mobile-third",
+                title="中国移动推进云网融合项目",
+                content="网络能力建设项目进展",
+            ),
+            _candidate(
+                article_id=4,
+                source_id="radio-source",
+                title="基站建设招标启动",
+                content="无线网新建项目推进",
+            ),
+            _candidate(
+                article_id=5,
+                source_id="spectrum-source",
+                title="频谱许可核发",
+                content="无线电频段调整方案公布",
+            ),
+            _candidate(
+                article_id=6,
+                source_id="six-g-source",
+                title="5G-A 商用开通",
+                content="6G 网络建设计划发布",
+            ),
+            _candidate(
+                article_id=7,
+                source_id="competitor-source",
+                title="中国联通启动网络建设合作",
+                content="运营商合作项目进入部署阶段",
+            ),
+        ],
+        policy,
+        limit=6,
+    )
+
+    assert [item.article_id for item in selected] == [1, 4, 5, 6, 2, 7]
+
+
 def test_publisher_cap_prevents_one_outlet_filling_a_tier(policy) -> None:
-    """After global priority is fixed, one outlet cannot fill the whole P0/500 bucket."""
+    """After global priority is fixed, one outlet cannot fill the whole P0/450 bucket."""
     selected = select_evidence(
         "telecom",
         [
@@ -189,22 +293,22 @@ def test_publisher_cap_prevents_one_outlet_filling_a_tier(policy) -> None:
                 article_id=1,
                 source_id="source-a",
                 source_priority=100,
-                title="中国移动启动核心网升级",
-                content="网络能力建设进展",
+                title="基站建设项目启动",
+                content="无线网建设进展",
             ),
             _candidate(
                 article_id=2,
                 source_id="source-b",
                 source_priority=80,
-                title="中国移动公布基站建设计划",
+                title="基站网络商用开通",
                 content="无线网络建设进展",
             ),
             _candidate(
                 article_id=3,
                 source_id="source-a",
                 source_priority=100,
-                title="中国移动推进算力网络建设",
-                content="网络项目建设进展",
+                title="基站改造计划发布",
+                content="无线网络改造进展",
             ),
         ],
         policy,
