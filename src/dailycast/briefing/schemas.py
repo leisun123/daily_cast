@@ -103,6 +103,10 @@ class BriefingResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     overview: str = Field(min_length=1, max_length=600)
+    # The compact group message uses this short phrase rather than joining the
+    # category overviews into a paragraph.  It remains optional so evidence
+    # fallback output from an unavailable model can still be delivered.
+    focus: str = Field(default="", max_length=30)
     items: list[BriefingItem] = Field(max_length=MAX_BRIEFING_ITEMS)
 
     @field_validator("overview", mode="before")
@@ -110,3 +114,12 @@ class BriefingResult(BaseModel):
     def trim_overview_for_delivery(cls, value: object) -> object:
         """Keep the complete category eligible when the model over-explains its overview."""
         return _require_no_ellipsis(_compact_complete_sentence(value, 120))
+
+    @field_validator("focus", mode="before")
+    @classmethod
+    def trim_focus_for_delivery(cls, value: object) -> object:
+        """Keep the merged-header focus a short, complete phrase."""
+        if not isinstance(value, str):
+            return value
+        focus = value.strip().rstrip("。；;")
+        return _require_no_ellipsis(focus)

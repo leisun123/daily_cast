@@ -63,8 +63,8 @@ def render_merged_briefing(
     Category-level markdown is kept for audit and retry state, but the group bot
     receives this single title-list message.  It deliberately leaves the verbose
     per-item prose out of the chat surface: each headline links to the already
-    verified source page, while the two category overviews form the short shared
-    focus summary.
+    verified source page, while the two short category focus phrases form one
+    scan-friendly summary line.
     """
     overview_parts: list[str] = []
     sections: list[tuple[str, list[tuple[BriefingItem, str]]]] = []
@@ -72,7 +72,7 @@ def render_merged_briefing(
         resolved_items = _resolved_items(result, evidence)
         if not resolved_items:
             continue
-        overview_parts.append(f"{category_name}：{result.overview.strip()}")
+        overview_parts.append(f"{category_name}：{_compact_focus(result, resolved_items)}")
         sections.append((heading, resolved_items))
 
     lines = [
@@ -95,6 +95,23 @@ def render_merged_briefing(
             lines.extend(item_lines)
             number += 1
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _compact_focus(
+    result: BriefingResult,
+    items: Sequence[tuple[BriefingItem, str]],
+) -> str:
+    """Choose the co-generated focus, with short existing themes as a safe fallback."""
+    if result.focus.strip():
+        return result.focus.strip()
+    themes: list[str] = []
+    for item, _ in items:
+        theme = item.theme.strip()
+        if theme and theme not in themes:
+            themes.append(theme)
+        if len(themes) == 2:
+            break
+    return "、".join(themes) if themes else "重点动态"
 
 
 def truncate_markdown(content: str, max_bytes: int = RENDER_BYTE_BUDGET) -> str:

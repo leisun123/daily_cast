@@ -106,11 +106,38 @@ def test_merged_renderer_keeps_the_model_selected_theme_before_each_headline() -
     assert "2. **国产模型｜** [头条一句话](https://news.example.test/ai)" in markdown
 
 
+def test_merged_renderer_uses_one_short_focus_line_instead_of_category_overviews() -> None:
+    """The chat header is a concise cross-category scan line, not pasted body prose."""
+    telecom_url = "https://news.example.test/telecom"
+    ai_url = "https://news.example.test/ai"
+    telecom_result = BriefingResult(
+        overview="运营商将算力投资、6G战略和网络智能化同步推进，并持续扩大行业场景覆盖。",
+        items=[_item(telecom_url)],
+    ).model_copy(update={"focus": "算力投资与6G演进"})
+    ai_result = BriefingResult(
+        overview="国内AI企业持续推进基础设施建设、端侧能力和智能体应用，产品迭代范围不断扩大。",
+        items=[_item(ai_url)],
+    ).model_copy(update={"focus": "国产模型与智能体落地"})
+
+    markdown = render_merged_briefing(
+        date(2026, 8, 25),
+        [
+            ("通信", "📡 通信", telecom_result, [_evidence(source_url=telecom_url)]),
+            ("AI", "🤖 AI", ai_result, [_evidence(source_url=ai_url)]),
+        ],
+    )
+
+    assert "> 通信：算力投资与6G演进；AI：国产模型与智能体落地" in markdown
+    assert "运营商将算力投资、6G战略和网络智能化同步推进" not in markdown
+    assert "国内AI企业持续推进基础设施建设" not in markdown
+
+
 def test_briefing_result_accepts_a_valid_payload() -> None:
     """The LLM output contract keeps the fields the deterministic renderer needs."""
     result = BriefingResult.model_validate(
         {
             "overview": "今天 AI 行业动态平稳。",
+            "focus": "国产模型加快应用落地",
             "items": [
                 {
                     **_item("https://news.example.test/a").model_dump(),
@@ -121,6 +148,7 @@ def test_briefing_result_accepts_a_valid_payload() -> None:
     )
 
     assert result.overview == "今天 AI 行业动态平稳。"
+    assert result.focus == "国产模型加快应用落地"
     assert result.items[0].theme == "国产模型"
     assert len(result.items) == 1
 
