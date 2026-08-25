@@ -464,7 +464,8 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
     assert delivered.startswith("# 【行业观察日报】")
     assert "## 📡 通信" in delivered
     assert "## 🤖 AI" in delivered
-    assert "> **今日关注**" in delivered
+    assert "> **昨日关注：**" in delivered
+    assert "重点动态" not in delivered
     assert "发生了什么" not in delivered
     assert "为什么值得看" not in delivered
     assert "https://telecom-source.example.test/" in delivered

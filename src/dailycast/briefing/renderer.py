@@ -66,20 +66,19 @@ def render_merged_briefing(
     verified source page, while the two short category focus phrases form one
     scan-friendly summary line.
     """
-    overview_parts: list[str] = []
+    focus_clauses: list[str] = []
     sections: list[tuple[str, list[tuple[BriefingItem, str]]]] = []
     for category_name, heading, result, evidence in categories:
         resolved_items = _resolved_items(result, evidence)
         if not resolved_items:
             continue
-        overview_parts.append(f"{category_name}：{_compact_focus(result, resolved_items)}")
+        focus_clauses.append(_compact_focus(category_name, result, resolved_items))
         sections.append((heading, resolved_items))
 
     lines = [
         f"# 【行业观察日报】{briefing_date.month}月{briefing_date.day}日",
         "",
-        "> **今日关注**",
-        f"> {'；'.join(overview_parts)}",
+        f"> **昨日关注：**{'；'.join(focus_clauses)}",
     ]
     number = 0
     for heading, items in sections:
@@ -98,6 +97,7 @@ def render_merged_briefing(
 
 
 def _compact_focus(
+    category_name: str,
     result: BriefingResult,
     items: Sequence[tuple[BriefingItem, str]],
 ) -> str:
@@ -111,7 +111,7 @@ def _compact_focus(
             themes.append(theme)
         if len(themes) == 2:
             break
-    return "、".join(themes) if themes else "重点动态"
+    return "、".join(themes) if themes else f"{category_name}行业动态持续推进"
 
 
 def truncate_markdown(content: str, max_bytes: int = RENDER_BYTE_BUDGET) -> str:

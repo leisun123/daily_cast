@@ -106,7 +106,7 @@ class BriefingResult(BaseModel):
     # The compact group message uses this short phrase rather than joining the
     # category overviews into a paragraph.  It remains optional so evidence
     # fallback output from an unavailable model can still be delivered.
-    focus: str = Field(default="", max_length=30)
+    focus: str = Field(default="", max_length=48)
     items: list[BriefingItem] = Field(max_length=MAX_BRIEFING_ITEMS)
 
     @field_validator("overview", mode="before")
