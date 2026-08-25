@@ -107,17 +107,17 @@ def test_merged_renderer_keeps_the_model_selected_theme_before_each_headline() -
 
 
 def test_merged_renderer_uses_a_natural_yesterday_focus_sentence() -> None:
-    """The chat header joins natural editorial clauses rather than category labels."""
+    """The chat header displays one editor-written daily focus unchanged."""
     telecom_url = "https://news.example.test/telecom"
     ai_url = "https://news.example.test/ai"
     telecom_result = BriefingResult(
         overview="运营商将算力投资、6G战略和网络智能化同步推进，并持续扩大行业场景覆盖。",
         items=[_item(telecom_url)],
-    ).model_copy(update={"focus": "运营商将算力投资与6G演进同步推进"})
+    )
     ai_result = BriefingResult(
         overview="国内AI企业持续推进基础设施建设、端侧能力和智能体应用，产品迭代范围不断扩大。",
         items=[_item(ai_url)],
-    ).model_copy(update={"focus": "国内 AI 侧，国产模型与智能体应用加速"})
+    )
 
     markdown = render_merged_briefing(
         date(2026, 8, 25),
@@ -125,6 +125,7 @@ def test_merged_renderer_uses_a_natural_yesterday_focus_sentence() -> None:
             ("通信", "📡 通信", telecom_result, [_evidence(source_url=telecom_url)]),
             ("AI", "🤖 AI", ai_result, [_evidence(source_url=ai_url)]),
         ],
+        focus="运营商将算力投资与6G演进同步推进；国内 AI 侧，国产模型与智能体应用加速。",
     )
 
     assert (
@@ -142,7 +143,6 @@ def test_briefing_result_accepts_a_valid_payload() -> None:
     result = BriefingResult.model_validate(
         {
             "overview": "今天 AI 行业动态平稳。",
-            "focus": "国产模型加快应用落地",
             "items": [
                 {
                     **_item("https://news.example.test/a").model_dump(),
@@ -153,7 +153,6 @@ def test_briefing_result_accepts_a_valid_payload() -> None:
     )
 
     assert result.overview == "今天 AI 行业动态平稳。"
-    assert result.focus == "国产模型加快应用落地"
     assert result.items[0].theme == "国产模型"
     assert len(result.items) == 1
 

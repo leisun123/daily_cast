@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.briefing.prompt import build_briefing_messages
+from dailycast.briefing.prompt import build_briefing_messages, build_merged_focus_messages
 from dailycast.briefing.renderer import (
     render_briefing,
     render_merged_briefing,
@@ -26,6 +26,7 @@ from dailycast.briefing.schemas import (
     BriefingEvidence,
     BriefingItem,
     BriefingResult,
+    MergedBriefingFocus,
 )
 from dailycast.briefing.selection import (
     BriefingSelectionCandidate,
@@ -204,8 +205,9 @@ class BriefingService:
             if pending_delivery is not None:
                 pending_deliveries.append(pending_delivery)
         if pending_deliveries:
+            merged_focus = await self._generate_merged_focus(pending_deliveries, provider)
             push_status = await self._push(
-                self._render_merged_markdown(briefing_date, pending_deliveries)
+                self._render_merged_markdown(briefing_date, pending_deliveries, focus=merged_focus)
             )
             reports = [
                 (
@@ -408,6 +410,31 @@ class BriefingService:
         result = BriefingResult.model_validate(structured.content)
         return _audit_generated_result(result, evidence)
 
+    async def _generate_merged_focus(
+        self,
+        pending_deliveries: list[_PendingBriefingDelivery],
+        provider: LLMProvider,
+    ) -> str | None:
+        """Write the one lead sentence after selection, without changing selected items."""
+        if self._notifier is None:
+            return None
+        try:
+            structured = await provider.generate_structured(
+                operation=LLMOperation.GENERATE_BRIEFING,
+                messages=build_merged_focus_messages(
+                    [
+                        (CATEGORY_TITLES[delivery.category], delivery.result)
+                        for delivery in pending_deliveries
+                    ]
+                ),
+                response_schema=MergedBriefingFocus,
+                model_options={},
+            )
+            return MergedBriefingFocus.model_validate(structured.content).focus
+        except Exception:
+            logger.exception("briefing merged focus generation failed; sending title list only")
+            return None
+
     def _fallback_result(
         self,
         category: str,
@@ -455,6 +482,8 @@ class BriefingService:
         self,
         briefing_date: date,
         pending_deliveries: list[_PendingBriefingDelivery],
+        *,
+        focus: str | None,
     ) -> str:
         """Use the compact preview layout for the one group-message delivery."""
         section_labels = {"telecom": ("通信", "📡 通信"), "ai": ("AI", "🤖 AI")}
@@ -468,6 +497,7 @@ class BriefingService:
                 )
                 for delivery in pending_deliveries
             ],
+            focus=focus,
         )
 
     def _write_markdown(self, briefing_date: date, category: str, markdown: str) -> Path:

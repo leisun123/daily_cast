@@ -57,29 +57,27 @@ def render_briefing(
 def render_merged_briefing(
     briefing_date: date,
     categories: Sequence[tuple[str, str, BriefingResult, Sequence[BriefingEvidence]]],
+    *,
+    focus: str | None = None,
 ) -> str:
     """Render the one compact WeCom message from independently selected categories.
 
     Category-level markdown is kept for audit and retry state, but the group bot
     receives this single title-list message.  It deliberately leaves the verbose
     per-item prose out of the chat surface: each headline links to the already
-    verified source page, while the two short category focus phrases form one
-    scan-friendly summary line.
+    verified source page.  The optional focus is written by the editor model
+    after category selection, not mechanically assembled by the renderer.
     """
-    focus_clauses: list[str] = []
     sections: list[tuple[str, list[tuple[BriefingItem, str]]]] = []
-    for category_name, heading, result, evidence in categories:
+    for _category_name, heading, result, evidence in categories:
         resolved_items = _resolved_items(result, evidence)
         if not resolved_items:
             continue
-        focus_clauses.append(_compact_focus(category_name, result, resolved_items))
         sections.append((heading, resolved_items))
 
-    lines = [
-        f"# 【行业观察日报】{briefing_date.month}月{briefing_date.day}日",
-        "",
-        f"> **昨日关注：**{'；'.join(focus_clauses)}",
-    ]
+    lines = [f"# 【行业观察日报】{briefing_date.month}月{briefing_date.day}日"]
+    if focus is not None and focus.strip():
+        lines.extend(["", f"> **昨日关注：**{focus.strip()}"])
     number = 0
     for heading, items in sections:
         section_lines = ["", f"## {heading}"]
@@ -94,24 +92,6 @@ def render_merged_briefing(
             lines.extend(item_lines)
             number += 1
     return "\n".join(lines).rstrip("\n") + "\n"
-
-
-def _compact_focus(
-    category_name: str,
-    result: BriefingResult,
-    items: Sequence[tuple[BriefingItem, str]],
-) -> str:
-    """Choose the co-generated focus, with short existing themes as a safe fallback."""
-    if result.focus.strip():
-        return result.focus.strip()
-    themes: list[str] = []
-    for item, _ in items:
-        theme = item.theme.strip()
-        if theme and theme not in themes:
-            themes.append(theme)
-        if len(themes) == 2:
-            break
-    return "、".join(themes) if themes else f"{category_name}行业动态持续推进"
 
 
 def truncate_markdown(content: str, max_bytes: int = RENDER_BYTE_BUDGET) -> str:

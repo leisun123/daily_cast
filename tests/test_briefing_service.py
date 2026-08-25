@@ -129,6 +129,7 @@ class FakeBriefingLLM:
         self._results_by_marker = results_by_marker
         self.operations: list[LLMOperation] = []
         self.user_prompts: list[str] = []
+        self.focus_prompts: list[str] = []
 
     def generation_config_hash(self, model_options: Mapping[str, object]) -> str:
         """Return a stable identity; briefing never uses the artifact cache."""
@@ -144,8 +145,21 @@ class FakeBriefingLLM:
     ) -> StructuredResult:
         """Return the canned payload keyed by the category title in the user prompt."""
         del response_schema, model_options
-        self.operations.append(operation)
         user_content = messages[-1].content
+        if "最终「昨日关注」" in user_content:
+            self.focus_prompts.append(user_content)
+            focus = self._results_by_marker.get(
+                "最终「昨日关注」", {"focus": "通信与AI行业多项进展同步推进。"}
+            )
+            if isinstance(focus, Exception):
+                raise focus
+            return StructuredResult(
+                content=focus,  # type: ignore[arg-type]
+                model=self.model,
+                usage=LLMUsage(input_tokens=10, output_tokens=20),
+                request_id="fake-briefing-focus",
+            )
+        self.operations.append(operation)
         self.user_prompts.append(user_content)
         for marker, value in self._results_by_marker.items():
             if marker in user_content:
@@ -428,6 +442,9 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
                 [f"https://ai-source.example.test/a{index}" for index in range(1, 6)],
                 "来源 ai-source",
             ),
+            "最终「昨日关注」": {
+                "focus": "运营商将算力投资、6G战略和网络智能化同步推进；国内 AI 侧，国产模型与智能体应用加速。"
+            },
         }
     )
     notifier = RecordingNotifier()
@@ -464,8 +481,12 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
     assert delivered.startswith("# 【行业观察日报】")
     assert "## 📡 通信" in delivered
     assert "## 🤖 AI" in delivered
-    assert "> **昨日关注：**" in delivered
+    assert (
+        "> **昨日关注：**运营商将算力投资、6G战略和网络智能化同步推进；国内 AI 侧，国产模型与智能体应用加速。"
+        in delivered
+    )
     assert "重点动态" not in delivered
+    assert len(llm.focus_prompts) == 1
     assert "发生了什么" not in delivered
     assert "为什么值得看" not in delivered
     assert "https://telecom-source.example.test/" in delivered

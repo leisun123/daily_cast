@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from dailycast.briefing.schemas import MAX_BRIEFING_ITEMS
+from dailycast.briefing.schemas import MAX_BRIEFING_ITEMS, BriefingResult
 from dailycast.briefing.selection import RankedBriefingEvidence
 from dailycast.llm.contracts import LLMMessage
 
@@ -53,15 +53,8 @@ def build_briefing_messages(
             f"排序或补充其他新闻（最多 {MAX_BRIEFING_ITEMS} 条）。\n"
         )
     )
-    focus_style = (
-        "AI 类自然写作，如“国内 AI 侧，阿里加码基础设施，小米强化端侧”；"
-        if category_title == "AI 动态日报"
-        else "通信类自然写作，如“运营商将算力投资、6G 战略和网络智能化同步推进”；"
-    )
     output_requirements = (
         "- overview：用 1-2 句话概括当天该类目的整体动态，不超过 120 字。\n"
-        "- focus：供最终消息的「昨日关注」使用；用 16-42 字的自然短分句概括本类目最重要的"
-        f"2-3 个方向。{focus_style}不要写“通信：”“AI：”等机械标签，不含句号、分号或省略号。\n"
         "- 每条 item 包含：headline（结论在前的一句话标题，不超过 28 字）、"
         "theme（放在标题前的 2-6 字主题标签，如“5G-A 场景”“国产模型”“算力投资”；"
         "必须直接对应这条证据，不得泛化或编造，不含“｜”符号）、"
@@ -88,5 +81,31 @@ def build_briefing_messages(
     )
     return (
         LLMMessage(role="system", content=_SYSTEM_PROMPT),
+        LLMMessage(role="user", content=user_content),
+    )
+
+
+def build_merged_focus_messages(
+    categories: Sequence[tuple[str, BriefingResult]],
+) -> tuple[LLMMessage, ...]:
+    """Ask the editor to write one natural lead from already selected factual items."""
+    blocks: list[str] = []
+    for category_name, result in categories:
+        items = "\n".join(
+            f"- 标题：{item.headline}\n  事实：{item.summary}" for item in result.items
+        )
+        blocks.append(f"【{category_name}】\n{items}")
+    user_content = (
+        "请为最终「昨日关注」写一条自然的中文综合导语。它会直接接在“昨日关注：”之后。\n"
+        "只能依据下列已经入选且核验过的新闻事实；不要重新选题、不要补充外部信息、"
+        "不要逐条罗列。优先抽取通信行业与国内AI侧最值得管理层快速理解的共同趋势，"
+        "写成 35-85 字的自然一句话，可用分号连接两个相关判断。不要使用“通信：”“AI：”"
+        "等字段标签，不要 Markdown，不要省略号。\n\n" + "\n\n".join(blocks)
+    )
+    return (
+        LLMMessage(
+            role="system",
+            content="你是一名中文管理简报编辑，只能依据给定事实写简洁、自然的导语。",
+        ),
         LLMMessage(role="user", content=user_content),
     )
