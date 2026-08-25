@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from math import ceil
 from pathlib import Path
@@ -16,7 +16,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.prompt import build_briefing_messages
-from dailycast.briefing.renderer import render_briefing, truncate_markdown
+from dailycast.briefing.renderer import (
+    render_briefing,
+    render_merged_briefing,
+    truncate_markdown,
+)
 from dailycast.briefing.schemas import (
     MAX_BRIEFING_ITEMS,
     BriefingEvidence,
@@ -82,8 +86,17 @@ class BriefingRunReport:
     categories: tuple[BriefingCategoryReport, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingBriefingDelivery:
+    """A persisted category waiting for the one combined WeCom push."""
+
+    category: str
+    result: BriefingResult
+    evidence: tuple[RankedBriefingEvidence, ...]
+
+
 class BriefingService:
-    """Generate one markdown briefing per category without touching the podcast flow."""
+    """Generate independently selected category briefs and one merged WeCom delivery."""
 
     def __init__(
         self,
@@ -181,11 +194,33 @@ class BriefingService:
         deduplicated = self._news_processor.deduplicate_in_memory(filtered.eligible_article_ids)
         evidence_by_category = self._build_evidence(deduplicated.primary_article_ids, window)
         reports: list[BriefingCategoryReport] = []
+        pending_deliveries: list[_PendingBriefingDelivery] = []
         for category in CATEGORY_TITLES:
             evidence = evidence_by_category.get(category, ())
-            reports.append(
-                await self._run_category(category, briefing_date, evidence, provider, force=force)
+            report, pending_delivery = await self._run_category(
+                category, briefing_date, evidence, provider, force=force
             )
+            reports.append(report)
+            if pending_delivery is not None:
+                pending_deliveries.append(pending_delivery)
+        if pending_deliveries:
+            push_status = await self._push(
+                self._render_merged_markdown(briefing_date, pending_deliveries)
+            )
+            reports = [
+                (
+                    replace(report, push_status=push_status)
+                    if any(delivery.category == report.category for delivery in pending_deliveries)
+                    else report
+                )
+                for report in reports
+            ]
+            if push_status != "failed":
+                for delivery in pending_deliveries:
+                    _atomic_write(
+                        self._marker_path(briefing_date, delivery.category),
+                        f"{self._clock.now().isoformat()}\n",
+                    )
         return BriefingRunReport(date=briefing_date.isoformat(), categories=tuple(reports))
 
     def _collection_window(self, now: datetime) -> CollectionWindow:
@@ -295,64 +330,70 @@ class BriefingService:
         provider: LLMProvider,
         *,
         force: bool,
-    ) -> BriefingCategoryReport:
-        """Generate one category briefing while isolating its failure from siblings."""
+    ) -> tuple[BriefingCategoryReport, _PendingBriefingDelivery | None]:
+        """Generate one category while deferring delivery until every category is ready."""
         marker_path = self._marker_path(briefing_date, category)
         if not force and marker_path.is_file():
             logger.info(
                 "briefing category already completed today",
                 extra={"category": category},
             )
-            return BriefingCategoryReport(
-                category=category, status="skipped", reason=ALREADY_COMPLETED
+            return (
+                BriefingCategoryReport(
+                    category=category, status="skipped", reason=ALREADY_COMPLETED
+                ),
+                None,
             )
         if not evidence:
             logger.info(
                 "briefing category skipped: no eligible articles",
                 extra={"category": category},
             )
-            return BriefingCategoryReport(
-                category=category, status="skipped", reason=NO_ELIGIBLE_ARTICLES
+            return (
+                BriefingCategoryReport(
+                    category=category, status="skipped", reason=NO_ELIGIBLE_ARTICLES
+                ),
+                None,
             )
         try:
-            markdown = await self._generate_markdown(category, briefing_date, evidence, provider)
+            result = await self._generate_result(category, evidence, provider)
         except Exception as error:
             logger.exception(
                 "briefing model generation failed; using evidence fallback",
                 extra={"category": category, "error": str(error)},
             )
-            markdown = self._fallback_markdown(category, briefing_date, evidence)
+            result = self._fallback_result(category, evidence)
+        markdown = self._render_markdown(category, briefing_date, result, evidence)
         try:
             file_path = self._write_markdown(briefing_date, category, markdown)
         except Exception as error:
             logger.exception("briefing category persistence failed", extra={"category": category})
-            return BriefingCategoryReport(
-                category=category,
-                status="failed",
-                article_count=len(evidence),
-                error=str(error),
+            return (
+                BriefingCategoryReport(
+                    category=category,
+                    status="failed",
+                    article_count=len(evidence),
+                    error=str(error),
+                ),
+                None,
             )
-        push_status = await self._push(markdown)
-        if push_status != "failed":
-            # The marker is the per-day completion record; a failed push deliberately
-            # leaves it absent so the next non-force run retries this category.
-            _atomic_write(marker_path, f"{self._clock.now().isoformat()}\n")
-        return BriefingCategoryReport(
-            category=category,
-            status="generated",
-            article_count=len(evidence),
-            file_path=file_path,
-            push_status=push_status,
+        return (
+            BriefingCategoryReport(
+                category=category,
+                status="generated",
+                article_count=len(evidence),
+                file_path=file_path,
+            ),
+            _PendingBriefingDelivery(category=category, result=result, evidence=evidence),
         )
 
-    async def _generate_markdown(
+    async def _generate_result(
         self,
         category: str,
-        briefing_date: date,
         evidence: tuple[RankedBriefingEvidence, ...],
         provider: LLMProvider,
-    ) -> str:
-        """Ask the LLM for prose, then render links deterministically from evidence."""
+    ) -> BriefingResult:
+        """Ask the LLM for prose, then retain only evidence-backed entries."""
         messages = build_briefing_messages(
             CATEGORY_TITLES[category],
             evidence,
@@ -365,17 +406,15 @@ class BriefingService:
             model_options={},
         )
         result = BriefingResult.model_validate(structured.content)
-        result = _audit_generated_result(result, evidence)
-        return self._render_markdown(category, briefing_date, result, evidence)
+        return _audit_generated_result(result, evidence)
 
-    def _fallback_markdown(
+    def _fallback_result(
         self,
         category: str,
-        briefing_date: date,
         evidence: tuple[RankedBriefingEvidence, ...],
-    ) -> str:
-        """Render verified source evidence when no model returns usable structured prose."""
-        result = BriefingResult(
+    ) -> BriefingResult:
+        """Build verified source evidence when no model returns usable structured prose."""
+        return BriefingResult(
             overview=f"今日{CATEGORY_TITLES[category]}重点如下。",
             items=[
                 BriefingItem(
@@ -388,7 +427,6 @@ class BriefingService:
                 for entry in evidence
             ],
         )
-        return self._render_markdown(category, briefing_date, result, evidence)
 
     def _render_markdown(
         self,
@@ -405,6 +443,25 @@ class BriefingService:
                 result,
                 [entry.evidence for entry in evidence],
             )
+        )
+
+    def _render_merged_markdown(
+        self,
+        briefing_date: date,
+        pending_deliveries: list[_PendingBriefingDelivery],
+    ) -> str:
+        """Use the compact preview layout for the one group-message delivery."""
+        section_labels = {"telecom": ("通信", "📡 通信"), "ai": ("AI", "🤖 AI")}
+        return render_merged_briefing(
+            briefing_date,
+            [
+                (
+                    *section_labels[delivery.category],
+                    delivery.result,
+                    [entry.evidence for entry in delivery.evidence],
+                )
+                for delivery in pending_deliveries
+            ],
         )
 
     def _write_markdown(self, briefing_date: date, category: str, markdown: str) -> Path:

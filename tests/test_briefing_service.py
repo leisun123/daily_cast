@@ -356,10 +356,10 @@ def session_factory(app_config_path: Path) -> sessionmaker[Session]:
     return upgraded_session_factory(app_config_path)
 
 
-def test_briefing_run_generates_pushes_and_persists_every_category(
+def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """A full run collects only tagged sources and ships one file per category."""
+    """Category state stays independent while WeCom receives one compact daily message."""
     _seed_source(session_factory, "telecom-source", category="telecom")
     _seed_source(session_factory, "ai-source", category="ai")
     _seed_source(session_factory, "podcast-source", category=None)
@@ -397,7 +397,7 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
     for entry in report.categories:
         assert entry.push_status == "sent"
         assert entry.file_path is not None and entry.file_path.is_file()
-    assert len(notifier.pushed) == 2
+    assert len(notifier.pushed) == 1
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
     assert set(briefings) == {"telecom", "ai"}
     assert "# 通信行业日报" in briefings["telecom"]
@@ -412,9 +412,16 @@ def test_briefing_run_generates_pushes_and_persists_every_category(
         sum(f"https://ai-source.example.test/a{index}" in briefings["ai"] for index in range(1, 6))
         == 5
     )
-    assert notifier.pushed[0].startswith("# 通信行业日报")
-    assert notifier.pushed[1].startswith("# AI 动态日报")
-    assert all(len(markdown.encode("utf-8")) <= RENDER_BYTE_BUDGET for markdown in notifier.pushed)
+    delivered = notifier.pushed[0]
+    assert delivered.startswith("# 【行业观察日报】")
+    assert "## 📡 通信" in delivered
+    assert "## 🤖 AI" in delivered
+    assert "> **今日关注**" in delivered
+    assert "发生了什么" not in delivered
+    assert "为什么值得看" not in delivered
+    assert "https://telecom-source.example.test/" in delivered
+    assert "[第 5 条重要进展](https://ai-source.example.test/a5)" in delivered
+    assert len(delivered.encode("utf-8")) <= RENDER_BYTE_BUDGET
 
 
 def test_briefing_run_trims_overlong_model_prose_and_still_pushes(
@@ -604,7 +611,7 @@ def test_briefing_run_uses_evidence_fallback_when_model_fails(
     assert set(briefings) == {"telecom", "ai"}
     assert "入选原因" in briefings["telecom"]
     assert "https://telecom-source.example.test/t1" in briefings["telecom"]
-    assert len(notifier.pushed) == 2
+    assert len(notifier.pushed) == 1
 
 
 def test_briefing_run_skips_a_category_without_eligible_articles(
@@ -864,7 +871,7 @@ def test_second_non_force_run_skips_completed_categories(
     assert all(entry.status == "skipped" for entry in report.categories)
     assert all(entry.reason == ALREADY_COMPLETED for entry in report.categories)
     assert llm.operations == [LLMOperation.GENERATE_BRIEFING, LLMOperation.GENERATE_BRIEFING]
-    assert len(notifier.pushed) == 2
+    assert len(notifier.pushed) == 1
 
 
 def test_force_run_regenerates_despite_completion_markers(
@@ -883,7 +890,7 @@ def test_force_run_regenerates_despite_completion_markers(
 
     assert all(entry.status == "generated" for entry in report.categories)
     assert len(llm.operations) == 4
-    assert len(notifier.pushed) == 4
+    assert len(notifier.pushed) == 2
 
 
 def test_failed_push_leaves_no_marker_so_the_next_run_retries(
@@ -905,7 +912,7 @@ def test_failed_push_leaves_no_marker_so_the_next_run_retries(
 
     assert all(entry.status == "generated" for entry in second_report.categories)
     assert len(llm.operations) == 4
-    assert notifier.attempts == 4
+    assert notifier.attempts == 2
 
 
 def test_push_test_sends_one_timestamped_markdown_without_running_the_pipeline(

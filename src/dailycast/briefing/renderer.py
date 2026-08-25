@@ -54,6 +54,47 @@ def render_briefing(
     return _render_lines(category_title, briefing_date, result.overview, accepted_blocks)
 
 
+def render_merged_briefing(
+    briefing_date: date,
+    categories: Sequence[tuple[str, str, BriefingResult, Sequence[BriefingEvidence]]],
+) -> str:
+    """Render the one compact WeCom message from independently selected categories.
+
+    Category-level markdown is kept for audit and retry state, but the group bot
+    receives this single title-list message.  It deliberately leaves the verbose
+    per-item prose out of the chat surface: each headline links to the already
+    verified source page, while the two category overviews form the short shared
+    focus summary.
+    """
+    overview_parts: list[str] = []
+    sections: list[tuple[str, list[tuple[BriefingItem, str]]]] = []
+    for category_name, heading, result, evidence in categories:
+        resolved_items = _resolved_items(result, evidence)
+        if not resolved_items:
+            continue
+        overview_parts.append(f"{category_name}：{result.overview.strip()}")
+        sections.append((heading, resolved_items))
+
+    lines = [
+        f"# 【行业观察日报】{briefing_date.month}月{briefing_date.day}日",
+        "",
+        "> **今日关注**",
+        f"> {'；'.join(overview_parts)}",
+    ]
+    number = 0
+    for heading, items in sections:
+        section_lines = ["", f"## {heading}"]
+        if _fits(lines, section_lines):
+            lines.extend(section_lines)
+        for item, url in items:
+            item_lines = [f"{number + 1}. [{item.headline.strip()}]({url})"]
+            if not _fits(lines, item_lines):
+                continue
+            lines.extend(item_lines)
+            number += 1
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 def truncate_markdown(content: str, max_bytes: int = RENDER_BYTE_BUDGET) -> str:
     """Cap markdown at a UTF-8 byte budget without splitting multibyte characters.
 
@@ -105,6 +146,31 @@ def _item_block(number: int, item: BriefingItem, url: str) -> list[str]:
         "",
         f"[{source_name} · 阅读原文 ↗]({url})",
     ]
+
+
+def _resolved_items(
+    result: BriefingResult, evidence: Sequence[BriefingEvidence]
+) -> list[tuple[BriefingItem, str]]:
+    """Keep each item on an original, verified reader-facing URL exactly once."""
+    urls_in_evidence = {entry.source_url for entry in evidence}
+    fallback_url_by_source: dict[str, str] = {}
+    for entry in evidence:
+        fallback_url_by_source.setdefault(entry.source_name, entry.source_url)
+    resolved_items: list[tuple[BriefingItem, str]] = []
+    seen_urls: set[str] = set()
+    for item in result.items:
+        url = _resolve_url(item, urls_in_evidence, fallback_url_by_source)
+        if url is None or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        resolved_items.append((item, url))
+    return resolved_items
+
+
+def _fits(existing_lines: Sequence[str], addition: Sequence[str]) -> bool:
+    """Accept only complete heading or item blocks inside the WeCom byte budget."""
+    candidate = "\n".join([*existing_lines, *addition]).rstrip("\n") + "\n"
+    return len(candidate.encode("utf-8")) <= RENDER_BYTE_BUDGET
 
 
 def _resolve_url(
