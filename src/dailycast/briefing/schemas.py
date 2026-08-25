@@ -52,6 +52,10 @@ class BriefingItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     headline: str = Field(min_length=1, max_length=28)
+    # Kept intentionally short because it appears before the compact WeCom
+    # headline.  The editorial model chooses it from the article evidence; the
+    # renderer never infers a tag from a title or source on its own.
+    theme: str = Field(default="", max_length=12)
     # The preferred lengths are controlled by the generation prompt.  These are
     # deliberately roomy hard limits: a renderer may omit a whole over-budget
     # item, but must never cut a factual sentence in half to make it fit.
@@ -65,6 +69,14 @@ class BriefingItem(BaseModel):
     def trim_headline_for_delivery(cls, value: object) -> object:
         """Keep an overlong headline renderable instead of failing the whole category."""
         return _trim_for_delivery(value, 28)
+
+    @field_validator("theme", mode="before")
+    @classmethod
+    def trim_theme_for_delivery(cls, value: object) -> object:
+        """Keep an optional topic tag compact and free of renderer punctuation."""
+        if not isinstance(value, str):
+            return value
+        return value.strip().strip("｜|")
 
     @field_validator("summary", mode="before")
     @classmethod

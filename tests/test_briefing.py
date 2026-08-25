@@ -11,7 +11,12 @@ import httpx
 import pytest
 
 from dailycast.briefing.prompt import build_briefing_messages
-from dailycast.briefing.renderer import RENDER_BYTE_BUDGET, render_briefing, truncate_markdown
+from dailycast.briefing.renderer import (
+    RENDER_BYTE_BUDGET,
+    render_briefing,
+    render_merged_briefing,
+    truncate_markdown,
+)
 from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
 from dailycast.briefing.selection import RankedBriefingEvidence
 from dailycast.briefing.service import _interleave_by_source, latest_briefing_date
@@ -66,16 +71,57 @@ def _item(
     )
 
 
+def test_merged_renderer_keeps_the_model_selected_theme_before_each_headline() -> None:
+    """The compact group message retains the preview's scan-friendly topic tags."""
+    telecom_url = "https://news.example.test/telecom"
+    ai_url = "https://news.example.test/ai"
+    telecom_item = _item(telecom_url).model_copy(update={"theme": "5G-A 场景"})
+    ai_item = _item(ai_url).model_copy(update={"theme": "国产模型"})
+
+    markdown = render_merged_briefing(
+        date(2026, 8, 25),
+        [
+            (
+                "通信",
+                "📡 通信",
+                BriefingResult(
+                    overview="运营商推进5G-A网络建设。",
+                    items=[telecom_item],
+                ),
+                [_evidence(source_url=telecom_url)],
+            ),
+            (
+                "AI",
+                "🤖 AI",
+                BriefingResult(
+                    overview="国产大模型加快商业化落地。",
+                    items=[ai_item],
+                ),
+                [_evidence(source_url=ai_url)],
+            ),
+        ],
+    )
+
+    assert "1. **5G-A 场景｜** [头条一句话](https://news.example.test/telecom)" in markdown
+    assert "2. **国产模型｜** [头条一句话](https://news.example.test/ai)" in markdown
+
+
 def test_briefing_result_accepts_a_valid_payload() -> None:
     """The LLM output contract keeps the fields the deterministic renderer needs."""
     result = BriefingResult.model_validate(
         {
             "overview": "今天 AI 行业动态平稳。",
-            "items": [_item("https://news.example.test/a").model_dump()],
+            "items": [
+                {
+                    **_item("https://news.example.test/a").model_dump(),
+                    "theme": "国产模型",
+                }
+            ],
         }
     )
 
     assert result.overview == "今天 AI 行业动态平稳。"
+    assert result.items[0].theme == "国产模型"
     assert len(result.items) == 1
 
 

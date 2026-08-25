@@ -87,7 +87,9 @@ def render_merged_briefing(
         if _fits(lines, section_lines):
             lines.extend(section_lines)
         for item, url in items:
-            item_lines = [f"{number + 1}. [{item.headline.strip()}]({url})"]
+            theme = item.theme.strip()
+            theme_prefix = f"**{theme}｜** " if theme else ""
+            item_lines = [f"{number + 1}. {theme_prefix}[{item.headline.strip()}]({url})"]
             if not _fits(lines, item_lines):
                 continue
             lines.extend(item_lines)

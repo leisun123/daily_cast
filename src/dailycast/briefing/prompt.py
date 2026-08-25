@@ -35,9 +35,7 @@ def build_briefing_messages(
             else f"[{index}] 已确定优先级：{item.tier}\n入选原因：{item.reason}\n"
         )
         blocks.append(
-            selection_context
-            +
-            f"标题：{source.title}\n"
+            selection_context + f"标题：{source.title}\n"
             f"来源：{source.source_name}\n"
             f"发布时间：{published}\n"
             f"原文链接：{source.source_url}\n"
@@ -58,6 +56,8 @@ def build_briefing_messages(
     output_requirements = (
         "- overview：用 1-2 句话概括当天该类目的整体动态，不超过 120 字。\n"
         "- 每条 item 包含：headline（结论在前的一句话标题，不超过 28 字）、"
+        "theme（放在标题前的 2-6 字主题标签，如“5G-A 场景”“国产模型”“算力投资”；"
+        "必须直接对应这条证据，不得泛化或编造，不含“｜”符号）、"
         "summary（只说明发生了什么，1-2 句、110-150 字为宜、不超过 160 字；必须说明主体、"
         "动作、关键数字/范围/阶段中的可用信息，以及当前结果或下一步；只能复述证据中的事实）、"
         "why_it_matters（只说明对行业、用户或业务的实际影响，1-2 句、60-75 字为宜、"
