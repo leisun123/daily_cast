@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -15,7 +16,11 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.briefing.prompt import build_briefing_messages, build_merged_focus_messages
+from dailycast.briefing.prompt import (
+    build_briefing_messages,
+    build_briefing_repair_messages,
+    build_merged_focus_messages,
+)
 from dailycast.briefing.renderer import (
     render_briefing,
     render_merged_briefing,
@@ -60,7 +65,9 @@ CATEGORY_TITLES: dict[str, str] = {
 }
 
 ALREADY_COMPLETED = "already_completed"
+ALREADY_PREPARED = "already_prepared"
 NO_ELIGIBLE_ARTICLES = "no_eligible_articles"
+NOT_PREPARED = "not_prepared"
 
 
 class BriefingRunInProgressError(RuntimeError):
@@ -95,6 +102,26 @@ class _PendingBriefingDelivery:
     category: str
     result: BriefingResult
     evidence: tuple[RankedBriefingEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedBriefing:
+    """The atomically persisted combined message waiting for its delivery tick."""
+
+    run_date: date
+    briefing_date: date
+    categories: tuple[str, ...]
+    markdown: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRun:
+    """Preparation output plus whether this invocation should immediately deliver it."""
+
+    run_date: date
+    briefing_date: date
+    report: BriefingRunReport
+    should_deliver: bool
 
 
 class BriefingService:
@@ -164,23 +191,77 @@ class BriefingService:
             raise
 
     async def run(self, *, force: bool = False) -> BriefingRunReport:
-        """Run at most one briefing at a time across manual and scheduled triggers."""
+        """Manually prepare and immediately deliver one briefing in the reserved slot."""
         self._try_reserve_run()
         return await self._run_reserved_body(force=force)
 
-    async def _run_reserved_body(self, *, force: bool) -> BriefingRunReport:
-        """Execute one reserved run and always release the slot afterwards."""
+    async def prepare(self, *, force: bool = False) -> BriefingRunReport:
+        """Collect and persist the report before 08:30, without touching the webhook."""
+        self._try_reserve_run()
         try:
-            return await self._run_once(force=force)
+            return (await self._prepare_once(force=force)).report
         finally:
             self._run_reserved = False
 
-    async def _run_once(self, *, force: bool) -> BriefingRunReport:
-        """Collect, generate, persist, and optionally push every configured category."""
+    async def deliver_prepared(self) -> BriefingRunReport:
+        """Post only the report prepared for this delivery day; never generate at 08:30."""
+        self._try_reserve_run()
+        try:
+            now = self._clock.now()
+            window = self._collection_window(now)
+            run_date = now.astimezone(self._timezone).date()
+            briefing_date = (
+                window.end.astimezone(self._timezone) - timedelta(microseconds=1)
+            ).date()
+            return await self._deliver_prepared_once(run_date, briefing_date)
+        finally:
+            self._run_reserved = False
+
+    async def _run_reserved_body(self, *, force: bool) -> BriefingRunReport:
+        """Execute the manual prepare-and-deliver path and always release the slot."""
+        try:
+            prepared = await self._prepare_once(force=force)
+            if not prepared.should_deliver:
+                return prepared.report
+            return await self._deliver_prepared_once(
+                prepared.run_date,
+                prepared.briefing_date,
+                prepared_report=prepared.report,
+                force=force,
+            )
+        finally:
+            self._run_reserved = False
+
+    async def _prepare_once(self, *, force: bool) -> _PreparedRun:
+        """Collect, generate, and atomically persist the combined message for later delivery."""
         now = self._clock.now()
         window = self._collection_window(now)
         run_date = now.astimezone(self._timezone).date()
         briefing_date = (window.end.astimezone(self._timezone) - timedelta(microseconds=1)).date()
+        existing = None if force else self._load_prepared_briefing(run_date, briefing_date)
+        if existing is not None:
+            all_delivered = all(
+                self._marker_path(run_date, category).is_file() for category in existing.categories
+            )
+            reason = ALREADY_COMPLETED if all_delivered else ALREADY_PREPARED
+            existing_report = BriefingRunReport(
+                date=briefing_date.isoformat(),
+                categories=tuple(
+                    BriefingCategoryReport(
+                        category=category,
+                        status="skipped",
+                        file_path=self._output_dir / f"{briefing_date.isoformat()}-{category}.md",
+                        reason=reason,
+                    )
+                    for category in existing.categories
+                ),
+            )
+            return _PreparedRun(
+                run_date=run_date,
+                briefing_date=briefing_date,
+                report=existing_report,
+                should_deliver=not all_delivered,
+            )
         budget = self._budget_factory()
         provider = _budgeted_provider(self._llm_provider, budget)
         sources = self._briefing_sources()
@@ -200,7 +281,7 @@ class BriefingService:
         pending_deliveries: list[_PendingBriefingDelivery] = []
         for category in CATEGORY_TITLES:
             evidence = evidence_by_category.get(category, ())
-            report, pending_delivery = await self._run_category(
+            category_report, pending_delivery = await self._run_category(
                 category,
                 briefing_date,
                 evidence,
@@ -208,31 +289,96 @@ class BriefingService:
                 marker_date=run_date,
                 force=force,
             )
-            reports.append(report)
+            reports.append(category_report)
             if pending_delivery is not None:
                 pending_deliveries.append(pending_delivery)
         if pending_deliveries:
-            merged_focus = await self._generate_merged_focus(pending_deliveries, provider)
+            merged_focus = (
+                None
+                if any(delivery.result.degraded for delivery in pending_deliveries)
+                else await self._generate_merged_focus(pending_deliveries, provider)
+            )
             merged_markdown = self._render_merged_markdown(
                 briefing_date, pending_deliveries, focus=merged_focus
             )
             self._write_merged_markdown(briefing_date, merged_markdown)
-            push_status = await self._push(merged_markdown)
-            reports = [
-                (
-                    replace(report, push_status=push_status)
-                    if any(delivery.category == report.category for delivery in pending_deliveries)
-                    else report
-                )
-                for report in reports
-            ]
-            if push_status != "failed":
-                for delivery in pending_deliveries:
-                    _atomic_write(
-                        self._marker_path(run_date, delivery.category),
-                        f"{self._clock.now().isoformat()}\n",
+            self._write_prepared_marker(run_date, briefing_date, pending_deliveries)
+        prepared_report = BriefingRunReport(
+            date=briefing_date.isoformat(), categories=tuple(reports)
+        )
+        return _PreparedRun(
+            run_date=run_date,
+            briefing_date=briefing_date,
+            report=prepared_report,
+            should_deliver=bool(pending_deliveries),
+        )
+
+    async def _deliver_prepared_once(
+        self,
+        run_date: date,
+        briefing_date: date,
+        *,
+        prepared_report: BriefingRunReport | None = None,
+        force: bool = False,
+    ) -> BriefingRunReport:
+        """Post a complete saved message and only then mark its categories delivered."""
+        prepared = self._load_prepared_briefing(run_date, briefing_date)
+        if prepared is None:
+            logger.error(
+                "briefing delivery skipped: no complete prepared message",
+                extra={
+                    "run_date": run_date.isoformat(),
+                    "briefing_date": briefing_date.isoformat(),
+                },
+            )
+            return BriefingRunReport(
+                date=briefing_date.isoformat(),
+                categories=tuple(
+                    BriefingCategoryReport(
+                        category=category, status="failed", reason=NOT_PREPARED
                     )
-        return BriefingRunReport(date=briefing_date.isoformat(), categories=tuple(reports))
+                    for category in CATEGORY_TITLES
+                ),
+            )
+        if not force and all(
+            self._marker_path(run_date, category).is_file() for category in prepared.categories
+        ):
+            return BriefingRunReport(
+                date=briefing_date.isoformat(),
+                categories=tuple(
+                    BriefingCategoryReport(
+                        category=category, status="skipped", reason=ALREADY_COMPLETED
+                    )
+                    for category in prepared.categories
+                ),
+            )
+
+        push_status = await self._push(prepared.markdown)
+        if push_status != "failed":
+            for category in prepared.categories:
+                _atomic_write(
+                    self._marker_path(run_date, category),
+                    f"{self._clock.now().isoformat()}\n",
+                )
+
+        if prepared_report is not None:
+            reports = tuple(
+                replace(report, push_status=push_status)
+                if report.category in prepared.categories
+                else report
+                for report in prepared_report.categories
+            )
+        else:
+            reports = tuple(
+                BriefingCategoryReport(
+                    category=category,
+                    status="generated",
+                    file_path=self._output_dir / f"{briefing_date.isoformat()}-{category}.md",
+                    push_status=push_status,
+                )
+                for category in prepared.categories
+            )
+        return BriefingRunReport(date=briefing_date.isoformat(), categories=reports)
 
     def _collection_window(self, now: datetime) -> CollectionWindow:
         """Use the previous Shanghai calendar day, or Friday-Sunday on Monday."""
@@ -289,7 +435,7 @@ class BriefingService:
     def _build_evidence(
         self, eligible_article_ids: tuple[int, ...], window: CollectionWindow
     ) -> dict[str, tuple[RankedBriefingEvidence, ...]]:
-        """Build only in-window candidates, then apply fixed local management ordering."""
+        """Build in-window, publisher-balanced candidates for LLM editorial selection."""
         grouped: dict[str, list[BriefingSelectionCandidate]] = {}
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
@@ -406,6 +552,7 @@ class BriefingService:
         messages = build_briefing_messages(
             CATEGORY_TITLES[category],
             evidence,
+            category=category,
             editorial_selection=self._selection_policy.category(category).editorial_selection,
         )
         structured = await provider.generate_structured(
@@ -416,12 +563,57 @@ class BriefingService:
         )
         result = BriefingResult.model_validate(structured.content)
         policy = self._selection_policy.category(category)
-        return _audit_generated_result(
+        audited = _audit_generated_result(
             result,
             evidence,
-            publisher_cap=policy.max_items_per_publisher,
-            fallback_publisher_cap=policy.fallback_max_items_per_publisher,
+            allow_evidence_backfill=not policy.editorial_selection,
         )
+        # The model, not a deterministic publisher quota or title-length rule,
+        # decides whether a verified candidate belongs in the management brief.
+        # Local auditing is limited to objective link identity and duplicate URL
+        # checks; the prompt asks the editor to consider source diversity.
+        target_count = _target_item_count(evidence)
+        if not policy.editorial_selection or len(audited.items) >= target_count:
+            return audited
+
+        accepted_urls = {item.source_url for item in audited.items}
+        remaining = tuple(
+            entry for entry in evidence if entry.evidence.source_url not in accepted_urls
+        )
+        missing_count = target_count - len(audited.items)
+        repair_structured = await provider.generate_structured(
+            operation=LLMOperation.GENERATE_BRIEFING,
+            messages=build_briefing_repair_messages(
+                CATEGORY_TITLES[category],
+                category,
+                remaining,
+                audited.items,
+                missing_count=missing_count,
+            ),
+            response_schema=BriefingResult,
+            model_options={},
+        )
+        repair = BriefingResult.model_validate(repair_structured.content)
+        combined = BriefingResult(
+            overview=audited.overview,
+            items=[*audited.items, *repair.items],
+        )
+        repaired = _audit_generated_result(
+            combined,
+            evidence,
+            allow_evidence_backfill=False,
+        )
+        if len(repaired.items) < target_count:
+            logger.warning(
+                "briefing editorial selection remained below target after repair; "
+                "retaining the verified LLM-written items",
+                extra={
+                    "category": category,
+                    "selected_count": len(repaired.items),
+                    "target_count": target_count,
+                },
+            )
+        return repaired
 
     async def _generate_merged_focus(
         self,
@@ -451,16 +643,18 @@ class BriefingService:
         category: str,
         evidence: tuple[RankedBriefingEvidence, ...],
     ) -> BriefingResult:
-        """Build verified source evidence when no model returns usable structured prose."""
+        """Build a clearly labelled six-title result when no model remains usable."""
         items: list[BriefingItem] = []
         for entry in evidence:
+            if len(items) == MAX_BRIEFING_ITEMS:
+                break
             title = entry.evidence.title.strip().rstrip("。！？!?")
             try:
                 items.append(
                     BriefingItem(
                         headline=title,
-                        summary=" ".join(entry.evidence.excerpt.split()),
-                        why_it_matters=f"入选原因：{entry.reason}。",
+                        summary="模型服务暂时不可用，未生成新闻摘要。",
+                        why_it_matters="仅保留已核验的原文标题与链接。",
                         source_name=entry.evidence.source_name,
                         source_url=entry.evidence.source_url,
                     )
@@ -468,8 +662,12 @@ class BriefingService:
             except ValueError:
                 _log_incomplete_fallback_title(entry)
         return BriefingResult(
-            overview=f"今日{CATEGORY_TITLES[category]}重点如下。",
+            overview=(
+                f"模型服务暂时不可用，以下为 {CATEGORY_TITLES[category]}"
+                "已核验原文标题降级列表。"
+            ),
             items=items,
+            degraded=True,
         )
 
     def _render_markdown(
@@ -527,6 +725,55 @@ class BriefingService:
         """Locate the per-day per-category completion marker beside the markdown file."""
         return self._output_dir / f"{briefing_date.isoformat()}-{category}.done"
 
+    def _prepared_marker_path(self, run_date: date) -> Path:
+        """Locate the one atomic marker that makes a combined message safe to send."""
+        return self._output_dir / f"{run_date.isoformat()}-merged.prepared.json"
+
+    def _write_prepared_marker(
+        self,
+        run_date: date,
+        briefing_date: date,
+        deliveries: list[_PendingBriefingDelivery],
+    ) -> None:
+        """Record only a fully written combined message as ready for the 08:30 tick."""
+        payload = {
+            "briefing_date": briefing_date.isoformat(),
+            "categories": [delivery.category for delivery in deliveries],
+        }
+        _atomic_write(
+            self._prepared_marker_path(run_date),
+            f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}\n",
+        )
+
+    def _load_prepared_briefing(
+        self, run_date: date, briefing_date: date
+    ) -> _PreparedBriefing | None:
+        """Return one validated prepared message, never a partial or stale file."""
+        marker_path = self._prepared_marker_path(run_date)
+        try:
+            payload = json.loads(marker_path.read_text(encoding="utf-8"))
+            recorded_date = date.fromisoformat(str(payload["briefing_date"]))
+            categories = tuple(str(category) for category in payload["categories"])
+        except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError, KeyError):
+            return None
+        if recorded_date != briefing_date or not categories or any(
+            category not in CATEGORY_TITLES for category in categories
+        ):
+            return None
+        merged_path = self._output_dir / f"{briefing_date.isoformat()}-merged.md"
+        try:
+            markdown = merged_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        if not markdown.strip():
+            return None
+        return _PreparedBriefing(
+            run_date=run_date,
+            briefing_date=briefing_date,
+            categories=categories,
+            markdown=markdown,
+        )
+
     async def push_test(self) -> str:
         """Push one fixed timestamped markdown so the webhook channel can be debugged.
 
@@ -564,29 +811,30 @@ def _audit_generated_result(
     *,
     publisher_cap: int | None = None,
     fallback_publisher_cap: int | None = None,
+    allow_evidence_backfill: bool = True,
 ) -> BriefingResult:
-    """Retain only exact evidence links, then fill any omitted verified candidates.
+    """Retain only exact evidence links and optionally fill omitted fixed-order evidence.
 
     Link reachability and publication date are checked before generation.  This
     final local gate handles a different failure mode: a valid model response
-    can still silently omit several verified candidates or point an item at a
-    publisher-level fallback URL.  Every delivered item must therefore map to
-    one exact evidence URL; when it does not, a compact source-backed entry
-    fills the vacant slot instead.
+    can still point an item at a publisher-level fallback URL. Every delivered
+    item must therefore map to one exact evidence URL. Fixed-order report modes
+    may fill an omitted slot from verified evidence; editorial modes never do,
+    because only the LLM may decide that a candidate is management-relevant.
     """
-    target_count = min(MAX_BRIEFING_ITEMS, len(evidence))
+    target_count = _target_item_count(
+        evidence,
+        publisher_cap=publisher_cap,
+        fallback_publisher_cap=fallback_publisher_cap,
+    )
     if target_count == 0:
         return BriefingResult(overview=result.overview, items=[])
 
-    effective_publisher_cap = publisher_cap
-    if effective_publisher_cap is not None:
-        primary_capacity = _publisher_capacity(evidence, effective_publisher_cap)
-        if primary_capacity < target_count and fallback_publisher_cap is not None:
-            effective_publisher_cap = fallback_publisher_cap
-        target_count = min(
-            target_count,
-            _publisher_capacity(evidence, effective_publisher_cap),
-        )
+    effective_publisher_cap = _effective_publisher_cap(
+        evidence,
+        publisher_cap=publisher_cap,
+        fallback_publisher_cap=fallback_publisher_cap,
+    )
 
     evidence_by_url = {entry.evidence.source_url: entry for entry in evidence}
     accepted: list[BriefingItem] = []
@@ -619,26 +867,27 @@ def _audit_generated_result(
             break
 
     fallback_count = 0
-    for entry in evidence:
-        if len(accepted) == target_count:
-            break
-        if entry.evidence.source_url in seen_urls:
-            continue
-        key = publisher_key(entry.evidence.source_url)
-        if (
-            effective_publisher_cap is not None
-            and publisher_counts.get(key, 0) >= effective_publisher_cap
-        ):
-            continue
-        fallback_item = _fallback_item_from_evidence(entry)
-        if fallback_item is None:
-            continue
-        accepted.append(fallback_item)
-        seen_urls.add(entry.evidence.source_url)
-        publisher_counts[key] = publisher_counts.get(key, 0) + 1
-        fallback_count += 1
+    if allow_evidence_backfill:
+        for entry in evidence:
+            if len(accepted) == target_count:
+                break
+            if entry.evidence.source_url in seen_urls:
+                continue
+            key = publisher_key(entry.evidence.source_url)
+            if (
+                effective_publisher_cap is not None
+                and publisher_counts.get(key, 0) >= effective_publisher_cap
+            ):
+                continue
+            fallback_item = _fallback_item_from_evidence(entry)
+            if fallback_item is None:
+                continue
+            accepted.append(fallback_item)
+            seen_urls.add(entry.evidence.source_url)
+            publisher_counts[key] = publisher_counts.get(key, 0) + 1
+            fallback_count += 1
 
-    if dropped_count or fallback_count:
+    if dropped_count or fallback_count or len(accepted) < target_count:
         logger.warning(
             "briefing output audit adjusted generated items",
             extra={
@@ -646,9 +895,46 @@ def _audit_generated_result(
                 "accepted_item_count": len(accepted),
                 "dropped_item_count": dropped_count,
                 "fallback_item_count": fallback_count,
+                "allow_evidence_backfill": allow_evidence_backfill,
             },
         )
     return BriefingResult(overview=result.overview, items=accepted)
+
+
+def _target_item_count(
+    evidence: tuple[RankedBriefingEvidence, ...],
+    *,
+    publisher_cap: int | None = None,
+    fallback_publisher_cap: int | None = None,
+) -> int:
+    """Return the audited item target shared by initial and repair selection."""
+    target = min(MAX_BRIEFING_ITEMS, len(evidence))
+    effective_cap = _effective_publisher_cap(
+        evidence,
+        publisher_cap=publisher_cap,
+        fallback_publisher_cap=fallback_publisher_cap,
+    )
+    if effective_cap is None:
+        return target
+    return min(target, _publisher_capacity(evidence, effective_cap))
+
+
+def _effective_publisher_cap(
+    evidence: tuple[RankedBriefingEvidence, ...],
+    *,
+    publisher_cap: int | None,
+    fallback_publisher_cap: int | None,
+) -> int | None:
+    """Relax the publisher ceiling only when the primary ceiling cannot fill the target."""
+    if publisher_cap is None:
+        return None
+    target = min(MAX_BRIEFING_ITEMS, len(evidence))
+    if (
+        _publisher_capacity(evidence, publisher_cap) < target
+        and fallback_publisher_cap is not None
+    ):
+        return fallback_publisher_cap
+    return publisher_cap
 
 
 def _publisher_capacity(
@@ -665,6 +951,9 @@ def _publisher_capacity(
 def _fallback_item_from_evidence(entry: RankedBriefingEvidence) -> BriefingItem | None:
     """Render an omitted candidate only when its source title is already complete."""
     title = entry.evidence.title.strip().rstrip("。！？!?")
+    if len(title) > 60:
+        _log_incomplete_fallback_title(entry)
+        return None
     try:
         return BriefingItem(
             headline=title,

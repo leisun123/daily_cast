@@ -414,8 +414,11 @@ def _build_briefing_runtime(
         timezone=settings.app.timezone,
     )
     briefing_scheduler = BriefingScheduler(
-        briefing_service.run,
-        cron_expression=settings.briefing.cron_expression,
+        briefing_service.prepare,
+        briefing_service.deliver_prepared,
+        preparation_cron_expression=settings.briefing.preparation_cron_expression,
+        preparation_retry_cron_expression=settings.briefing.preparation_retry_cron_expression,
+        delivery_cron_expression=settings.briefing.cron_expression,
         timezone=settings.app.timezone,
     )
     try:

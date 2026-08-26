@@ -153,6 +153,20 @@ def test_merged_focus_prompt_keeps_global_ai_scope_with_chinese_sources() -> Non
     assert "国内AI侧" not in prompt
 
 
+def test_telecom_editorial_prompt_orders_local_management_events_before_national_news() -> None:
+    """Regional priority must be explicit to the LLM, not inferred from candidate order."""
+    prompt = build_briefing_messages(
+        "通信行业日报",
+        [_ranked_evidence(_evidence())],
+        category="telecom",
+        editorial_selection=True,
+    )[-1].content
+
+    assert "选择和输出都必须按地域落地价值排序" in prompt
+    assert "先常州，再江苏省级，再其他地级市，最后才是全国性动态" in prompt
+    assert "不得排在更具体的地方动态之前" in prompt
+
+
 def test_merged_renderer_keeps_six_items_per_category_in_one_message() -> None:
     """The final WeCom artifact carries the agreed 6+6 stories without splitting."""
     telecom_urls = [f"https://telecom.example.test/{index}" for index in range(1, 7)]
@@ -259,16 +273,19 @@ def test_briefing_item_rejects_model_supplied_ellipsis() -> None:
         _item("https://news.example.test/a", summary="公司发布新产品，后续细节仍待确认…")
 
 
-def test_briefing_item_rejects_an_incomplete_headline() -> None:
-    """A compact list must never shorten a headline into an ellipsis."""
-    with pytest.raises(ValueError, match="headline"):
-        BriefingItem(
-            headline="半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司并计划进入更多城市",
-            summary="原文已完成事实核验。",
-            why_it_matters="它反映机器人行业融资进展。",
-            source_name="量子位",
-            source_url="https://news.example.test/a",
-        )
+def test_briefing_item_preserves_a_complete_long_source_title_for_degraded_delivery() -> None:
+    """A degraded title list preserves the verified source title instead of truncating it."""
+    headline = "半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司并计划进入更多城市"
+
+    item = BriefingItem(
+        headline=headline,
+        summary="原文已完成事实核验。",
+        why_it_matters="它反映机器人行业融资进展。",
+        source_name="量子位",
+        source_url="https://news.example.test/a",
+    )
+
+    assert item.headline == headline
 
 
 def test_briefing_item_allows_a_complete_sentence_headline_longer_than_28_chars() -> None:

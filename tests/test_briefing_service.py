@@ -22,6 +22,7 @@ from dailycast.briefing.selection import (
 )
 from dailycast.briefing.service import (
     ALREADY_COMPLETED,
+    ALREADY_PREPARED,
     BriefingRunInProgressError,
     BriefingService,
     _audit_generated_result,
@@ -172,6 +173,38 @@ class FakeBriefingLLM:
                     request_id="fake-briefing-1",
                 )
         raise AssertionError("no fake LLM result matched the briefing prompt")
+
+
+class SequencedBriefingLLM(FakeBriefingLLM):
+    """Return successive category responses so selection repair is exercised end to end."""
+
+    def __init__(self, category_marker: str, payloads: Sequence[dict[str, object]]) -> None:
+        super().__init__({})
+        self._category_marker = category_marker
+        self._payloads = list(payloads)
+
+    async def generate_structured(
+        self,
+        operation: LLMOperation,
+        messages: Sequence[LLMMessage],
+        response_schema: type[BaseModel],
+        model_options: Mapping[str, object],
+    ) -> StructuredResult:
+        user_content = messages[-1].content
+        if "最终「昨日关注」" in user_content:
+            return await super().generate_structured(
+                operation, messages, response_schema, model_options
+            )
+        self.operations.append(operation)
+        self.user_prompts.append(user_content)
+        if self._category_marker not in user_content or not self._payloads:
+            raise AssertionError("no sequenced LLM result matched the briefing prompt")
+        return StructuredResult(
+            content=self._payloads.pop(0),
+            model=self.model,
+            usage=LLMUsage(input_tokens=10, output_tokens=20),
+            request_id="fake-briefing-sequence",
+        )
 
 
 class RecordingNotifier(WebhookNotifier):
@@ -325,6 +358,40 @@ def test_generated_briefing_audit_fills_omitted_verified_evidence() -> None:
     assert all("…" not in item.summary for item in audited.items)
 
 
+def test_editorial_audit_does_not_select_an_omitted_candidate() -> None:
+    """Only the LLM may decide an editorial candidate is management-relevant."""
+    published_at = datetime(2026, 8, 24, 8, tzinfo=UTC)
+    evidence = tuple(
+        RankedBriefingEvidence(
+            evidence=BriefingEvidence(
+                title=f"已核验候选 {index}",
+                source_name=f"来源 {index}",
+                published_at=published_at,
+                excerpt=f"第 {index} 个已核验候选。",
+                source_url=f"https://source-{index}.example.test/article",
+            ),
+            tier="LLM",
+            specificity=0,
+            reason="交由编辑模型判断管理价值",
+            rule_id="editorial-llm",
+            source_id=f"source-{index}",
+            source_priority=100,
+            discovered_at=published_at,
+            article_id=index,
+        )
+        for index in range(1, 4)
+    )
+    result = BriefingResult.model_validate(
+        _llm_payload("https://source-1.example.test/article", "来源 1")
+    )
+
+    audited = _audit_generated_result(result, evidence, allow_evidence_backfill=False)
+
+    assert [item.source_url for item in audited.items] == [
+        "https://source-1.example.test/article"
+    ]
+
+
 def test_generated_briefing_audit_limits_one_ai_publisher_and_fills_alternatives() -> None:
     """A model cannot turn a balanced AI pool into a half-single-outlet final list."""
     published_at = datetime(2026, 8, 25, 8, tzinfo=UTC)
@@ -379,10 +446,10 @@ def test_generated_briefing_audit_drops_an_omitted_long_raw_title() -> None:
                 title=(
                     f"中国移动网络建设进展 {index}"
                     if index < 5
-                    else (
-                        "半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司"
-                        "并计划进入更多城市"
-                    )
+                        else (
+                            "半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司"
+                            "并计划进入更多城市，后续还将拓展海外市场、教育场景和更多家庭用户"
+                        )
                 ),
                 source_name=f"来源 {index}",
                 published_at=published_at,
@@ -419,6 +486,49 @@ def test_generated_briefing_audit_drops_an_omitted_long_raw_title() -> None:
     assert len(audited.items) == 4
     assert all(item.source_url != "https://source-5.example.test/article" for item in audited.items)
     assert all("…" not in item.headline for item in audited.items)
+
+
+def test_editorial_audit_keeps_a_complete_model_headline_over_60_characters() -> None:
+    """A local aesthetic cap must not overrule the editor's verified selection."""
+    published_at = datetime(2026, 8, 24, 8, tzinfo=UTC)
+    evidence = (
+        RankedBriefingEvidence(
+            evidence=BriefingEvidence(
+                title="已核验原文标题",
+                source_name="来源 1",
+                published_at=published_at,
+                excerpt="已核验原文事实。",
+                source_url="https://source-1.example.test/article",
+            ),
+            tier="LLM",
+            specificity=0,
+            reason="交由编辑模型判断",
+            rule_id="editorial-llm",
+            source_id="source-1",
+            source_priority=100,
+            discovered_at=published_at,
+            article_id=1,
+        ),
+    )
+    result = BriefingResult(
+        overview="今日重点。",
+        items=[
+            BriefingItem(
+                headline=(
+                    "模型生成了一个超过六十个汉字并且不适合企业微信紧凑标题列表展示的完整长标题，"
+                    "还加入了多余的背景、过程、数字与结论来刻意超过上限"
+                ),
+                summary="模型生成了完整摘要。",
+                why_it_matters="它反映行业进展。",
+                source_name="来源 1",
+                source_url="https://source-1.example.test/article",
+            )
+        ],
+    )
+
+    audited = _audit_generated_result(result, evidence, allow_evidence_backfill=False)
+
+    assert audited.items == result.items
 
 
 def _build_service(
@@ -522,7 +632,7 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
             f"https://telecom-source.example.test/t{index}" in briefings["telecom"]
             for index in range(1, 6)
         )
-        == 2
+            == 5
     )
     assert (
         sum(f"https://ai-source.example.test/a{index}" in briefings["ai"] for index in range(1, 6))
@@ -578,10 +688,10 @@ def test_briefing_run_trims_overlong_model_prose_and_still_pushes(
     assert len(notifier.pushed[0].encode("utf-8")) <= RENDER_BYTE_BUDGET
 
 
-def test_briefing_run_passes_fixed_policy_order_to_generation(
+def test_telecom_briefing_passes_the_verified_candidate_pool_to_generation(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """The briefing model receives the locally decided P0-before-P3 evidence order."""
+    """The LLM receives candidates and decides their semantic management relevance."""
     _seed_source(session_factory, "policy-source", category="telecom", priority=100)
     _seed_source(session_factory, "mobile-source", category="telecom", priority=10)
     collector = FakeRSSCollector(
@@ -626,9 +736,11 @@ def test_briefing_run_passes_fixed_policy_order_to_generation(
         "ai": "skipped",
     }
     telecom_prompt = llm.user_prompts[0]
-    assert telecom_prompt.index("中国移动启动基站集采") < telecom_prompt.index("工信部发布通信规划")
-    assert "已确定优先级：P0" in telecom_prompt
-    assert "已确定优先级：P3" in telecom_prompt
+    assert "中国移动启动基站集采" in telecom_prompt
+    assert "工信部发布通信规划" in telecom_prompt
+    assert "候选文章（已通过时间、正文与原文链接核验）" in telecom_prompt
+    assert "来源配置或关键词命中" in telecom_prompt
+    assert "已确定优先级" not in telecom_prompt
 
 
 def test_ai_briefing_delegates_candidate_selection_to_the_llm(
@@ -732,9 +844,125 @@ def test_briefing_run_uses_evidence_fallback_when_model_fails(
     assert by_category["ai"].push_status == "sent"
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
     assert set(briefings) == {"telecom", "ai", "merged"}
-    assert "入选原因" in briefings["telecom"]
+    assert "已核验原文标题降级列表" in briefings["telecom"]
+    assert "未生成新闻摘要" in briefings["telecom"]
+    assert "入选原因" not in briefings["telecom"]
     assert "https://telecom-source.example.test/t1" in briefings["telecom"]
     assert len(notifier.pushed) == 1
+
+
+def test_model_outage_sends_six_explicitly_degraded_verified_titles(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Removing the six-item cap or degraded label would make a model outage unsafe."""
+    candidates_by_source: dict[str, list[ArticleCandidate]] = {}
+    for index in range(1, 9):
+        source_id = f"telecom-{index}"
+        _seed_source(session_factory, source_id, category="telecom")
+        candidates_by_source[source_id] = [
+            _candidate(
+                source_id,
+                f"item-{index}",
+                title=(
+                    "第8家运营商完成覆盖多个地市的无线网络建设并公布下一阶段投资与扩容计划"
+                    if index == 8
+                    else f"第{index}家运营商完成网络建设并公布下一步计划"
+                ),
+            )
+        ]
+    notifier = RecordingNotifier()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector(candidates_by_source),
+        llm=FakeBriefingLLM({"通信行业日报": RuntimeError("llm unavailable")}),
+        notifier=notifier,
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(entry for entry in report.categories if entry.category == "telecom")
+    assert telecom.status == "generated"
+    assert telecom.push_status == "sent"
+    assert len(notifier.pushed) == 1
+    delivered = notifier.pushed[0]
+    assert "📡 通信（降级版）" in delivered
+    assert delivered.count("https://telecom-") == 6
+    assert "第8家运营商完成覆盖多个地市的无线网络建设并公布下一阶段投资与扩容计划" in delivered
+    assert "入选原因" not in delivered
+
+
+def test_editorial_generation_repairs_invalid_items_with_a_second_llm_selection(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Dropping invalid links must trigger LLM repair instead of shrinking the six-item brief."""
+    candidates_by_source: dict[str, list[ArticleCandidate]] = {}
+    urls: list[str] = []
+    for index in range(1, 7):
+        source_id = f"telecom-repair-{index}"
+        _seed_source(session_factory, source_id, category="telecom")
+        candidates_by_source[source_id] = [_candidate(source_id, f"item-{index}")]
+        urls.append(f"https://{source_id}.example.test/item-{index}")
+    initial = _llm_payloads([*urls[:4], "https://fabricated.example.test/item"], "初选来源")
+    repair = _llm_payloads(urls[4:], "补选来源")
+    llm = SequencedBriefingLLM("通信行业日报", [initial, repair])
+    notifier = RecordingNotifier()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector(candidates_by_source),
+        llm=llm,
+        notifier=notifier,
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(entry for entry in report.categories if entry.category == "telecom")
+    assert telecom.status == "generated"
+    assert telecom.push_status == "sent"
+    delivered = notifier.pushed[0]
+    assert all(url in delivered for url in urls)
+    assert "fabricated.example.test" not in delivered
+    assert len(llm.user_prompts) == 2
+    assert "还缺 2 条" in llm.user_prompts[1]
+
+
+def test_editorial_generation_keeps_valid_partial_selection_when_repair_cannot_fill_six(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A short LLM-selected brief must not degrade into unedited source titles."""
+    candidates_by_source: dict[str, list[ArticleCandidate]] = {}
+    urls: list[str] = []
+    for index in range(1, 7):
+        source_id = f"telecom-partial-{index}"
+        _seed_source(session_factory, source_id, category="telecom")
+        candidates_by_source[source_id] = [_candidate(source_id, f"item-{index}")]
+        urls.append(f"https://{source_id}.example.test/item-{index}")
+    llm = SequencedBriefingLLM(
+        "通信行业日报",
+        [
+            _llm_payloads(urls[:4], "初选来源"),
+            _llm_payload("https://fabricated.example.test/item", "补选来源"),
+        ],
+    )
+    notifier = RecordingNotifier()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector(candidates_by_source),
+        llm=llm,
+        notifier=notifier,
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(entry for entry in report.categories if entry.category == "telecom")
+    assert telecom.status == "generated"
+    delivered = notifier.pushed[0]
+    assert "📡 通信（降级版）" not in delivered
+    assert all(url in delivered for url in urls[:4])
+    assert all(url not in delivered for url in urls[4:])
+    assert "fabricated.example.test" not in delivered
 
 
 def test_briefing_run_skips_a_category_without_eligible_articles(
@@ -1036,6 +1264,35 @@ def test_second_non_force_run_skips_completed_categories(
     assert len(notifier.pushed) == 1
 
 
+def test_prepared_delivery_pushes_saved_markdown_without_recollecting_or_regenerating(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The delivery tick only sends the report prepared before 08:30."""
+    collector, llm = _two_category_setup(session_factory)
+    notifier = RecordingNotifier()
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory, output_dir, collector=collector, llm=llm, notifier=notifier
+    )
+
+    prepared = asyncio.run(service.prepare())
+    collected_before_delivery = list(collector.collected_source_ids)
+    generated_before_delivery = list(llm.operations)
+    retry = asyncio.run(service.prepare())
+
+    delivered = asyncio.run(service.deliver_prepared())
+
+    assert all(entry.status == "generated" for entry in prepared.categories)
+    assert all(entry.reason == ALREADY_PREPARED for entry in retry.categories)
+    assert notifier.pushed == [
+        read_briefings_for_date(output_dir, date.fromisoformat(prepared.date))["merged"]
+    ]
+    assert collector.collected_source_ids == collected_before_delivery
+    assert llm.operations == generated_before_delivery
+    assert all(entry.push_status == "sent" for entry in delivered.categories)
+    assert len(list(output_dir.glob("*.done"))) == 2
+
+
 def test_force_run_regenerates_despite_completion_markers(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
@@ -1055,10 +1312,10 @@ def test_force_run_regenerates_despite_completion_markers(
     assert len(notifier.pushed) == 2
 
 
-def test_failed_push_leaves_no_marker_so_the_next_run_retries(
+def test_failed_push_retries_the_prepared_message_without_regenerating(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """A push failure must not mark the category done; the next run regenerates it."""
+    """A push failure keeps the saved report ready for another delivery attempt."""
     collector, llm = _two_category_setup(session_factory)
     notifier = FailingNotifier()
     output_dir = tmp_path / "briefings"
@@ -1072,8 +1329,9 @@ def test_failed_push_leaves_no_marker_so_the_next_run_retries(
 
     second_report = asyncio.run(service.run())
 
-    assert all(entry.status == "generated" for entry in second_report.categories)
-    assert len(llm.operations) == 4
+    assert all(entry.status == "skipped" for entry in second_report.categories)
+    assert all(entry.reason == ALREADY_PREPARED for entry in second_report.categories)
+    assert len(llm.operations) == 2
     assert notifier.attempts == 2
 
 

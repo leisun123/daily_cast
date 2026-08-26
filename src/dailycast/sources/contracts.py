@@ -39,7 +39,12 @@ class ArticleCandidate:
 
 @dataclass(frozen=True, slots=True)
 class CollectionWindow:
-    """Inclusive time window applied to entries that provide a publication timestamp."""
+    """Half-open time window applied to entries that provide a publication timestamp.
+
+    A daily briefing spans ``[start, end)``.  Treating ``end`` as exclusive
+    prevents an article published exactly at the next Shanghai midnight from
+    leaking into the previous day's briefing.
+    """
 
     start: datetime
     end: datetime
@@ -48,7 +53,7 @@ class CollectionWindow:
         """Retain undated entries while excluding dated entries outside the requested period."""
         if published_at is None:
             return True
-        return self._as_utc(self.start) <= self._as_utc(published_at) <= self._as_utc(self.end)
+        return self._as_utc(self.start) <= self._as_utc(published_at) < self._as_utc(self.end)
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:

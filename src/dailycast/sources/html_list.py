@@ -46,10 +46,10 @@ _VOID_TAGS = frozenset(
 class _HTMLListOptions:
     """Per-source list discovery boundaries persisted in the Source config JSON."""
 
-    include_title_keywords: tuple[str, ...]
     article_url_path_prefixes: tuple[str, ...]
     timezone: ZoneInfo
     allowed_host: str
+    include_title_keywords: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -115,7 +115,10 @@ class HTMLListCollector:
             if len(candidates) >= (source.max_items_per_run or 50):
                 break
             title = _text_content(anchor)
-            if not _matches_keywords(title, options.include_title_keywords):
+            if (
+                options.include_title_keywords
+                and not _matches_keywords(title, options.include_title_keywords)
+            ):
                 continue
             candidate, entry_error = _to_candidate(source, options, anchor, response.final_url)
             if entry_error is not None:
@@ -168,14 +171,12 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
     """Validate the small fixed option set without evaluating arbitrary source configuration."""
     try:
         raw = json.loads(source.config_json)
-        keywords = raw["include_title_keywords"]
+        keywords = raw.get("include_title_keywords", [])
         path_prefixes = raw.get("article_url_path_prefixes", [])
         timezone_name = raw.get("timezone", "UTC")
         if not isinstance(keywords, list) or not all(isinstance(value, str) for value in keywords):
             raise ValueError("include_title_keywords must be a list of strings")
         cleaned_keywords = tuple(value.strip() for value in keywords if value.strip())
-        if not cleaned_keywords:
-            raise ValueError("include_title_keywords must not be empty")
         if not isinstance(path_prefixes, list) or not all(
             isinstance(value, str) for value in path_prefixes
         ):
@@ -200,7 +201,7 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, ZoneInfoNotFoundError):
         return None, SourceError(
             code="INVALID_HTML_LIST_CONFIG",
-            summary="html_list source requires keywords and a valid timezone",
+            summary="html_list source requires an optional title filter and a valid timezone",
             retryable=False,
         )
 

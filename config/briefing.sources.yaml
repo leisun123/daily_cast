@@ -6,13 +6,13 @@
 #
 # Verified 2026-08 (DailyCast UA):
 # - C114 sub-feeds are gb2312 RSS 2.0; feedparser handles the declared encoding.
-# - miit.gov.cn returns a dated, UTF-8 HTML news list. Its explicit title
-#   keywords retain information-communications policy, regulation, and
-#   operational signals rather than general industrial news.
+# - miit.gov.cn returns a dated, UTF-8 HTML news list. Its dated, same-host
+#   announcements enter the candidate pool; the LLM distinguishes
+#   information-communications policy from general industrial news.
 # - `rsshub://36kr/hot-list` is the documented RSSHub route for 36Kr's
 #   24-hour hot list. DailyCast resolves it only through the deployment's
-#   `briefing.rsshub_base_url`, then filters titles before persistence so broad
-#   commercial stories do not enter the AI briefing.
+#   `briefing.rsshub_base_url`; broad stories remain candidates for the LLM to
+#   judge instead of being discarded by local title matching.
 # - C114 operators/equipment sub-feeds are used for the telecom brief; the
 #   broader C114 top-news feed is deliberately excluded because its rolling
 #   entries can be stale or too general for a daily operational briefing.
@@ -24,12 +24,12 @@
 #   window). Its entries link to the original article ("阅读原文"); candidates
 #   whose original needs VPN are rejected by the briefing reachability rule.
 # - 量子位 (qbitai.com/feed) verified 2026-08-24 without proxy: it returns
-#   zh-CN RSS 2.0 directly and is AI-vertical, so it needs no keyword filter.
+#   zh-CN RSS 2.0 directly and remains a candidate for future source expansion.
 #   IT之家's same RSS URL already belongs to the default `ithome-rss` source;
 #   it must not be declared again under a briefing-only identity.
 # - 雷峰网 (leiphone.com/feed) verified 2026-08-24 without proxy: full-text
-#   zh-CN RSS with strong AI/robotics coverage; title keywords filter out its
-#   consumer and capital-market stories.
+#   zh-CN RSS with strong AI/robotics coverage; the LLM, rather than title
+#   keywords, rejects consumer and capital-market stories when they lack value.
 # - 机器之心 (jiqizhixin.com) has retired its public RSS and gates its data
 #   API behind a paid "数据服务" offering (/rss 302s to a marketing page,
 #   API returns 403/404). Do not scrape it. Its articles stay reachable via
@@ -109,16 +109,6 @@ sources:
     max_items_per_run: 20
     config:
       briefing_category: telecom
-      include_title_keywords:
-        - 通信业
-        - 通信管理局
-        - 电信
-        - 5G
-        - 6G
-        - 卫星互联网
-        - 频谱
-        - 电信服务
-        - 互联网
       timezone: Asia/Shanghai
   - id: zte-official-news
     name: 中兴通讯新闻中心
@@ -130,18 +120,6 @@ sources:
     max_items_per_run: 20
     config:
       briefing_category: telecom
-      include_title_keywords:
-        - 5G
-        - 6G
-        - 网络
-        - 算力
-        - 基站
-        - 通信
-        - 光
-        - AI
-        - 人工智能
-        - 运营商
-        - 合作
       article_url_path_prefixes:
         - /content/zte-site/www-zte-com-cn/china/about/news/
       timezone: Asia/Shanghai
@@ -175,20 +153,6 @@ sources:
     max_items_per_run: 60
     config:
       briefing_category: ai
-      include_title_keywords:
-        - 人工智能
-        - AI
-        - 大模型
-        - 模型
-        - 智能体
-        - Agent
-        - 算力
-        - 芯片
-        - GPU
-        - 机器人
-        - 具身智能
-        - 自动驾驶
-        - 开源
   - id: kr36-hot-list
     name: 36氪 24小时热榜
     kind: rss
@@ -199,15 +163,3 @@ sources:
     max_items_per_run: 100
     config:
       briefing_category: ai
-      include_title_keywords:
-        - 人工智能
-        - AI
-        - 大模型
-        - 模型
-        - 智能体
-        - Agent
-        - 算力
-        - 芯片
-        - GPU
-        - 机器人
-        - 自动驾驶

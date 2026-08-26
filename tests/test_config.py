@@ -155,6 +155,9 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.llm.response_format == "json_object"
     assert settings.llm.timeout_seconds == 120
     assert settings.llm.budget.max_input_tokens == 100_000
+    assert settings.briefing.preparation_cron_expression == "55 7 * * mon-fri"
+    assert settings.briefing.preparation_retry_cron_expression == "15 8 * * mon-fri"
+    assert settings.briefing.cron_expression == "30 8 * * mon-fri"
     # The briefing budget work reintroduced explicit per-provider and per-run
     # output ceilings so BudgetReservingLLMProvider can reserve per attempt.
     assert settings.llm.max_output_tokens == 2000

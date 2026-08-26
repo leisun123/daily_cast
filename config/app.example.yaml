@@ -159,6 +159,9 @@ briefing:
   enabled: false
   sources_config_path: ./config/briefing.sources.yaml
   selection_policy_path: ./config/briefing.selection.yaml
+  # Prepare before the 08:30 delivery tick; the retry does nothing when ready.
+  preparation_cron_expression: "55 7 * * mon-fri"
+  preparation_retry_cron_expression: "15 8 * * mon-fri"
   cron_expression: "30 8 * * mon-fri"
   window_hours: 24
   max_items_per_category: 6

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from apscheduler.triggers.cron import CronTrigger
 
+from dailycast.briefing.scheduler import BriefingScheduler
+from dailycast.briefing.service import BriefingRunReport
 from dailycast.db.models import TaskType, TriggerType
 from dailycast.pipeline.contracts import TaskCommand
 from dailycast.scheduler.service import SchedulerService
@@ -74,6 +78,38 @@ def test_scheduler_isolates_submission_failure() -> None:
     healthy_scheduler.trigger_submission()
 
     assert len(healthy_submissions.commands) == 1
+
+
+def test_briefing_scheduler_prepares_before_the_delivery_tick() -> None:
+    """The 08:30 tick sends a ready briefing rather than starting generation."""
+    actions: list[str] = []
+    report = BriefingRunReport(date="2026-08-25", categories=())
+
+    async def prepare() -> BriefingRunReport:
+        actions.append("prepare")
+        return report
+
+    async def deliver() -> BriefingRunReport:
+        actions.append("deliver")
+        return report
+
+    scheduler = BriefingScheduler(
+        prepare,
+        deliver,
+        preparation_cron_expression="55 7 * * mon-fri",
+        preparation_retry_cron_expression="15 8 * * mon-fri",
+        delivery_cron_expression="30 8 * * mon-fri",
+        timezone="Asia/Shanghai",
+    )
+
+    asyncio.run(scheduler.trigger_prepare())
+    asyncio.run(scheduler.trigger_delivery())
+
+    assert actions == ["prepare", "deliver"]
+    assert str(scheduler.build_preparation_trigger().fields[5]) == "7"
+    assert str(scheduler.build_preparation_trigger().fields[6]) == "55"
+    assert str(scheduler.build_delivery_trigger().fields[5]) == "8"
+    assert str(scheduler.build_delivery_trigger().fields[6]) == "30"
 
 
 def _scheduled_command() -> TaskCommand:

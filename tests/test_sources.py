@@ -68,6 +68,17 @@ from dailycast.sources.service import (
 from dailycast.tts.service import AudioGenerationResult
 
 
+def test_collection_window_excludes_the_next_day_midnight() -> None:
+    """A daily briefing must not include an item at the following day's 00:00."""
+    window = CollectionWindow(
+        start=datetime(2026, 8, 24, 16, tzinfo=UTC),
+        end=datetime(2026, 8, 25, 16, tzinfo=UTC),
+    )
+
+    assert window.includes(datetime(2026, 8, 25, 15, 59, 59, tzinfo=UTC))
+    assert not window.includes(datetime(2026, 8, 25, 16, tzinfo=UTC))
+
+
 class FakePublicationDispatcher:
     """Test double kept unused when review-gated auto publication is disabled for the daily flow."""
 
@@ -321,6 +332,14 @@ def test_checked_in_research_queries_keep_ai_global_but_sources_chinese() -> Non
     assert "中国移动" not in ai_query
     assert "中国电信" not in ai_query
     assert "中国联通" not in ai_query
+
+
+def test_briefing_sources_do_not_apply_title_keyword_gates_before_editorial_review() -> None:
+    """Only objective freshness/link checks may discard a briefing candidate locally."""
+    project_root = Path(__file__).resolve().parents[1]
+    sources = _load_source_configuration(project_root / "config" / "briefing.sources.yaml")
+
+    assert all("include_title_keywords" not in source.config for source in sources.sources)
 
 
 def test_briefing_sources_do_not_redeclare_a_default_seed_url_under_a_new_id() -> None:
@@ -650,8 +669,7 @@ def test_html_list_collector_can_restrict_candidates_to_article_path_prefixes() 
                     "normalized_entry_url": "https://www.zte.com.cn/china/about/news.html",
                     "language": "zh-CN",
                     "config_json": (
-                        '{"include_title_keywords":["5G","网络"],'
-                        '"article_url_path_prefixes":["/content/zte-site/"],'
+                        '{"article_url_path_prefixes":["/content/zte-site/"],'
                         '"timezone":"Asia/Shanghai"}'
                     ),
                 }

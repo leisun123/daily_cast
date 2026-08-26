@@ -44,7 +44,10 @@ class BriefingItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    headline: str = Field(min_length=1, max_length=36)
+    # Normal editorial headlines remain capped at 60 characters by the prompt
+    # and final audit. The wider schema lets an explicitly degraded result keep
+    # a verified source title verbatim instead of cutting the sentence.
+    headline: str = Field(min_length=1, max_length=200)
     # Kept intentionally short because it appears before the compact WeCom
     # headline.  The editorial model chooses it from the article evidence; the
     # renderer never infers a tag from a title or source on its own.
@@ -64,8 +67,8 @@ class BriefingItem(BaseModel):
         if not isinstance(value, str):
             return value
         headline = value.strip()
-        if "…" in headline or "..." in headline or len(headline) > 36:
-            raise ValueError("headline must be a complete sentence of at most 36 characters")
+        if "…" in headline or "..." in headline:
+            raise ValueError("headline must be complete and must not contain an ellipsis")
         return headline
 
     @field_validator("theme", mode="before")
@@ -104,6 +107,7 @@ class BriefingResult(BaseModel):
 
     overview: str = Field(min_length=1, max_length=600)
     items: list[BriefingItem] = Field(max_length=MAX_BRIEFING_ITEMS)
+    degraded: bool = False
 
     @field_validator("overview", mode="before")
     @classmethod

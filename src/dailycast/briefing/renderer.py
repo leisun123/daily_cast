@@ -73,7 +73,8 @@ def render_merged_briefing(
         resolved_items = _resolved_items(result, evidence)
         if not resolved_items:
             continue
-        sections.append((heading, resolved_items))
+        display_heading = f"{heading}（降级版）" if result.degraded else heading
+        sections.append((display_heading, resolved_items))
 
     lines = [f"# 【行业观察日报】{briefing_date.month}月{briefing_date.day}日"]
     if focus is not None and focus.strip():

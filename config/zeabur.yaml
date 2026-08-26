@@ -34,15 +34,17 @@ llm:
 editorial:
   enforce_quality_gate: false
 
-# The telecom + AI text briefing starts at 08:25 Asia/Shanghai on workdays so
-# the verified message can reach WeCom around 08:30. The
-# webhook URL is a Zeabur password variable; the service refuses to start
-# without it.
+# The telecom + AI text briefing is fully prepared before 08:30 Asia/Shanghai.
+# The 08:30 tick only posts the atomically saved message; it never starts
+# collection, link verification, or model generation. The webhook URL is a
+# Zeabur password variable; the service refuses to start without it.
 briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
   selection_policy_path: ./config/briefing.selection.yaml
-  cron_expression: "25 8 * * mon-fri"
+  preparation_cron_expression: "55 7 * * mon-fri"
+  preparation_retry_cron_expression: "15 8 * * mon-fri"
+  cron_expression: "30 8 * * mon-fri"
   max_items_per_category: 6
   # Inject DAILYCAST_BRIEFING__RSSHUB_BASE_URL as a Zeabur variable to enable
   # configured rsshub:// sources. Use a controlled or self-hosted instance.
