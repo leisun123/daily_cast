@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,55 @@ def test_briefing_runtime_seeds_the_two_management_web_research_sources(
 
     assert telecom is not None and telecom.kind is SourceKind.WEB_RESEARCH
     assert ai is not None and ai.kind is SourceKind.WEB_RESEARCH
+
+
+def test_briefing_runtime_refreshes_an_existing_source_from_current_configuration(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """A redeploy applies current briefing YAML instead of retaining stale database options."""
+    _enable_briefing(app_config_path, tmp_path)
+    factory = upgraded_session_factory(app_config_path)
+    with UnitOfWork(factory) as unit:
+        assert unit.session is not None
+        SourceRepository(unit.session).create(
+            id="briefing-test-source",
+            name="旧测试来源",
+            kind=SourceKind.RSS,
+            entry_url="https://briefing-test.invalid/rss",
+            normalized_entry_url="https://briefing-test.invalid/rss",
+            enabled=False,
+            priority=1,
+            language="en",
+            config_json=json.dumps({"briefing_category": "ai", "query": "已经废弃的线上查询"}),
+            request_timeout_seconds=99,
+            max_items_per_run=1,
+        )
+
+    with TestClient(create_app(config_path=app_config_path)) as client:
+        runtime = client.app.state.runtime
+        with UnitOfWork(runtime.session_factory) as unit:
+            assert unit.session is not None
+            source = SourceRepository(unit.session).get("briefing-test-source")
+            assert source is not None
+            persisted = {
+                "name": source.name,
+                "enabled": source.enabled,
+                "priority": source.priority,
+                "language": source.language,
+                "config": json.loads(source.config_json),
+                "request_timeout_seconds": source.request_timeout_seconds,
+                "max_items_per_run": source.max_items_per_run,
+            }
+
+    assert persisted == {
+        "name": "测试来源",
+        "enabled": True,
+        "priority": 50,
+        "language": None,
+        "config": {"briefing_category": "telecom"},
+        "request_timeout_seconds": 20,
+        "max_items_per_run": 50,
+    }
 
 
 def test_briefing_generate_conflicts_when_disabled(app_config_path: Path) -> None:

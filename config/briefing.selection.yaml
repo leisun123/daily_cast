@@ -12,6 +12,27 @@ categories:
     # one additional item; it still can never dominate the five-item briefing.
     fallback_max_items_per_publisher: 2
     rules:
+      - id: telecom-changzhou
+        tier: P0
+        specificity: 700
+        all_groups:
+          - [常州, 溧阳, 金坛, 武进, 新北, 天宁, 钟楼]
+          - [中国移动, 中国电信, 中国联通, 运营商, 通信, 电信, 基站, 无线网, 5G, 6G, 算力网络, 华为, 中兴]
+        reason: 常州本地通信与运营商直接动态
+      - id: telecom-jiangsu
+        tier: P0
+        specificity: 650
+        all_groups:
+          - [江苏, 南京, 无锡, 徐州, 苏州, 南通, 连云港, 淮安, 盐城, 扬州, 镇江, 泰州, 宿迁]
+          - [中国移动, 中国电信, 中国联通, 运营商, 通信, 电信, 基站, 无线网, 5G, 6G, 算力网络, 华为, 中兴]
+        reason: 江苏省内通信与运营商动态
+      - id: telecom-other-domestic-region
+        tier: P0
+        specificity: 600
+        all_groups:
+          - [北京, 上海, 天津, 重庆, 河北, 山西, 辽宁, 吉林, 黑龙江, 浙江, 安徽, 福建, 江西, 山东, 河南, 湖北, 湖南, 广东, 海南, 四川, 贵州, 云南, 陕西, 甘肃, 青海, 广西, 西藏, 宁夏, 新疆, 内蒙古, 深圳, 成都, 武汉, 杭州, 广州, 青岛, 厦门, 大连, 西安]
+          - [中国移动, 中国电信, 中国联通, 运营商, 通信, 电信, 基站, 无线网, 5G, 6G, 算力网络, 华为, 中兴]
+        reason: 国内其他地区通信与运营商动态
       - id: telecom-china-mobile
         tier: P0
         specificity: 500
@@ -45,7 +66,7 @@ categories:
         tier: P1
         specificity: 300
         all_groups:
-          - [中国电信, 中国联通, AT&T, Verizon, Vodafone, Deutsche Telekom, NTT DOCOMO, KDDI, SK Telecom]
+          - [中国电信, 中国联通]
           - [建设, 招标, 集采, 部署, 开通, 商用, 资费, 合作, 合同, 并购, 财报]
         reason: 运营商竞争与经营动态
       - id: telecom-huawei-zte-network-supply
@@ -77,18 +98,27 @@ categories:
           - [诺基亚, 爱立信, 高通, 博通, 思科, 三星网络, Marvell, 中际旭创, 新易盛, 亨通光电, 长飞光纤]
           - [发布, 合作, 供货, 中标, 招标, 交付, 财报, 扩产]
         reason: 供应商市场与交付动态
-      - id: telecom-global-industry-fallback
+      - id: telecom-domestic-industry-fallback
         tier: P5
         specificity: 50
         all_groups:
-          - [GSMA, ITU, 3GPP, Mobile World Live]
-          - [network, mobile, coverage, spectrum, 5G, 6G, roaming, satellite, connectivity]
-        reason: 国际通信产业与监管兜底动态
+          - [信通院, CAICT, IMT-2030, 中国通信标准化协会, 中国无线电协会]
+          - [网络, 通信, 频谱, 5G, 6G, 卫星互联网, 算力网络]
+        reason: 国内通信产业与标准兜底动态
+    required_any_of:
+      [中国移动, 中国电信, 中国联通, 三大运营商, 工信部, 通信管理局,
+       信通院, CAICT, IMT-2030, 华为, 中兴, 常州, 江苏, 北京, 上海, 天津,
+       重庆, 河北, 山西, 辽宁, 吉林, 黑龙江, 浙江, 安徽, 福建, 江西,
+       山东, 河南, 湖北, 湖南, 广东, 海南, 四川, 贵州, 云南, 陕西, 甘肃,
+       青海, 广西, 西藏, 宁夏, 新疆, 内蒙古, 全国, 国内]
     fallback_any_of:
-      [通信业, 电信网, 运营商, 光通信, 卫星通信, 网络设备, 5G, 6G, 算力网络,
-       mobile network, mobile operator, wireless, spectrum, telecom, connectivity]
+      [中国移动, 中国电信, 中国联通, 三大运营商,
+       通信业, 电信网, 运营商, 光通信, 卫星通信, 网络设备, 5G, 6G, 算力网络]
     fallback_tier: P5
-    global_excludes: [电信诈骗, 反诈, 短信诈骗, 移动支付, 移动游戏, 移动应用]
+    global_excludes:
+      [电信诈骗, 反诈, 短信诈骗, 移动支付, 移动游戏, 移动应用,
+       MobileX, AT&T, Verizon, Vodafone, Deutsche Telekom, NTT DOCOMO, KDDI, SK Telecom,
+       海外运营商, 美国运营商, 欧洲运营商]
   ai:
     # AI relevance is editorial rather than keyword-gated: candidate links have
     # already passed freshness and reader-link verification, then the LLM selects
@@ -96,7 +126,9 @@ categories:
     tiers: [LLM]
     editorial_selection: true
     editorial_candidate_limit: 20
-    editorial_max_candidates_per_source: 5
+    # Keep source balance but do not let early paper-only entries hide later
+    # verified product and deployment news from the same reliable feed.
+    editorial_max_candidates_per_source: 10
     rules: []
     fallback_any_of: []
     global_excludes: []

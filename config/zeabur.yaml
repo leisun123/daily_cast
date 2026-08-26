@@ -34,15 +34,15 @@ llm:
 editorial:
   enforce_quality_gate: false
 
-# The telecom + AI text briefing runs at 08:30 Asia/Shanghai on workdays and
-# pushes markdown to the configured webhook (WeCom group bot by default). The
+# The telecom + AI text briefing starts at 08:25 Asia/Shanghai on workdays so
+# the verified message can reach WeCom around 08:30. The
 # webhook URL is a Zeabur password variable; the service refuses to start
 # without it.
 briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
   selection_policy_path: ./config/briefing.selection.yaml
-  cron_expression: "30 8 * * mon-fri"
+  cron_expression: "25 8 * * mon-fri"
   max_items_per_category: 5
   # Inject DAILYCAST_BRIEFING__RSSHUB_BASE_URL as a Zeabur variable to enable
   # configured rsshub:// sources. Use a controlled or self-hosted instance.
@@ -55,7 +55,7 @@ briefing:
 # link-verified locally before a briefing may use it.
 web_research:
   enabled: true
-  max_candidates_per_source: 20
+  max_candidates_per_source: 60
   max_search_calls_per_source: 4
   search_context_size: medium
   max_article_chars: 12000

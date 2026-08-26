@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit, urlunsplit
@@ -51,6 +52,15 @@ class SourceConfiguration(BaseModel):
         return sources
 
 
+@dataclass(frozen=True, slots=True)
+class SourceSyncReport:
+    """Counts from making one managed source set match its declarative configuration."""
+
+    created_count: int = 0
+    updated_count: int = 0
+    unchanged_count: int = 0
+
+
 def seed_missing_sources(session_factory: sessionmaker[Session], source_config_path: Path) -> int:
     """Create only missing source IDs from YAML; existing database rows remain authoritative."""
     configuration = _load_source_configuration(source_config_path)
@@ -94,10 +104,86 @@ def seed_missing_sources(session_factory: sessionmaker[Session], source_config_p
     return created_count
 
 
+def sync_configured_sources(
+    session_factory: sessionmaker[Session], source_config_path: Path
+) -> SourceSyncReport:
+    """Create or refresh managed sources while preserving their article history.
+
+    This is intentionally separate from ``seed_missing_sources``.  The default
+    podcast source list remains seed-only so operator edits in the database stay
+    authoritative.  Briefing-only sources are configuration-managed because a
+    deployed query or item-limit change must take effect on the next startup.
+    """
+    configuration = _load_source_configuration(source_config_path)
+    normalized_by_id = {
+        source.id: _normalized_entry_url(source.entry_url, source.kind)
+        for source in configuration.sources
+    }
+    if len(set(normalized_by_id.values())) != len(normalized_by_id):
+        raise ConfigurationError("source configuration contains duplicate normalized entry URLs")
+
+    created_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    with UnitOfWork(session_factory) as unit:
+        assert unit.session is not None
+        repository = SourceRepository(unit.session)
+        configured_urls = {source.normalized_entry_url: source.id for source in repository.list()}
+        for definition in configuration.sources:
+            normalized_entry_url = normalized_by_id[definition.id]
+            owner = configured_urls.get(normalized_entry_url)
+            if owner is not None and owner != definition.id:
+                raise ConfigurationError(
+                    "source configuration entry URL is already owned by configured source "
+                    f"{owner!r}"
+                )
+            values = _source_values(definition, normalized_entry_url)
+            existing = repository.get(definition.id)
+            if existing is None:
+                repository.create(id=definition.id, **values)
+                configured_urls[normalized_entry_url] = definition.id
+                created_count += 1
+                continue
+
+            changes = {
+                name: value for name, value in values.items() if getattr(existing, name) != value
+            }
+            if not changes:
+                unchanged_count += 1
+                continue
+            old_normalized_url = existing.normalized_entry_url
+            repository.update(existing, **changes)
+            if old_normalized_url != normalized_entry_url:
+                configured_urls.pop(old_normalized_url, None)
+                configured_urls[normalized_entry_url] = definition.id
+            updated_count += 1
+    return SourceSyncReport(
+        created_count=created_count,
+        updated_count=updated_count,
+        unchanged_count=unchanged_count,
+    )
+
+
 def load_configured_source_ids(source_config_path: Path) -> frozenset[str]:
     """Return the current source allowlist without changing any persisted source rows."""
     configuration = _load_source_configuration(source_config_path)
     return frozenset(source.id for source in configuration.sources)
+
+
+def _source_values(source: SourceDefinition, normalized_entry_url: str) -> dict[str, Any]:
+    """Return the declarative fields owned by one managed source configuration."""
+    return {
+        "name": source.name,
+        "kind": source.kind,
+        "entry_url": source.entry_url,
+        "normalized_entry_url": normalized_entry_url,
+        "enabled": source.enabled,
+        "priority": source.priority,
+        "language": source.language,
+        "config_json": _canonical_json(source.config),
+        "request_timeout_seconds": source.request_timeout_seconds,
+        "max_items_per_run": source.max_items_per_run,
+    }
 
 
 def _load_source_configuration(path: Path) -> SourceConfiguration:

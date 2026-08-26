@@ -35,6 +35,10 @@ _VISIBLE_PUBLICATION_DATE = re.compile(
     r"(20\d{2}(?:[-/.]\d{1,2}[-/.]\d{1,2}|年\d{1,2}月\d{1,2}日)"
     r"(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?(?:Z|[+-]\d{2}:?\d{2})?)"
 )
+_VISIBLE_SOURCE_HEADER_DATE = re.compile(
+    r"(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}"
+    r"(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)\s*(?:\||丨|│)?\s*来源\s*[:：]?"
+)
 _C114_ARTICLE_HEADER_DATE = re.compile(
     r'<div\b[^>]*\bclass\s*=\s*["\'][^"\']*\barticle_top\b[^"\']*["\'][^>]*>'
     r'.*?<div\b[^>]*\bclass\s*=\s*["\'][^"\']*\btime\b[^"\']*["\'][^>]*>\s*'
@@ -367,6 +371,10 @@ class _PublicationDateParser(HTMLParser):
             if property_name == "article:published_time" or name in {
                 "article:published_time",
                 "datepublished",
+                "publishdate",
+                "pubdate",
+                "publish_date",
+                "publication_date",
             }:
                 self._meta_dates.append(values.get("content", ""))
         elif tag.lower() == "time":
@@ -404,8 +412,10 @@ def _published_at_from_html(html_text: str, page_url: str) -> datetime | None:
         return None
     c114_header_dates = _c114_article_header_dates(html_text, page_url)
     visible_dates = _visible_publication_dates(html_text)
+    visible_source_header_dates = _visible_source_header_publication_dates(html_text)
+    default_timezone = _default_publication_timezone(page_url)
     for raw_value in parser.candidate_dates():
-        parsed = _parse_publication_datetime(raw_value)
+        parsed = _parse_publication_datetime(raw_value, default_timezone=default_timezone)
         if parsed is not None:
             return parsed
     for raw_value in c114_header_dates:
@@ -413,10 +423,22 @@ def _published_at_from_html(html_text: str, page_url: str) -> datetime | None:
         if parsed is not None:
             return parsed
     for raw_value in visible_dates:
-        parsed = _parse_publication_datetime(raw_value)
+        parsed = _parse_publication_datetime(raw_value, default_timezone=default_timezone)
+        if parsed is not None:
+            return parsed
+    for raw_value in visible_source_header_dates:
+        parsed = _parse_publication_datetime(raw_value, default_timezone=_C114_TIMEZONE)
         if parsed is not None:
             return parsed
     return None
+
+
+def _default_publication_timezone(page_url: str) -> tzinfo:
+    """Interpret naive timestamps on mainland Chinese domains as Asia/Shanghai."""
+    hostname = urlsplit(page_url).hostname
+    if hostname is not None and hostname.casefold().rstrip(".").endswith(".cn"):
+        return _C114_TIMEZONE
+    return UTC
 
 
 def _c114_article_header_dates(html_text: str, page_url: str) -> tuple[str, ...]:
@@ -432,6 +454,13 @@ def _visible_publication_dates(html_text: str) -> tuple[str, ...]:
     plain_text = html.unescape(re.sub(r"<[^>]+>", " ", html_text))
     normalized = " ".join(plain_text.split())
     return tuple(match.group(1) for match in _VISIBLE_PUBLICATION_DATE.finditer(normalized))
+
+
+def _visible_source_header_publication_dates(html_text: str) -> tuple[str, ...]:
+    """Read an article-header date only when it is immediately identified by 来源."""
+    plain_text = html.unescape(re.sub(r"<[^>]+>", " ", html_text))
+    normalized = " ".join(plain_text.split())
+    return tuple(match.group(1) for match in _VISIBLE_SOURCE_HEADER_DATE.finditer(normalized))
 
 
 def _json_ld_published_dates(value: object) -> list[str]:

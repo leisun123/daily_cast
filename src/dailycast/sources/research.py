@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from collections import deque
 from collections.abc import Mapping, Sequence
 from datetime import UTC
 from typing import Literal
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -43,20 +46,31 @@ _DISCOVERY_HOSTS = frozenset(
     }
 )
 _READER_BLOCKED_HOSTS = frozenset({"qbitai.com", "www.qbitai.com"})
+_BRIEFING_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_JAPANESE_KANA = re.compile(r"[\u3040-\u30ff]")
+_LATIN_LETTER = re.compile(r"[A-Za-z]")
 _RESEARCH_FACETS: dict[Literal["telecom", "ai"], tuple[str, ...]] = {
     "telecom": (
-        "中国移动及国内外运营商、竞争对手的经营与网络建设动态",
-        "基站、无线网/RAN、频谱许可、5G-A/6G 的建设与商用",
-        "华为、中兴和网络设备、光通信等关键供应商的交付与产品动态",
-        "通信监管政策、地方通信项目与专项行动",
+        "常州市及所属辖区的中国移动、中国电信、中国联通经营、基站、网络建设、政策和项目动态",
+        "江苏省内的中国移动、中国电信、中国联通竞争对手、基站、算力网络、5G-A/6G 与通信政策动态",
+        "国内其他地级市的中国移动、中国电信、中国联通网络建设、基站运维、地方政策和供应商交付",
+        "全国层面的中国移动、中国电信、中国联通三大运营商经营、频谱、6G、算力、运营商大模型、"
+        "智能体、网络智能化、Token 经营与华为中兴等关键供应链动态",
     ),
     "ai": (
-        "国内外重点大模型的发布、开源、API 和推理能力变化",
-        "本地化、私有化、端侧和边缘 AI 部署",
-        "中国市场适配、国产算力与合规落地",
-        "企业 AI 应用、生态合作和有公开数据支撑的产品热点",
+        "中文页面报道的全球大模型动态：既包括字节、腾讯、华为、小米、阿里、百度、DeepSeek、智谱、"
+        "月之暗面、MiniMax，也包括 OpenAI GPT、Anthropic Claude、Google Gemini、Meta Llama、"
+        "xAI Grok",
+        "中文页面报道的大模型本地化或私有化部署、AI 基础设施、算力芯片与开发工具的实际进展",
+        "中文页面报道的 AI 热门应用、智能体、多模态、机器人与具身智能进展，"
+        "须有明确产品、用户或市场热度",
+        "中文页面报道的全球 AI 高热度事件、开源生态、开发者采用、商业化与市场落地；"
+        "排除纯论文、预印本和榜单",
     ),
 }
+
+
 class WebResearchCandidate(BaseModel):
     """One untrusted discovery record returned by the model after native web search."""
 
@@ -153,7 +167,7 @@ class ResearchCollector:
                     )
                 )
                 continue
-            if isinstance(search_result, Exception):
+            if isinstance(search_result, BaseException):
                 errors.append(
                     SourceError(
                         code="WEB_RESEARCH_REQUEST_FAILED",
@@ -189,7 +203,9 @@ class ResearchCollector:
             source.max_items_per_run or 50,
             self._settings.max_candidates_per_source,
         )
-        for facet, discovered_candidate, structured in discovered_records[:candidate_limit]:
+        for facet, discovered_candidate, structured in _interleave_discovered_records(
+            discovered_records
+        )[:candidate_limit]:
             url_error = _candidate_url_error(discovered_candidate.url)
             if url_error is not None:
                 errors.append(url_error)
@@ -221,6 +237,19 @@ class ResearchCollector:
                         summary=(
                             "verified article publication date is outside the collection window"
                         ),
+                        retryable=False,
+                    )
+                )
+                continue
+            if (
+                source.language
+                and source.language.casefold().startswith("zh")
+                and not _looks_like_chinese_article(extracted.content_text)
+            ):
+                errors.append(
+                    SourceError(
+                        code="NON_CHINESE_SOURCE",
+                        summary="verified article body is not predominantly Chinese",
                         retryable=False,
                     )
                 )
@@ -258,6 +287,37 @@ class ResearchCollector:
         )
 
 
+def _looks_like_chinese_article(content: str) -> bool:
+    """Require substantial Chinese prose and reject Japanese/foreign-language pages."""
+    cjk_count = len(_CJK_CHARACTER.findall(content))
+    if cjk_count < 20:
+        return False
+    kana_count = len(_JAPANESE_KANA.findall(content))
+    if kana_count > max(4, cjk_count // 5):
+        return False
+    latin_count = len(_LATIN_LETTER.findall(content))
+    return cjk_count * 4 >= latin_count
+
+
+def _interleave_discovered_records(
+    records: Sequence[tuple[str, WebResearchCandidate, StructuredResult]],
+) -> list[tuple[str, WebResearchCandidate, StructuredResult]]:
+    """Prevent the first search facet from consuming the verification budget."""
+    queues: dict[str, deque[tuple[str, WebResearchCandidate, StructuredResult]]] = {}
+    for record in records:
+        queues.setdefault(record[0], deque()).append(record)
+    ordered_facets = list(queues)
+    balanced: list[tuple[str, WebResearchCandidate, StructuredResult]] = []
+    while queues:
+        for facet in ordered_facets[:]:
+            queue = queues[facet]
+            balanced.append(queue.popleft())
+            if not queue:
+                queues.pop(facet)
+                ordered_facets.remove(facet)
+    return balanced
+
+
 class UnavailableWebResearchProvider:
     """Make unsupported primary provider capability visible as one source-local error."""
 
@@ -291,8 +351,8 @@ def _research_messages(
     options: ResearchSourceOptions, window: CollectionWindow, *, focus: str | None = None
 ) -> tuple[LLMMessage, ...]:
     """Build the stable discovery-only instruction; editorial prose is handled later."""
-    start = window.start.astimezone(UTC).isoformat()
-    end = window.end.astimezone(UTC).isoformat()
+    start = window.start.astimezone(_BRIEFING_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    end = window.end.astimezone(_BRIEFING_TIMEZONE).strftime("%Y-%m-%d %H:%M")
     facets = _research_facets(options.topic)
     return (
         LLMMessage(
@@ -309,7 +369,7 @@ def _research_messages(
             content=(
                 (
                     f"主题：{options.query}\n"
-                    f"时间窗口：{start} 至 {end}\n"
+                    f"北京时间：{start} 至 {end}（不含结束时刻）\n"
                     f"来源偏好：{options.publisher_preference}\n"
                     f"必须分别检索并逐项覆盖：{facets}。不要只围绕其中一个方向搜索。"
                 )

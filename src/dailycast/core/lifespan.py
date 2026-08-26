@@ -48,7 +48,11 @@ from dailycast.publishing.rss import RSSPublisher, RSSSettings
 from dailycast.publishing.service import PublicationService
 from dailycast.publishing.xiaoyuzhou import XiaoyuzhouPublisher
 from dailycast.scheduler.service import SchedulerService
-from dailycast.sources.bootstrap import load_configured_source_ids, seed_missing_sources
+from dailycast.sources.bootstrap import (
+    load_configured_source_ids,
+    seed_missing_sources,
+    sync_configured_sources,
+)
 from dailycast.sources.extraction import ContentExtractor, SafeHttpFetcher
 from dailycast.sources.html_list import HTMLListCollector
 from dailycast.sources.research import ResearchCollector, UnavailableWebResearchProvider
@@ -372,9 +376,14 @@ def _build_briefing_runtime(
         settings.resolve_path(settings.briefing.selection_policy_path)
     )
     source_config_path = settings.resolve_path(settings.briefing.sources_config_path)
-    created_source_count = seed_missing_sources(session_factory, source_config_path)
+    source_sync = sync_configured_sources(session_factory, source_config_path)
     logger.info(
-        "briefing_source_seed_completed", extra={"created_source_count": created_source_count}
+        "briefing_source_sync_completed",
+        extra={
+            "created_source_count": source_sync.created_count,
+            "updated_source_count": source_sync.updated_count,
+            "unchanged_source_count": source_sync.unchanged_count,
+        },
     )
     notifier: WebhookNotifier | None = None
     if settings.briefing.webhook_enabled:

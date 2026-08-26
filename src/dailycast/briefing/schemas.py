@@ -44,7 +44,7 @@ class BriefingItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    headline: str = Field(min_length=1, max_length=28)
+    headline: str = Field(min_length=1, max_length=36)
     # Kept intentionally short because it appears before the compact WeCom
     # headline.  The editorial model chooses it from the article evidence; the
     # renderer never infers a tag from a title or source on its own.
@@ -64,8 +64,8 @@ class BriefingItem(BaseModel):
         if not isinstance(value, str):
             return value
         headline = value.strip()
-        if "…" in headline or "..." in headline or len(headline) > 28:
-            raise ValueError("headline must be a complete sentence of at most 28 characters")
+        if "…" in headline or "..." in headline or len(headline) > 36:
+            raise ValueError("headline must be a complete sentence of at most 36 characters")
         return headline
 
     @field_validator("theme", mode="before")

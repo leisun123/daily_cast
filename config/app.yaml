@@ -169,7 +169,7 @@ briefing:
 # independently fetched and date-verified before they can be selected.
 web_research:
   enabled: true
-  max_candidates_per_source: 20
+  max_candidates_per_source: 60
   max_search_calls_per_source: 4
   search_context_size: medium
   max_article_chars: 12000

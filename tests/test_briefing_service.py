@@ -233,7 +233,7 @@ def _candidate(
         url=f"https://{source_id}.example.test/{key}",
         title=title or (f"DeepSeek 发布大模型 {key}" if is_ai else f"中国移动 {key} 网络建设进展"),
         content_text=content_text or (f"evidence-{key} " * 100),
-        published_at=published_at or datetime.now(UTC),
+        published_at=published_at or datetime.now(UTC) - timedelta(days=1),
     )
 
 
@@ -334,7 +334,10 @@ def test_generated_briefing_audit_drops_an_omitted_long_raw_title() -> None:
                 title=(
                     f"中国移动网络建设进展 {index}"
                     if index < 5
-                    else "半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司"
+                    else (
+                        "半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司"
+                        "并计划进入更多城市"
+                    )
                 ),
                 source_name=f"来源 {index}",
                 published_at=published_at,
@@ -443,7 +446,10 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
                 "来源 ai-source",
             ),
             "最终「昨日关注」": {
-                "focus": "运营商将算力投资、6G战略和网络智能化同步推进；国内 AI 侧，国产模型与智能体应用加速。"
+                "focus": (
+                    "运营商将算力投资、6G战略和网络智能化同步推进；"
+                    "国内 AI 侧，国产模型与智能体应用加速。"
+                )
             },
         }
     )
@@ -464,7 +470,7 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
         assert entry.file_path is not None and entry.file_path.is_file()
     assert len(notifier.pushed) == 1
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
-    assert set(briefings) == {"telecom", "ai"}
+    assert set(briefings) == {"telecom", "ai", "merged"}
     assert "# 通信行业日报" in briefings["telecom"]
     assert (
         sum(
@@ -478,11 +484,13 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
         == 5
     )
     delivered = notifier.pushed[0]
+    assert briefings["merged"] == delivered
     assert delivered.startswith("# 【行业观察日报】")
     assert "## 📡 通信" in delivered
     assert "## 🤖 AI" in delivered
     assert (
-        "> **昨日关注：**运营商将算力投资、6G战略和网络智能化同步推进；国内 AI 侧，国产模型与智能体应用加速。"
+        "> **昨日关注：**运营商将算力投资、6G战略和网络智能化同步推进；"
+        "国内 AI 侧，国产模型与智能体应用加速。"
         in delivered
     )
     assert "重点动态" not in delivered
@@ -678,7 +686,7 @@ def test_briefing_run_uses_evidence_fallback_when_model_fails(
     assert by_category["ai"].status == "generated"
     assert by_category["ai"].push_status == "sent"
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
-    assert set(briefings) == {"telecom", "ai"}
+    assert set(briefings) == {"telecom", "ai", "merged"}
     assert "入选原因" in briefings["telecom"]
     assert "https://telecom-source.example.test/t1" in briefings["telecom"]
     assert len(notifier.pushed) == 1
@@ -712,14 +720,16 @@ def test_briefing_run_skips_a_category_without_eligible_articles(
     assert by_category["ai"].file_path is None
     assert llm.operations == [LLMOperation.GENERATE_BRIEFING]
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
-    assert set(briefings) == {"telecom"}
+    assert set(briefings) == {"telecom", "merged"}
+    assert "> **昨日关注：**通信与AI行业多项进展同步推进。" in briefings["merged"]
+    assert len(llm.focus_prompts) == 1
 
 
-def test_briefing_run_rejects_article_outside_its_24_hour_window(
+def test_briefing_run_rejects_article_outside_the_previous_calendar_day(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
     """Briefing freshness is enforced even if a collector returns an old article."""
-    now = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    now = datetime(2026, 8, 25, 0, 30, tzinfo=UTC)
     _seed_source(session_factory, "telecom-source", category="telecom")
     collector = FakeRSSCollector(
         {
@@ -727,7 +737,7 @@ def test_briefing_run_rejects_article_outside_its_24_hour_window(
                 _candidate(
                     "telecom-source",
                     "stale",
-                    published_at=now - timedelta(hours=25),
+                    published_at=datetime(2026, 8, 23, 15, 59, tzinfo=UTC),
                 )
             ]
         }
@@ -750,7 +760,42 @@ def test_briefing_run_rejects_article_outside_its_24_hour_window(
     assert llm.operations == []
 
 
-def test_briefing_run_on_monday_includes_articles_from_the_previous_friday(
+def test_briefing_run_uses_the_previous_shanghai_calendar_day(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A Tuesday run uses Monday 00:00-24:00 in Shanghai, not a rolling 24 hours."""
+    now = datetime(2026, 8, 25, 0, 30, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate(
+                    "telecom-source",
+                    "monday-network",
+                    published_at=datetime(2026, 8, 24, 8, tzinfo=UTC),
+                )
+            ]
+        }
+    )
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=FakeBriefingLLM({}),
+        notifier=None,
+        clock=FixedClock(now),
+    )
+
+    report = asyncio.run(service.run())
+
+    assert collector.collection_windows[0] == CollectionWindow(
+        start=datetime(2026, 8, 23, 16, tzinfo=UTC),
+        end=datetime(2026, 8, 24, 16, tzinfo=UTC),
+    )
+    assert report.date == "2026-08-24"
+
+
+def test_briefing_run_on_monday_includes_friday_through_sunday(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
     """Monday's management briefing covers the complete weekend rather than only Sunday."""
@@ -787,8 +832,10 @@ def test_briefing_run_on_monday_includes_articles_from_the_previous_friday(
 
     telecom = next(item for item in report.categories if item.category == "telecom")
     assert collector.collection_windows[0] == CollectionWindow(
-        start=datetime(2026, 8, 20, 16, tzinfo=UTC), end=now
+        start=datetime(2026, 8, 20, 16, tzinfo=UTC),
+        end=datetime(2026, 8, 23, 16, tzinfo=UTC),
     )
+    assert report.date == "2026-08-23"
     assert telecom.status == "generated"
 
 
@@ -1101,13 +1148,14 @@ def test_exhausted_llm_budget_uses_evidence_fallback_without_provider_calls(
     assert set(read_briefings_for_date(output_dir, date.fromisoformat(report.date))) == {
         "telecom",
         "ai",
+        "merged",
     }
 
 
 def test_llm_budget_reservations_accumulate_per_run(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """Each run reserves one call per generated category against a fresh budget."""
+    """Each run reserves category calls plus one merged-focus call against a fresh budget."""
     collector, llm = _two_category_setup(session_factory)
     budgets: list[BudgetController] = []
 
@@ -1129,9 +1177,9 @@ def test_llm_budget_reservations_accumulate_per_run(
     asyncio.run(service.run())
 
     assert len(budgets) == 1
-    assert budgets[0].call_count == 2
+    assert budgets[0].call_count == 3
     assert budgets[0].input_tokens > 0
-    assert budgets[0].output_tokens == 2 * llm.max_output_tokens
+    assert budgets[0].output_tokens == 3 * llm.max_output_tokens
 
 
 class StubProvider:

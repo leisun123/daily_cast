@@ -63,6 +63,7 @@ class CategorySelectionPolicy(BaseModel):
     max_items_per_publisher: int = Field(default=1, ge=1)
     fallback_max_items_per_publisher: int | None = Field(default=None, ge=1)
     rules: tuple[SelectionRule, ...] = ()
+    required_any_of: tuple[str, ...] = ()
     fallback_any_of: tuple[str, ...] = ()
     fallback_tier: str | None = None
     global_excludes: tuple[str, ...] = ()
@@ -218,12 +219,12 @@ def _editorial_candidate_pool(
     pool_limit = min(limit, policy.editorial_candidate_limit)
     while queues and len(prepared) < pool_limit:
         for source_id in source_ids[:]:
-            queue = queues.get(source_id)
-            if not queue:
+            current_queue = queues.get(source_id)
+            if not current_queue:
                 queues.pop(source_id, None)
                 source_ids.remove(source_id)
                 continue
-            candidate = queue.pop(0)
+            candidate = current_queue.pop(0)
             prepared.append(
                 _ranked(
                     candidate,
@@ -294,6 +295,8 @@ def _classify_candidate(
     """Choose the strongest literal rule, applying global exclusions before all positives."""
     text = f"{candidate.evidence.title}\n{candidate.evidence.excerpt}"
     if _matches_any(text, policy.global_excludes):
+        return None
+    if policy.required_any_of and not _matches_any(text, policy.required_any_of):
         return None
     tier_order = {tier: index for index, tier in enumerate(policy.tiers)}
     matching_rules = [rule for rule in policy.rules if _rule_matches(text, rule)]

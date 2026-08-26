@@ -177,17 +177,18 @@ class BriefingService:
     async def _run_once(self, *, force: bool) -> BriefingRunReport:
         """Collect, generate, persist, and optionally push every configured category."""
         now = self._clock.now()
-        briefing_date = now.astimezone(self._timezone).date()
+        window = self._collection_window(now)
+        run_date = now.astimezone(self._timezone).date()
+        briefing_date = (window.end.astimezone(self._timezone) - timedelta(microseconds=1)).date()
         budget = self._budget_factory()
         provider = _budgeted_provider(self._llm_provider, budget)
         sources = self._briefing_sources()
         if not sources:
             logger.warning("briefing found no enabled sources tagged with briefing_category")
-        window = self._collection_window(now)
         collection = await self._collection_service.collect_sources(sources, window)
         await self._extract_missing_bodies(collection.article_ids)
         verified_article_ids = await self._verify_reader_links(collection.article_ids)
-        minimum_freshness_hours = ceil((window.end - window.start).total_seconds() / 3600)
+        minimum_freshness_hours = ceil((now - window.start).total_seconds() / 3600)
         filtered = self._news_processor.filter(
             verified_article_ids,
             minimum_max_age_hours=minimum_freshness_hours,
@@ -199,16 +200,23 @@ class BriefingService:
         for category in CATEGORY_TITLES:
             evidence = evidence_by_category.get(category, ())
             report, pending_delivery = await self._run_category(
-                category, briefing_date, evidence, provider, force=force
+                category,
+                briefing_date,
+                evidence,
+                provider,
+                marker_date=run_date,
+                force=force,
             )
             reports.append(report)
             if pending_delivery is not None:
                 pending_deliveries.append(pending_delivery)
         if pending_deliveries:
             merged_focus = await self._generate_merged_focus(pending_deliveries, provider)
-            push_status = await self._push(
-                self._render_merged_markdown(briefing_date, pending_deliveries, focus=merged_focus)
+            merged_markdown = self._render_merged_markdown(
+                briefing_date, pending_deliveries, focus=merged_focus
             )
+            self._write_merged_markdown(briefing_date, merged_markdown)
+            push_status = await self._push(merged_markdown)
             reports = [
                 (
                     replace(report, push_status=push_status)
@@ -220,21 +228,18 @@ class BriefingService:
             if push_status != "failed":
                 for delivery in pending_deliveries:
                     _atomic_write(
-                        self._marker_path(briefing_date, delivery.category),
+                        self._marker_path(run_date, delivery.category),
                         f"{self._clock.now().isoformat()}\n",
                     )
         return BriefingRunReport(date=briefing_date.isoformat(), categories=tuple(reports))
 
     def _collection_window(self, now: datetime) -> CollectionWindow:
-        """Cover Friday through the current time for the Monday management briefing."""
-        start = now - timedelta(hours=self._window_hours)
+        """Use the previous Shanghai calendar day, or Friday-Sunday on Monday."""
         local_now = now.astimezone(self._timezone)
-        if local_now.weekday() == 0:
-            friday_start = (local_now - timedelta(days=3)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            start = min(start, friday_start.astimezone(UTC))
-        return CollectionWindow(start=start, end=now)
+        end_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        days_back = 3 if local_now.weekday() == 0 else 1
+        start_local = end_local - timedelta(days=days_back)
+        return CollectionWindow(start=start_local.astimezone(UTC), end=end_local.astimezone(UTC))
 
     def _briefing_sources(self) -> tuple[Source, ...]:
         """Select enabled, current-policy sources whose config opts into a briefing category."""
@@ -331,10 +336,11 @@ class BriefingService:
         evidence: tuple[RankedBriefingEvidence, ...],
         provider: LLMProvider,
         *,
+        marker_date: date,
         force: bool,
     ) -> tuple[BriefingCategoryReport, _PendingBriefingDelivery | None]:
         """Generate one category while deferring delivery until every category is ready."""
-        marker_path = self._marker_path(briefing_date, category)
+        marker_path = self._marker_path(marker_date, category)
         if not force and marker_path.is_file():
             logger.info(
                 "briefing category already completed today",
@@ -416,8 +422,6 @@ class BriefingService:
         provider: LLMProvider,
     ) -> str | None:
         """Write the one lead sentence after selection, without changing selected items."""
-        if self._notifier is None:
-            return None
         try:
             structured = await provider.generate_structured(
                 operation=LLMOperation.GENERATE_BRIEFING,
@@ -503,6 +507,12 @@ class BriefingService:
     def _write_markdown(self, briefing_date: date, category: str, markdown: str) -> Path:
         """Persist one briefing below the configured briefing work directory."""
         target = self._output_dir / f"{briefing_date.isoformat()}-{category}.md"
+        _atomic_write(target, markdown)
+        return target
+
+    def _write_merged_markdown(self, briefing_date: date, markdown: str) -> Path:
+        """Persist the exact compact message used for delivery and acceptance checks."""
+        target = self._output_dir / f"{briefing_date.isoformat()}-merged.md"
         _atomic_write(target, markdown)
         return target
 
@@ -639,6 +649,9 @@ def read_briefings_for_date(output_dir: Path, briefing_date: date) -> dict[str, 
         path = output_dir / f"{briefing_date.isoformat()}-{category}.md"
         if path.is_file():
             briefings[category] = path.read_text(encoding="utf-8")
+    merged_path = output_dir / f"{briefing_date.isoformat()}-merged.md"
+    if merged_path.is_file():
+        briefings["merged"] = merged_path.read_text(encoding="utf-8")
     return briefings
 
 

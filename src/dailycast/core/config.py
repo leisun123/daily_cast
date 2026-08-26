@@ -121,7 +121,7 @@ class WebResearchSettings(BaseModel):
     """Bound native web-search discovery for briefing-only sources."""
 
     enabled: bool = False
-    max_candidates_per_source: int = Field(default=20, ge=1, le=20)
+    max_candidates_per_source: int = Field(default=20, ge=1, le=80)
     max_search_calls_per_source: int = Field(default=1, ge=1, le=4)
     search_context_size: Literal["low", "medium", "high"] = "medium"
     max_article_chars: int = Field(default=12_000, ge=1_000, le=50_000)

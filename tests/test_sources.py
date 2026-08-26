@@ -287,18 +287,40 @@ def test_briefing_source_configuration_keeps_web_research_out_of_podcast_seeds()
         "openai-web-research-telecom-management",
         "openai-web-research-ai-management",
     }
-    expected_verified_source_ids = {
-        "gsma-newsroom",
-        "light-reading-telecom",
-        "zte-official-news",
-    }
+    expected_verified_source_ids = {"zte-official-news", "c114-operators", "leiphone-feed"}
     assert expected_research_ids.issubset(briefing_ids)
     assert expected_research_ids.isdisjoint(podcast_ids)
     assert expected_verified_source_ids.issubset(briefing_ids)
     assert expected_verified_source_ids.isdisjoint(podcast_ids)
     assert "openai-web-research-telecom" not in briefing_ids
     assert "openai-web-research-ai" not in briefing_ids
-    assert "qbitai" in briefing_ids
+    assert "qbitai" not in briefing_ids
+    assert "gsma-newsroom" not in briefing_ids
+    assert "light-reading-telecom" not in briefing_ids
+
+
+def test_checked_in_research_queries_keep_ai_global_but_sources_chinese() -> None:
+    """Operator AI stays in telecom while global AI events use Chinese-language reporting."""
+    project_root = Path(__file__).resolve().parents[1]
+    sources = _load_source_configuration(project_root / "config" / "briefing.sources.yaml")
+    source_by_id = {source.id: source for source in sources.sources}
+    telecom_query = str(
+        source_by_id["openai-web-research-telecom-management"].config["query"]
+    )
+    ai_query = str(source_by_id["openai-web-research-ai-management"].config["query"])
+
+    assert "Token" in telecom_query
+    assert "运营商大模型" in telecom_query
+    assert "大模型发布" in ai_query
+    assert "热门应用" in ai_query
+    assert "Claude" in ai_query
+    assert "GPT" in ai_query
+    assert "Gemini" in ai_query
+    assert "中文" in ai_query
+    assert "国内 AI 发展新闻" not in ai_query
+    assert "中国移动" not in ai_query
+    assert "中国电信" not in ai_query
+    assert "中国联通" not in ai_query
 
 
 def test_briefing_sources_do_not_redeclare_a_default_seed_url_under_a_new_id() -> None:
@@ -900,6 +922,80 @@ def test_content_extractor_reads_a_labelled_visible_publication_time() -> None:
     asyncio.run(scenario())
 
 
+def test_content_extractor_reads_an_explicit_publishdate_meta_tag() -> None:
+    """Chinese news sites often expose the verified date as meta[name=publishdate]."""
+
+    async def scenario() -> None:
+        html = """
+        <html><head><meta name="publishdate" content="2026-08-25"></head>
+        <body><article><h1>中国移动人工智能应用动态</h1>
+        <p>中国移动在国内推出人工智能应用，并公布后续服务计划。</p>
+        <p>该项目已经完成上线验证，面向实际用户提供服务。</p>
+        </article></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            result = await ContentExtractor(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).extract(
+                "https://jx.cnr.cn/meta-publishdate",
+                FetchPolicy(timeout_seconds=2),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.published_at == datetime(2026, 8, 24, 16, tzinfo=UTC)
+
+    asyncio.run(scenario())
+
+
+def test_content_extractor_reads_a_date_immediately_followed_by_a_source_label() -> None:
+    """A dated article header followed by 来源 is an explicit publication signal."""
+
+    async def scenario() -> None:
+        html = """
+        <html><body><article><h1>移动技术赋能产业现场</h1>
+        <div class="article-header">2026-08-25 09:26 来源：北国网</div>
+        <p>中国移动将人工智能能力用于国内产业现场，并完成项目部署。</p>
+        <p>项目披露了服务范围和当前运行情况。</p>
+        </article></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            result = await ContentExtractor(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).extract(
+                "https://economy.lnd.com.cn/source-labelled-date",
+                FetchPolicy(timeout_seconds=2),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert result.published_at == datetime(2026, 8, 25, 1, 26, tzinfo=UTC)
+
+    asyncio.run(scenario())
+
+
 def test_content_extractor_reads_the_c114_article_header_time() -> None:
     """C114's unlabelled article-header time is verified only for its own article pages."""
 
@@ -1047,8 +1143,8 @@ def test_telecom_research_prompt_requires_multifacet_html_articles() -> None:
             require_verified_publication_date=True,
         ),
         CollectionWindow(
-            start=datetime(2026, 8, 20, 9, tzinfo=UTC),
-            end=datetime(2026, 8, 21, 9, tzinfo=UTC),
+            start=datetime(2026, 8, 24, 16, tzinfo=UTC),
+            end=datetime(2026, 8, 25, 16, tzinfo=UTC),
         ),
     )
 
@@ -1057,8 +1153,161 @@ def test_telecom_research_prompt_requires_multifacet_html_articles() -> None:
     assert "基站" in messages[-1].content
     assert "竞争对手" in messages[-1].content
     assert "政策" in messages[-1].content
+    assert "常州" in messages[-1].content
+    assert "江苏" in messages[-1].content
+    assert "其他地级市" in messages[-1].content
+    assert "全国" in messages[-1].content
+    assert "中国移动" in messages[-1].content
+    assert "中国电信" in messages[-1].content
+    assert "中国联通" in messages[-1].content
+    assert "北京时间：2026-08-25 00:00 至 2026-08-26 00:00" in messages[-1].content
+    assert "2026-08-24T16:00:00+00:00" not in messages[-1].content
+    assert "国内外运营商" not in messages[-1].content
     assert "HTML" in messages[-1].content
     assert "PDF" in messages[-1].content
+
+
+def test_ai_research_prompt_covers_global_models_through_chinese_sources() -> None:
+    """AI discovery covers Chinese and global events while restricting source language."""
+    messages = _research_messages(
+        ResearchSourceOptions(
+            briefing_category="ai",
+            topic="ai",
+            query="中文来源报道的全球 AI 动态",
+            publisher_preference="company_regulator_research_first_party",
+            require_verified_publication_date=True,
+        ),
+        CollectionWindow(
+            start=datetime(2026, 8, 20, 9, tzinfo=UTC),
+            end=datetime(2026, 8, 21, 9, tzinfo=UTC),
+        ),
+    )
+
+    prompt = messages[-1].content
+    assert "字节" in prompt
+    assert "腾讯" in prompt
+    assert "华为" in prompt
+    assert "小米" in prompt
+    assert "OpenAI" in prompt
+    assert "Anthropic" in prompt
+    assert "Google" in prompt
+    assert "GPT" in prompt
+    assert "Claude" in prompt
+    assert "Gemini" in prompt
+    assert "大模型" in prompt
+    assert "开源" in prompt
+    assert "本地化" in prompt
+    assert "热门应用" in prompt
+    assert "智能体" in prompt
+    assert "中文页面" in prompt
+    assert "中国移动" not in prompt
+    assert "中国电信" not in prompt
+    assert "中国联通" not in prompt
+
+
+def test_ai_research_collector_rejects_a_foreign_language_source_page() -> None:
+    """A global AI event is eligible only when its reader-facing source page is Chinese."""
+
+    class TwoLanguageWebResearchProvider:
+        provider_name = "openai_responses"
+        model = "test-model"
+
+        async def generate_web_research(
+            self,
+            messages: tuple[LLMMessage, ...],
+            response_schema: type[BaseModel],
+            model_options: dict[str, object],
+        ) -> StructuredResult:
+            del messages, response_schema, model_options
+            return StructuredResult(
+                content={
+                    "candidates": [
+                        {
+                            "title": "Claude 发布新一代企业模型",
+                            "url": "https://publisher.example.test/english",
+                            "publisher": "Foreign Tech",
+                            "finding": "Claude 发布新模型。",
+                            "published_at_hint": "2026-08-20T08:15:00+08:00",
+                        },
+                        {
+                            "title": "GPT 推出新的企业智能体能力",
+                            "url": "https://publisher.example.test/chinese",
+                            "publisher": "中文科技媒体",
+                            "finding": "GPT 企业智能体能力正式发布。",
+                            "published_at_hint": "2026-08-20T08:15:00+08:00",
+                        },
+                    ]
+                },
+                model=self.model,
+                usage=LLMUsage(input_tokens=1, output_tokens=1),
+                request_id="two-language-research",
+            )
+
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/english":
+                body = (
+                    "Anthropic released a new Claude model for enterprise workflows. "
+                    "The article explains availability, pricing, deployment and customer use cases."
+                )
+            else:
+                body = (
+                    "中文科技媒体报道，GPT 推出新的企业智能体能力，并公布产品开放范围。"
+                    "该能力面向真实业务流程，文章说明了上线时间、使用方式和企业部署安排。"
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                text=(
+                    '<html><head><meta property="article:published_time" '
+                    'content="2026-08-20T08:15:00+08:00"></head>'
+                    f"<body><article><p>{body}</p><p>{body}</p></article></body></html>"
+                ),
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            source = Source(
+                **{
+                    **source_values(),
+                    "id": "openai-web-research-ai-chinese-sources",
+                    "kind": SourceKind.WEB_RESEARCH,
+                    "entry_url": "research://ai-chinese-sources",
+                    "normalized_entry_url": "research://ai-chinese-sources",
+                    "language": "zh-CN",
+                    "config_json": json.dumps(
+                        {
+                            "briefing_category": "ai",
+                            "topic": "ai",
+                            "query": "中文来源报道的全球 AI 动态",
+                            "publisher_preference": "chinese_language_sources",
+                            "require_verified_publication_date": True,
+                        }
+                    ),
+                    "max_items_per_run": 2,
+                }
+            )
+            result = await ResearchCollector(
+                TwoLanguageWebResearchProvider(),
+                ContentExtractor(SafeHttpFetcher(client, url_validator=AllowAllUrls())),
+                WebResearchSettings(enabled=True, max_search_calls_per_source=1),
+            ).collect(
+                source,
+                CollectionWindow(
+                    start=datetime(2026, 8, 19, 9, tzinfo=UTC),
+                    end=datetime(2026, 8, 20, 9, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert [candidate.title for candidate in result.candidates] == [
+            "GPT 推出新的企业智能体能力"
+        ]
+        assert "NON_CHINESE_SOURCE" in [error.code for error in result.errors]
+
+    asyncio.run(scenario())
 
 
 def test_research_rejects_a_reader_domain_known_to_be_unreachable() -> None:
@@ -1094,12 +1343,13 @@ def test_research_collector_runs_bounded_search_calls_across_telecom_facets() ->
                 content={
                     "candidates": [
                         {
-                            "title": f"通信管理候选 {index}",
-                            "url": f"https://publisher.example.test/article-{index}",
+                            "title": f"通信管理候选 {index}-{candidate_index}",
+                            "url": f"https://publisher.example.test/article-{index}-{candidate_index}",
                             "publisher": "运营商公告",
                             "finding": "运营商公告披露了网络建设和交付安排。",
                             "published_at_hint": "2026-08-20T08:15:00+08:00",
                         }
+                        for candidate_index in (1, 2)
                     ]
                 },
                 model=self.model,
@@ -1141,6 +1391,7 @@ def test_research_collector_runs_bounded_search_calls_across_telecom_facets() ->
                         "require_verified_publication_date": True,
                     }
                 ),
+                "max_items_per_run": 4,
             }
         )
         try:
@@ -1160,6 +1411,12 @@ def test_research_collector_runs_bounded_search_calls_across_telecom_facets() ->
 
         assert len(provider.messages) == 4
         assert len(result.candidates) == 4
+        assert [candidate.url for candidate in result.candidates] == [
+            "https://publisher.example.test/article-1-1",
+            "https://publisher.example.test/article-2-1",
+            "https://publisher.example.test/article-3-1",
+            "https://publisher.example.test/article-4-1",
+        ]
         assert all("本轮重点" in messages[-1].content for messages in provider.messages)
         assert all(
             options == {"search_context_size": "medium"} for options in provider.model_options

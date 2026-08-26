@@ -111,6 +111,7 @@ def test_checked_in_management_policy_is_valid() -> None:
     assert policy.category("telecom").fallback_max_items_per_publisher == 2
     assert policy.category("ai").editorial_selection is True
     assert policy.category("ai").editorial_candidate_limit == 20
+    assert policy.category("ai").editorial_max_candidates_per_source == 10
     mobile_rule = next(
         rule for rule in policy.category("telecom").rules if rule.id == "telecom-china-mobile"
     )
@@ -159,31 +160,85 @@ def test_direct_mobile_outranks_competitor_and_policy(policy) -> None:
     ]
 
 
-def test_global_specificity_precedes_source_priority(policy) -> None:
-    """A direct China Mobile event remains ahead of a higher-priority generic P0 source."""
+def test_domestic_locality_precedes_national_subject_priority(policy) -> None:
+    """Changzhou, Jiangsu, other cities, then national is the fixed management order."""
     selected = select_evidence(
         "telecom",
         [
             _candidate(
                 article_id=1,
-                source_id="generic-source",
-                source_priority=100,
-                title="5G-A 网络商用开通",
-                content="城市无线网络部署进展",
+                source_id="national",
+                title="中国移动集团启动全国 6G 网络建设计划",
+                content="全国通信网络建设进展。",
             ),
             _candidate(
                 article_id=2,
-                source_id="mobile-source",
-                source_priority=10,
-                title="中国移动发布网络建设安排",
-                content="覆盖能力提升计划",
+                source_id="jiangsu",
+                title="江苏南京中国电信推进 5G-A 网络建设",
+                content="省内运营商公布建设进展。",
+            ),
+            _candidate(
+                article_id=3,
+                source_id="other-city",
+                title="上海中国联通开通 5G-A 网络",
+                content="地级市网络建设进展。",
+            ),
+            _candidate(
+                article_id=4,
+                source_id="changzhou",
+                title="常州中国移动启动基站改造",
+                content="常州市无线网建设项目启动。",
             ),
         ],
         policy,
         limit=5,
     )
 
-    assert [item.article_id for item in selected] == [2, 1]
+    assert [item.article_id for item in selected] == [4, 2, 3, 1]
+
+
+def test_domestic_operator_story_remains_available_as_the_last_fallback(policy) -> None:
+    """A verified operator story may fill a quiet-day slot without a narrow action keyword."""
+    selected = select_evidence(
+        "telecom",
+        [
+            _candidate(
+                title="中国联通沈阳市分公司织就数字动脉",
+                content="公司完成主干光缆扩容，持续提升本地网络承载能力。",
+            )
+        ],
+        policy,
+        limit=5,
+    )
+
+    assert [item.tier for item in selected] == ["P5"]
+
+
+@pytest.mark.parametrize(
+    "title,content",
+    [
+        (
+            "MobileX confirms CONX investment",
+            "The US mobile service provider will expand its wireless distribution.",
+        ),
+        (
+            "Omdia predicts surge in satellite IoT connections",
+            "Global satellite connectivity is forecast to expand through 2035.",
+        ),
+        (
+            "Vodafone starts nationwide 5G network deployment",
+            "The European operator announced a new RAN build.",
+        ),
+    ],
+)
+def test_foreign_telecom_news_cannot_enter_the_domestic_brief(
+    title: str, content: str, policy
+) -> None:
+    """Global telecom relevance alone cannot bypass the domestic-only boundary."""
+    assert (
+        select_evidence("telecom", [_candidate(title=title, content=content)], policy, limit=5)
+        == ()
+    )
 
 
 def test_p0_covers_each_management_subtopic_before_repeating_one_rule(policy) -> None:
@@ -200,19 +255,19 @@ def test_p0_covers_each_management_subtopic_before_repeating_one_rule(policy) ->
             _candidate(
                 article_id=2,
                 source_id="radio-source",
-                title="基站建设招标启动",
+                title="全国基站建设招标启动",
                 content="无线网新建项目推进",
             ),
             _candidate(
                 article_id=3,
                 source_id="spectrum-source",
-                title="频谱许可核发",
+                title="工信部频谱许可核发",
                 content="无线电频段调整方案公布",
             ),
             _candidate(
                 article_id=4,
                 source_id="six-g-source",
-                title="5G-A 商用开通",
+                title="全国 5G-A 商用开通",
                 content="6G 网络建设计划发布",
             ),
             _candidate(
@@ -255,19 +310,19 @@ def test_china_mobile_rule_is_capped_at_two_items_per_briefing(policy) -> None:
             _candidate(
                 article_id=4,
                 source_id="radio-source",
-                title="基站建设招标启动",
+                title="全国基站建设招标启动",
                 content="无线网新建项目推进",
             ),
             _candidate(
                 article_id=5,
                 source_id="spectrum-source",
-                title="频谱许可核发",
+                title="工信部频谱许可核发",
                 content="无线电频段调整方案公布",
             ),
             _candidate(
                 article_id=6,
                 source_id="six-g-source",
-                title="5G-A 商用开通",
+                title="全国 5G-A 商用开通",
                 content="6G 网络建设计划发布",
             ),
             _candidate(
@@ -293,21 +348,21 @@ def test_publisher_cap_prevents_one_outlet_filling_a_tier(policy) -> None:
                 article_id=1,
                 source_id="source-a",
                 source_priority=100,
-                title="基站建设项目启动",
+                title="上海基站建设项目启动",
                 content="无线网建设进展",
             ),
             _candidate(
                 article_id=2,
                 source_id="source-b",
                 source_priority=80,
-                title="基站网络商用开通",
+                title="北京基站网络商用开通",
                 content="无线网络建设进展",
             ),
             _candidate(
                 article_id=3,
                 source_id="source-a",
                 source_priority=100,
-                title="基站改造计划发布",
+                title="上海基站改造计划发布",
                 content="无线网络改造进展",
             ),
         ],
@@ -455,8 +510,8 @@ def test_ai_editorial_pool_defers_priority_to_the_llm(policy) -> None:
     assert [item.tier for item in selected] == ["LLM", "LLM"]
 
 
-def test_global_industry_body_is_a_last_resort_telecom_signal(policy) -> None:
-    """A verified GSMA network report can fill a gap, but never outranks China Mobile news."""
+def test_global_industry_body_is_not_a_domestic_telecom_signal(policy) -> None:
+    """A verified GSMA network report cannot fill a domestic management briefing."""
     selected = select_evidence(
         "telecom",
         [
@@ -470,10 +525,10 @@ def test_global_industry_body_is_a_last_resort_telecom_signal(policy) -> None:
         limit=5,
     )
 
-    assert [item.tier for item in selected] == ["P5"]
+    assert selected == ()
 
 
-def test_ai_editorial_pool_caps_each_source_before_prompting(policy) -> None:
+def test_ai_editorial_pool_keeps_deeper_valid_items_from_a_prolific_source(policy) -> None:
     """One prolific feed cannot consume the complete context window before editorial review."""
     selected = select_evidence(
         "ai",
@@ -484,11 +539,11 @@ def test_ai_editorial_pool_caps_each_source_before_prompting(policy) -> None:
                 title=f"候选文章 {index}",
                 content="经过核验的 AI 行业候选。",
             )
-            for index in range(1, 7)
+            for index in range(1, 12)
         ]
         + [
             _candidate(
-                article_id=7,
+                article_id=12,
                 source_id="other-source",
                 title="另一来源候选",
                 content="经过核验的 AI 行业候选。",
@@ -498,7 +553,7 @@ def test_ai_editorial_pool_caps_each_source_before_prompting(policy) -> None:
         limit=20,
     )
 
-    assert [item.article_id for item in selected] == [1, 7, 2, 3, 4, 5]
+    assert [item.article_id for item in selected] == [1, 12, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 
 def test_ai_editorial_prompt_excludes_papers_after_candidates_are_collected(policy) -> None:
@@ -510,3 +565,35 @@ def test_ai_editorial_prompt_excludes_papers_after_candidates_are_collected(poli
     messages = build_briefing_messages("AI 动态日报", evidence, editorial_selection=True)
 
     assert "排除纯论文、预印本、榜单" in messages[-1].content
+
+
+def test_ai_editorial_prompt_selects_global_ai_events_from_chinese_sources(policy) -> None:
+    """The AI editor balances global events without reintroducing operator bias."""
+    evidence = select_evidence(
+        "ai",
+        [_candidate(title="豆包工作正式发布", content="字节跳动推出企业办公智能体。")],
+        policy,
+        limit=5,
+    )
+
+    messages = build_briefing_messages("AI 动态日报", evidence, editorial_selection=True)
+    prompt = messages[-1].content
+
+    assert "通信行业直接相关" not in prompt
+    assert "运营商经营或网络建设" in prompt
+    assert "中文来源" in prompt
+    assert "字节" in prompt
+    assert "腾讯" in prompt
+    assert "华为" in prompt
+    assert "小米" in prompt
+    assert "OpenAI" in prompt
+    assert "Anthropic" in prompt
+    assert "Google" in prompt
+    assert "GPT" in prompt
+    assert "Claude" in prompt
+    assert "Gemini" in prompt
+    assert "大模型" in prompt
+    assert "本地化" in prompt
+    assert "热门应用" in prompt
+    assert "模型与部署" in prompt
+    assert "应用与热点" in prompt

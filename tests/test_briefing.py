@@ -210,12 +210,27 @@ def test_briefing_item_rejects_an_incomplete_headline() -> None:
     """A compact list must never shorten a headline into an ellipsis."""
     with pytest.raises(ValueError, match="headline"):
         BriefingItem(
-            headline="半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司",
+            headline="半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司并计划进入更多城市",
             summary="原文已完成事实核验。",
             why_it_matters="它反映机器人行业融资进展。",
             source_name="量子位",
             source_url="https://news.example.test/a",
         )
+
+
+def test_briefing_item_allows_a_complete_sentence_headline_longer_than_28_chars() -> None:
+    """A compact linked headline still has room to state the subject, action, and result."""
+    headline = "中国移动完成常州防汛专线升级并持续提升极端天气通信保障能力"
+
+    item = BriefingItem(
+        headline=headline,
+        summary="常州移动完成防汛专线升级并加强极端天气保障。",
+        why_it_matters="这会提升重点通信业务的连续性。",
+        source_name="江苏新闻",
+        source_url="https://news.example.test/a",
+    )
+
+    assert item.headline == headline
 
 
 def test_briefing_item_requires_an_absolute_http_source_url() -> None:
