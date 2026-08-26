@@ -32,6 +32,7 @@ from dailycast.briefing.selection import (
     BriefingSelectionCandidate,
     BriefingSelectionPolicy,
     RankedBriefingEvidence,
+    publisher_key,
     select_evidence,
 )
 from dailycast.briefing.webhook import WebhookNotifier
@@ -414,7 +415,13 @@ class BriefingService:
             model_options={},
         )
         result = BriefingResult.model_validate(structured.content)
-        return _audit_generated_result(result, evidence)
+        policy = self._selection_policy.category(category)
+        return _audit_generated_result(
+            result,
+            evidence,
+            publisher_cap=policy.max_items_per_publisher,
+            fallback_publisher_cap=policy.fallback_max_items_per_publisher,
+        )
 
     async def _generate_merged_focus(
         self,
@@ -554,6 +561,9 @@ class BriefingService:
 def _audit_generated_result(
     result: BriefingResult,
     evidence: tuple[RankedBriefingEvidence, ...],
+    *,
+    publisher_cap: int | None = None,
+    fallback_publisher_cap: int | None = None,
 ) -> BriefingResult:
     """Retain only exact evidence links, then fill any omitted verified candidates.
 
@@ -568,13 +578,31 @@ def _audit_generated_result(
     if target_count == 0:
         return BriefingResult(overview=result.overview, items=[])
 
+    effective_publisher_cap = publisher_cap
+    if effective_publisher_cap is not None:
+        primary_capacity = _publisher_capacity(evidence, effective_publisher_cap)
+        if primary_capacity < target_count and fallback_publisher_cap is not None:
+            effective_publisher_cap = fallback_publisher_cap
+        target_count = min(
+            target_count,
+            _publisher_capacity(evidence, effective_publisher_cap),
+        )
+
     evidence_by_url = {entry.evidence.source_url: entry for entry in evidence}
     accepted: list[BriefingItem] = []
     seen_urls: set[str] = set()
+    publisher_counts: dict[str, int] = {}
     dropped_count = 0
     for item in result.items:
         entry = evidence_by_url.get(item.source_url)
         if entry is None or item.source_url in seen_urls:
+            dropped_count += 1
+            continue
+        key = publisher_key(entry.evidence.source_url)
+        if (
+            effective_publisher_cap is not None
+            and publisher_counts.get(key, 0) >= effective_publisher_cap
+        ):
             dropped_count += 1
             continue
         accepted.append(
@@ -586,6 +614,7 @@ def _audit_generated_result(
             )
         )
         seen_urls.add(item.source_url)
+        publisher_counts[key] = publisher_counts.get(key, 0) + 1
         if len(accepted) == target_count:
             break
 
@@ -595,11 +624,18 @@ def _audit_generated_result(
             break
         if entry.evidence.source_url in seen_urls:
             continue
+        key = publisher_key(entry.evidence.source_url)
+        if (
+            effective_publisher_cap is not None
+            and publisher_counts.get(key, 0) >= effective_publisher_cap
+        ):
+            continue
         fallback_item = _fallback_item_from_evidence(entry)
         if fallback_item is None:
             continue
         accepted.append(fallback_item)
         seen_urls.add(entry.evidence.source_url)
+        publisher_counts[key] = publisher_counts.get(key, 0) + 1
         fallback_count += 1
 
     if dropped_count or fallback_count:
@@ -613,6 +649,17 @@ def _audit_generated_result(
             },
         )
     return BriefingResult(overview=result.overview, items=accepted)
+
+
+def _publisher_capacity(
+    evidence: tuple[RankedBriefingEvidence, ...], publisher_cap: int
+) -> int:
+    """Return how many slots a verified pool can fill under one outlet ceiling."""
+    counts: dict[str, int] = {}
+    for entry in evidence:
+        key = publisher_key(entry.evidence.source_url)
+        counts[key] = counts.get(key, 0) + 1
+    return sum(min(count, publisher_cap) for count in counts.values())
 
 
 def _fallback_item_from_evidence(entry: RankedBriefingEvidence) -> BriefingItem | None:

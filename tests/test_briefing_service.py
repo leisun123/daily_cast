@@ -325,6 +325,51 @@ def test_generated_briefing_audit_fills_omitted_verified_evidence() -> None:
     assert all("…" not in item.summary for item in audited.items)
 
 
+def test_generated_briefing_audit_limits_one_ai_publisher_and_fills_alternatives() -> None:
+    """A model cannot turn a balanced AI pool into a half-single-outlet final list."""
+    published_at = datetime(2026, 8, 25, 8, tzinfo=UTC)
+    domains = ["leiphone.com"] * 4 + [
+        "ithome.com",
+        "thepaper.cn",
+        "36kr.com",
+        "jiemian.com",
+    ]
+    evidence = tuple(
+        RankedBriefingEvidence(
+            evidence=BriefingEvidence(
+                title=f"全球 AI 产业进展 {index}",
+                source_name=f"来源 {index}",
+                published_at=published_at,
+                excerpt=f"第 {index} 个已核验事实。",
+                source_url=f"https://{domain}/article-{index}",
+            ),
+            tier="LLM",
+            specificity=0,
+            reason="已通过时间、正文和原文链接核验",
+            rule_id="editorial-llm",
+            source_id=f"source-{index}",
+            source_priority=100,
+            discovered_at=published_at,
+            article_id=index,
+        )
+        for index, domain in enumerate(domains, start=1)
+    )
+    selected_urls = [entry.evidence.source_url for entry in evidence[:6]]
+    result = BriefingResult.model_validate(_llm_payloads(selected_urls, "AI 中文来源"))
+
+    audited = _audit_generated_result(
+        result,
+        evidence,
+        publisher_cap=2,
+        fallback_publisher_cap=6,
+    )
+
+    assert len(audited.items) == 6
+    assert sum("leiphone.com" in item.source_url for item in audited.items) == 2
+    assert any("36kr.com" in item.source_url for item in audited.items)
+    assert any("jiemian.com" in item.source_url for item in audited.items)
+
+
 def test_generated_briefing_audit_drops_an_omitted_long_raw_title() -> None:
     """A filler may not turn a publisher's long headline into a broken chat title."""
     published_at = datetime(2026, 8, 24, 8, tzinfo=UTC)

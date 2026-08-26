@@ -129,6 +129,10 @@ categories:
     # Keep source balance but do not let early paper-only entries hide later
     # verified product and deployment news from the same reliable feed.
     editorial_max_candidates_per_source: 10
+    # Prefer at most two reports from one outlet. If the verified pool genuinely
+    # lacks alternatives, relax only enough to keep the six-item report complete.
+    max_items_per_publisher: 2
+    fallback_max_items_per_publisher: 6
     rules: []
     fallback_any_of: []
     global_excludes: []

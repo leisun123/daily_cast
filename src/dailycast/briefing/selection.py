@@ -396,13 +396,13 @@ def _publisher_capacity_available(
     item: RankedBriefingEvidence, publisher_counts: dict[str, int], publisher_cap: int
 ) -> bool:
     """Keep every pass subject to the same cross-feed publisher ceiling."""
-    return publisher_counts.get(_publisher_key(item.evidence.source_url), 0) < publisher_cap
+    return publisher_counts.get(publisher_key(item.evidence.source_url), 0) < publisher_cap
 
 
 def _record_publisher(item: RankedBriefingEvidence, publisher_counts: dict[str, int]) -> None:
     """Count a selected item against the normalized outlet domain."""
-    publisher_key = _publisher_key(item.evidence.source_url)
-    publisher_counts[publisher_key] = publisher_counts.get(publisher_key, 0) + 1
+    key = publisher_key(item.evidence.source_url)
+    publisher_counts[key] = publisher_counts.get(key, 0) + 1
 
 
 def _rule_capacity_available(
@@ -420,7 +420,7 @@ def _record_rule(item: RankedBriefingEvidence, rule_counts: dict[str, int]) -> N
     rule_counts[item.rule_id] = rule_counts.get(item.rule_id, 0) + 1
 
 
-def _publisher_key(url: str) -> str:
+def publisher_key(url: str) -> str:
     """Treat all feeds resolving to one outlet domain as one briefing publisher."""
     hostname = urlsplit(url).hostname
     if hostname is None:

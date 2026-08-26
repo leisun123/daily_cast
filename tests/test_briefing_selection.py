@@ -112,6 +112,8 @@ def test_checked_in_management_policy_is_valid() -> None:
     assert policy.category("ai").editorial_selection is True
     assert policy.category("ai").editorial_candidate_limit == 20
     assert policy.category("ai").editorial_max_candidates_per_source == 10
+    assert policy.category("ai").max_items_per_publisher == 2
+    assert policy.category("ai").fallback_max_items_per_publisher == 6
     mobile_rule = next(
         rule for rule in policy.category("telecom").rules if rule.id == "telecom-china-mobile"
     )
