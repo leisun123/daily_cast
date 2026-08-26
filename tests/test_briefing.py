@@ -107,7 +107,7 @@ def test_merged_renderer_keeps_the_model_selected_theme_before_each_headline() -
 
 
 def test_merged_renderer_uses_a_natural_yesterday_focus_sentence() -> None:
-    """The chat header displays one editor-written daily focus unchanged."""
+    """The focus stays readable when WeCom renders quoted Markdown V2 text."""
     telecom_url = "https://news.example.test/telecom"
     ai_url = "https://news.example.test/ai"
     telecom_result = BriefingResult(
@@ -129,9 +129,10 @@ def test_merged_renderer_uses_a_natural_yesterday_focus_sentence() -> None:
     )
 
     assert (
-        "> **昨日关注：**运营商将算力投资与6G演进同步推进；国内 AI 侧，国产模型与智能体应用加速"
+        "## 昨日关注\n> 运营商将算力投资与6G演进同步推进；国内 AI 侧，国产模型与智能体应用加速"
         in markdown
     )
+    assert "> **昨日关注：**" not in markdown
     assert "通信：" not in markdown
     assert "AI：" not in markdown
     assert "运营商将算力投资、6G战略和网络智能化同步推进" not in markdown

@@ -534,7 +534,7 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
     assert "## 📡 通信" in delivered
     assert "## 🤖 AI" in delivered
     assert (
-        "> **昨日关注：**运营商将算力投资、6G战略和网络智能化同步推进；"
+        "## 昨日关注\n> 运营商将算力投资、6G战略和网络智能化同步推进；"
         "国内 AI 侧，国产模型与智能体应用加速。"
         in delivered
     )
@@ -766,7 +766,7 @@ def test_briefing_run_skips_a_category_without_eligible_articles(
     assert llm.operations == [LLMOperation.GENERATE_BRIEFING]
     briefings = read_briefings_for_date(output_dir, date.fromisoformat(report.date))
     assert set(briefings) == {"telecom", "merged"}
-    assert "> **昨日关注：**通信与AI行业多项进展同步推进。" in briefings["merged"]
+    assert "## 昨日关注\n> 通信与AI行业多项进展同步推进。" in briefings["merged"]
     assert len(llm.focus_prompts) == 1
 
 

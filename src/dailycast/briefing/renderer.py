@@ -77,7 +77,9 @@ def render_merged_briefing(
 
     lines = [f"# 【行业观察日报】{briefing_date.month}月{briefing_date.day}日"]
     if focus is not None and focus.strip():
-        lines.extend(["", f"> **昨日关注：**{focus.strip()}"])
+        # Keep heading and quote as sibling blocks: some WeCom clients render
+        # bold markers literally when they are nested inside a quote.
+        lines.extend(["", "## 昨日关注", f"> {focus.strip()}"])
     number = 0
     for heading, items in sections:
         section_lines = ["", f"## {heading}"]
