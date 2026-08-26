@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from dailycast.briefing.prompt import build_briefing_messages
+from dailycast.briefing.prompt import build_briefing_messages, build_merged_focus_messages
 from dailycast.briefing.renderer import (
     RENDER_BYTE_BUDGET,
     render_briefing,
@@ -136,6 +136,20 @@ def test_merged_renderer_uses_a_natural_yesterday_focus_sentence() -> None:
     assert "AI：" not in markdown
     assert "运营商将算力投资、6G战略和网络智能化同步推进" not in markdown
     assert "国内AI企业持续推进基础设施建设" not in markdown
+
+
+def test_merged_focus_prompt_keeps_global_ai_scope_with_chinese_sources() -> None:
+    """The lead must not relabel global AI stories as domestic AI events."""
+    result = BriefingResult(
+        overview="全球模型和基础设施继续演进。",
+        items=[_item("https://news.example.test/global-ai")],
+    )
+
+    prompt = build_merged_focus_messages([("AI", result)])[-1].content
+
+    assert "全球AI动态" in prompt
+    assert "中文来源" in prompt
+    assert "国内AI侧" not in prompt
 
 
 def test_merged_renderer_keeps_six_items_per_category_in_one_message() -> None:
