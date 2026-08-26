@@ -43,7 +43,7 @@ briefing:
   sources_config_path: ./config/briefing.sources.yaml
   selection_policy_path: ./config/briefing.selection.yaml
   cron_expression: "25 8 * * mon-fri"
-  max_items_per_category: 5
+  max_items_per_category: 6
   # Inject DAILYCAST_BRIEFING__RSSHUB_BASE_URL as a Zeabur variable to enable
   # configured rsshub:// sources. Use a controlled or self-hosted instance.
   rsshub_base_url: null

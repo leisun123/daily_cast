@@ -7,7 +7,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-MAX_BRIEFING_ITEMS = 5
+MAX_BRIEFING_ITEMS = 6
 
 
 def _compact_complete_sentence(value: object, max_length: int) -> object:

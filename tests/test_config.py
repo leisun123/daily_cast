@@ -300,18 +300,18 @@ def test_default_llm_model_is_gpt_5_6_terra() -> None:
     assert LLMSettings().model == "gpt-5.6-terra"
 
 
-def test_briefing_defaults_to_five_items_per_category() -> None:
-    """Detailed prose reserves enough WeCom space by default."""
+def test_briefing_defaults_to_six_items_per_category() -> None:
+    """The production default preserves the agreed six stories in each section."""
     settings = BriefingSettings()
 
-    assert settings.max_items_per_category == 5
+    assert settings.max_items_per_category == 6
     assert settings.selection_policy_path == Path("config/briefing.selection.yaml")
 
 
-def test_briefing_rejects_more_than_five_items_per_category() -> None:
-    """One category must never crowd out the detail in its own message."""
+def test_briefing_rejects_more_than_six_items_per_category() -> None:
+    """The agreed six-item section cap remains bounded for one WeCom message."""
     with pytest.raises(ValueError, match="max_items_per_category"):
-        BriefingSettings(max_items_per_category=6)
+        BriefingSettings(max_items_per_category=7)
 
 
 def test_web_research_defaults_to_disabled_with_bounded_discovery(

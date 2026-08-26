@@ -592,6 +592,7 @@ def test_ai_editorial_prompt_selects_global_ai_events_from_chinese_sources(polic
     assert "GPT" in prompt
     assert "Claude" in prompt
     assert "Gemini" in prompt
+    assert "阅读的 6 条" in prompt
     assert "大模型" in prompt
     assert "本地化" in prompt
     assert "热门应用" in prompt

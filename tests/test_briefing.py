@@ -138,6 +138,44 @@ def test_merged_renderer_uses_a_natural_yesterday_focus_sentence() -> None:
     assert "国内AI企业持续推进基础设施建设" not in markdown
 
 
+def test_merged_renderer_keeps_six_items_per_category_in_one_message() -> None:
+    """The final WeCom artifact carries the agreed 6+6 stories without splitting."""
+    telecom_urls = [f"https://telecom.example.test/{index}" for index in range(1, 7)]
+    ai_urls = [f"https://ai.example.test/{index}" for index in range(1, 7)]
+    telecom_items = [
+        _item(url).model_copy(update={"headline": f"通信新闻第{index}条"})
+        for index, url in enumerate(telecom_urls, start=1)
+    ]
+    ai_items = [
+        _item(url).model_copy(update={"headline": f"AI新闻第{index}条"})
+        for index, url in enumerate(ai_urls, start=1)
+    ]
+
+    markdown = render_merged_briefing(
+        date(2026, 8, 25),
+        [
+            (
+                "通信",
+                "📡 通信",
+                BriefingResult(overview="通信动态。", items=telecom_items),
+                [_evidence(source_url=url) for url in telecom_urls],
+            ),
+            (
+                "AI",
+                "🤖 AI",
+                BriefingResult(overview="AI动态。", items=ai_items),
+                [_evidence(source_url=url) for url in ai_urls],
+            ),
+        ],
+        focus="通信网络与人工智能产业均出现新的产品和建设进展。",
+    )
+
+    assert markdown.count("https://telecom.example.test/") == 6
+    assert markdown.count("https://ai.example.test/") == 6
+    assert "12. " in markdown
+    assert len(markdown.encode("utf-8")) <= RENDER_BYTE_BUDGET
+
+
 def test_briefing_result_accepts_a_valid_payload() -> None:
     """The LLM output contract keeps the fields the deterministic renderer needs."""
     result = BriefingResult.model_validate(
@@ -163,9 +201,9 @@ def test_briefing_result_rejects_extra_fields() -> None:
         BriefingResult.model_validate({"overview": "概览。", "items": [], "unexpected": 1})
 
 
-def test_briefing_result_rejects_more_than_five_items() -> None:
-    """The item cap keeps detailed entries inside the per-message byte budget."""
-    items = [_item(f"https://news.example.test/{index}").model_dump() for index in range(6)]
+def test_briefing_result_rejects_more_than_six_items() -> None:
+    """A category may contain six stories but may not exceed the agreed section cap."""
+    items = [_item(f"https://news.example.test/{index}").model_dump() for index in range(7)]
     with pytest.raises(ValueError):
         BriefingResult.model_validate({"overview": "概览。", "items": items})
 

@@ -98,7 +98,7 @@ class BriefingSettings(BaseModel):
     selection_policy_path: Path = Path("config/briefing.selection.yaml")
     cron_expression: str = "30 8 * * mon-fri"
     window_hours: int = Field(default=24, ge=1, le=168)
-    max_items_per_category: int = Field(default=5, ge=1, le=5)
+    max_items_per_category: int = Field(default=6, ge=1, le=6)
     max_evidence_chars_per_article: int = Field(default=800, ge=1, le=8000)
     # `rsshub://` source routes are resolved through this deployment-controlled
     # HTTP(S) endpoint. Keep it unset unless the deployment has a known-good

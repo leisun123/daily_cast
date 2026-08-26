@@ -155,7 +155,7 @@ briefing:
   sources_config_path: ./config/briefing.sources.yaml
   cron_expression: "30 8 * * mon-fri"
   window_hours: 24
-  max_items_per_category: 5
+  max_items_per_category: 6
   max_evidence_chars_per_article: 800
   # Set DAILYCAST_BRIEFING__RSSHUB_BASE_URL to a known-good RSSHub instance to
   # enable configured rsshub:// sources such as 36Kr's 24-hour hot list.

@@ -161,7 +161,7 @@ briefing:
   selection_policy_path: ./config/briefing.selection.yaml
   cron_expression: "30 8 * * mon-fri"
   window_hours: 24
-  max_items_per_category: 5
+  max_items_per_category: 6
   max_evidence_chars_per_article: 800
   # Optional HTTP(S) endpoint for configured rsshub:// feeds such as 36Kr
   # 24-hour hot list. Use your known-good/self-hosted RSSHub instance; do not

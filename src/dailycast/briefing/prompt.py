@@ -43,7 +43,8 @@ def build_briefing_messages(
         )
     selection_instruction = (
         "这些候选均已通过时间、正文、中文来源与原文链接核验。请由你自行挑选最值得中国移动管理层"
-        "阅读的 5 条全球 AI 发展新闻，不得因为一条新闻与通信行业相关就提高其优先级。事件范围不限"
+        f"阅读的 {MAX_BRIEFING_ITEMS} 条全球 AI 发展新闻，不得因为一条新闻与通信行业相关就提高其"
+        "优先级。事件范围不限"
         "国内：既覆盖字节、腾讯、华为、小米、阿里、百度、DeepSeek、智谱、月之暗面、MiniMax，"
         "也覆盖 OpenAI GPT、Anthropic Claude、Google Gemini、Meta Llama、xAI Grok 等全球重要"
         "大模型的发布、升级、开源、本地化或私有化部署；同时覆盖 AI 基础设施、"
