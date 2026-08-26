@@ -9,7 +9,7 @@ categories:
     # A single outlet must not fill the management briefing, even through multiple feeds.
     max_items_per_publisher: 1
     # If distinct verified outlets cannot fill the report, one outlet may contribute
-    # one additional item; it still can never dominate the five-item briefing.
+    # one additional item; it still can never dominate the six-item briefing.
     fallback_max_items_per_publisher: 2
     rules:
       - id: telecom-changzhou
@@ -122,7 +122,7 @@ categories:
   ai:
     # AI relevance is editorial rather than keyword-gated: candidate links have
     # already passed freshness and reader-link verification, then the LLM selects
-    # the 3-5 management-relevant items from a source-balanced pool.
+    # the six management-relevant items from a source-balanced pool.
     tiers: [LLM]
     editorial_selection: true
     editorial_candidate_limit: 20
