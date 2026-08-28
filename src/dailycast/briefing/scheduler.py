@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.service import BriefingRunInProgressError, BriefingRunReport
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ class BriefingScheduler:
         preparation_retry_cron_expression: str,
         delivery_cron_expression: str,
         timezone: str,
+        alert: BriefingAlert | None = None,
+        preflight: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._prepare = prepare
         self._deliver = deliver
@@ -34,6 +37,8 @@ class BriefingScheduler:
         self._preparation_retry_cron_expression = preparation_retry_cron_expression
         self._delivery_cron_expression = delivery_cron_expression
         self._timezone = timezone
+        self._alert = alert
+        self._preflight = preflight
         self._scheduler: AsyncIOScheduler | None = None
 
     def start(self) -> None:
@@ -95,20 +100,40 @@ class BriefingScheduler:
             self._scheduler.shutdown(wait=False)
 
     async def trigger_prepare(self) -> None:
-        """Prepare one briefing while keeping a failed tick isolated from the process."""
+        """Probe providers, then prepare one briefing, keeping a failed tick isolated."""
+        await self._run_preflight()
         try:
             await self._prepare()
         except BriefingRunInProgressError:
             logger.info("scheduled briefing preparation skipped: a run is already in progress")
-        except Exception:
+        except Exception as error:
+            await self._alert_message("消息生成", error)
             logger.exception("scheduled briefing preparation failed")
 
     async def trigger_delivery(self) -> None:
         """Deliver the already-persisted briefing without any collection or LLM work."""
         try:
             await self._deliver()
-        except Exception:
+        except BriefingRunInProgressError:
+            logger.info("scheduled briefing delivery skipped: a run is already in progress")
+        except Exception as error:
+            await self._alert_message("企业微信发送", error)
             logger.exception("scheduled briefing delivery failed")
+
+    async def _run_preflight(self) -> None:
+        """Best-effort provider probe; a broken probe must never block preparation."""
+        if self._preflight is None:
+            return
+        try:
+            await self._preflight()
+        except Exception:
+            logger.exception("briefing provider preflight failed")
+
+    async def _alert_message(self, stage: str, error: Exception) -> None:
+        """Notify the monitoring robot; a second webhook cannot destabilize scheduling."""
+        if self._alert is None:
+            return
+        await self._alert(stage, error)
 
     @staticmethod
     def _is_uvicorn_reload() -> bool:

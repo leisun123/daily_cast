@@ -1,10 +1,11 @@
 """FastAPI lifespan that initializes the currently implemented runtime infrastructure."""
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -13,6 +14,8 @@ from fastapi import FastAPI
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from dailycast.briefing.alerts import BriefingAlert, build_alert
+from dailycast.briefing.monitoring import preflight_providers
 from dailycast.briefing.scheduler import BriefingScheduler
 from dailycast.briefing.selection import load_selection_policy
 from dailycast.briefing.service import BriefingService
@@ -392,6 +395,18 @@ def _build_briefing_runtime(
             settings.briefing.webhook_url,
             payload_format=settings.briefing.webhook_format,
         )
+    alert: BriefingAlert | None = None
+    if settings.monitoring.webhook_url:
+        alert = build_alert(
+            settings.monitoring.webhook_url,
+            payload_format=settings.monitoring.webhook_format,
+            timezone=settings.app.timezone,
+        )
+
+    preflight: Callable[[], Awaitable[None]] | None = None
+    if alert is not None:
+        configured_providers = getattr(llm_provider, "providers", (llm_provider,))
+        preflight = partial(preflight_providers, configured_providers, alert)
     briefing_service = BriefingService(
         session_factory,
         collection_service,
@@ -400,6 +415,7 @@ def _build_briefing_runtime(
         news_processor,
         llm_provider,
         notifier,
+        alert=alert,
         window_hours=settings.briefing.window_hours,
         max_items_per_category=settings.briefing.max_items_per_category,
         max_evidence_chars_per_article=settings.briefing.max_evidence_chars_per_article,
@@ -420,6 +436,8 @@ def _build_briefing_runtime(
         preparation_retry_cron_expression=settings.briefing.preparation_retry_cron_expression,
         delivery_cron_expression=settings.briefing.cron_expression,
         timezone=settings.app.timezone,
+        alert=alert,
+        preflight=preflight,
     )
     try:
         briefing_scheduler.start()

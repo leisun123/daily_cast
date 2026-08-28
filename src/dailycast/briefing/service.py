@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.prompt import (
     build_briefing_messages,
     build_briefing_repair_messages,
@@ -137,6 +138,7 @@ class BriefingService:
         llm_provider: LLMProvider,
         notifier: WebhookNotifier | None,
         *,
+        alert: BriefingAlert | None = None,
         window_hours: int = 24,
         max_items_per_category: int = 10,
         max_evidence_chars_per_article: int = 800,
@@ -154,6 +156,7 @@ class BriefingService:
         self._news_processor = news_processor
         self._llm_provider = llm_provider
         self._notifier = notifier
+        self._alert = alert
         self._window_hours = window_hours
         self._max_items_per_category = max_items_per_category
         self._max_evidence_chars_per_article = max_evidence_chars_per_article
@@ -331,6 +334,7 @@ class BriefingService:
                     "briefing_date": briefing_date.isoformat(),
                 },
             )
+            await self._alert_message("日报未准备好", RuntimeError(NOT_PREPARED))
             return BriefingRunReport(
                 date=briefing_date.isoformat(),
                 categories=tuple(
@@ -513,6 +517,7 @@ class BriefingService:
         try:
             result = await self._generate_result(category, evidence, provider)
         except Exception as error:
+            await self._alert_message(f"消息生成（{CATEGORY_TITLES[category]}）", error)
             logger.exception(
                 "briefing model generation failed; using evidence fallback",
                 extra={"category": category, "error": str(error)},
@@ -793,13 +798,20 @@ class BriefingService:
         await self._notifier.push(markdown)
         return "sent"
 
+    async def _alert_message(self, stage: str, error: Exception) -> None:
+        """Notify the monitoring robot without changing the briefing's fallback behavior."""
+        if self._alert is None:
+            return
+        await self._alert(stage, error)
+
     async def _push(self, markdown: str) -> str:
         """Push one rendered briefing without turning a push failure into a lost file."""
         if self._notifier is None:
             return "disabled"
         try:
             await self._notifier.push(markdown)
-        except Exception:
+        except Exception as error:
+            await self._alert_message("企业微信发送", error)
             logger.exception("briefing webhook push failed")
             return "failed"
         return "sent"

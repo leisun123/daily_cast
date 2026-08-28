@@ -137,6 +137,9 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
 ) -> None:
     """Zeabur supplies only dynamic values while this checked-in YAML owns stable defaults."""
     monkeypatch.setenv("DAILYCAST_BRIEFING__WEBHOOK_URL", "https://qyapi.example.test/hook")
+    monkeypatch.setenv(
+        "DAILYCAST_MONITORING__WEBHOOK_URL", "https://qyapi.example.test/alert-hook"
+    )
     settings = load_settings(
         config_path=Path(__file__).resolve().parents[1] / "config" / "zeabur.yaml",
         env_file=tmp_path / "absent.env",
@@ -158,6 +161,8 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.briefing.preparation_cron_expression == "55 7 * * mon-fri"
     assert settings.briefing.preparation_retry_cron_expression == "15 8 * * mon-fri"
     assert settings.briefing.cron_expression == "30 8 * * mon-fri"
+    assert settings.monitoring.webhook_url == "https://qyapi.example.test/alert-hook"
+    assert settings.monitoring.webhook_format == "wecom_markdown_v2"
     # The briefing budget work reintroduced explicit per-provider and per-run
     # output ceilings so BudgetReservingLLMProvider can reserve per attempt.
     assert settings.llm.max_output_tokens == 2000

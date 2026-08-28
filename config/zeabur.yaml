@@ -52,6 +52,11 @@ briefing:
   webhook_enabled: true
   webhook_format: wecom_markdown_v2
 
+# Operational alerts go to a separate Enterprise WeChat robot. Set
+# DAILYCAST_MONITORING__WEBHOOK_URL in Zeabur; no extra enable switch is used.
+monitoring:
+  webhook_format: wecom_markdown_v2
+
 # Search discovery uses the configured GPT Responses provider's native web-search
 # tool. Every returned URL is still fetched, publication-date checked, and
 # link-verified locally before a briefing may use it.
