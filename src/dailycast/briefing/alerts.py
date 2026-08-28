@@ -3,73 +3,56 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from datetime import datetime
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from dailycast.briefing.webhook import WebhookNotifier
+import httpx
+
+from dailycast.briefing.webhook import WebhookFormat, WebhookNotifier
 
 logger = logging.getLogger(__name__)
 
+BriefingAlert = Callable[[str, Exception], Awaitable[None]]
 
-class BriefingAlertReporter:
-    """Send a compact operational alert without changing the failed briefing outcome."""
 
-    def __init__(
-        self,
-        notifier: WebhookNotifier | None,
-        *,
-        now: Callable[[], datetime],
-        timezone: str,
-    ) -> None:
-        self._notifier = notifier
-        self._now = now
-        self._timezone = ZoneInfo(timezone)
+def build_alert(
+    webhook_url: str,
+    *,
+    payload_format: WebhookFormat = "wecom_markdown_v2",
+    timezone: str = "Asia/Shanghai",
+    now: Callable[[], datetime] | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> BriefingAlert:
+    """Build one ``alertmsg(stage, error)`` that never disturbs the briefing flow."""
+    notifier = WebhookNotifier(webhook_url, payload_format=payload_format, client=client)
+    clock = now or (lambda: datetime.now(UTC))
+    tz = ZoneInfo(timezone)
 
-    async def report(
-        self,
-        *,
-        stage: str,
-        error: Exception | str,
-        briefing_date: str | None = None,
-    ) -> None:
-        """Best-effort push that never replaces the original briefing failure."""
-        if self._notifier is None:
-            return
-        try:
-            await self._notifier.push(
-                self._render(stage=stage, error=error, briefing_date=briefing_date)
+    async def alertmsg(stage: str, error: Exception) -> None:
+        triggered_at = clock().astimezone(tz)
+        markdown = "\n".join(
+            (
+                "# DailyCast 异常告警",
+                "",
+                f"- 环节：{stage}",
+                f"- 时间：{triggered_at:%Y-%m-%d %H:%M}（{tz.key}）",
+                f"- 错误：{_error_summary(error)}",
             )
+        )
+        try:
+            await notifier.push(markdown)
         except Exception:
             logger.exception("briefing alert webhook push failed", extra={"stage": stage})
 
-    def _render(
-        self,
-        *,
-        stage: str,
-        error: Exception | str,
-        briefing_date: str | None,
-    ) -> str:
-        triggered_at = self._now().astimezone(self._timezone)
-        lines = [
-            "# DailyCast 异常告警",
-            "",
-            f"- 环节：{stage}",
-            f"- 时间：{triggered_at:%Y-%m-%d %H:%M}（{self._timezone.key}）",
-        ]
-        if briefing_date is not None:
-            lines.append(f"- 报告日期：{briefing_date}")
-        lines.append(f"- 错误：{_error_summary(error)}")
-        return "\n".join(lines)
+    return alertmsg
 
 
-def _error_summary(error: Exception | str) -> str:
+def _error_summary(error: Exception) -> str:
     """Keep one actionable, single-line error summary suitable for a group alert."""
-    if isinstance(error, Exception):
-        label = error.__class__.__name__
-        detail = str(error)
-        return label if not detail else f"{label}: {_single_line(detail)}"
-    return _single_line(error)
+    label = error.__class__.__name__
+    detail = str(error)
+    return label if not detail else f"{label}: {_single_line(detail)}"
 
 
 def _single_line(value: str) -> str:
@@ -77,4 +60,4 @@ def _single_line(value: str) -> str:
     return " ".join(value.split())[:240]
 
 
-__all__ = ["BriefingAlertReporter"]
+__all__ = ["BriefingAlert", "build_alert"]

@@ -126,7 +126,6 @@ class MonitoringSettings(BaseModel):
 
     webhook_url: str | None = None
     webhook_format: WebhookFormat = "wecom_markdown_v2"
-    provider_preflight_cron_expression: str = "40 7 * * mon-fri"
 
 
 class WebResearchSettings(BaseModel):

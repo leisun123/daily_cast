@@ -13,6 +13,7 @@ from editorial_test_support import upgraded_session_factory
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
+from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.renderer import RENDER_BYTE_BUDGET
 from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
 from dailycast.briefing.selection import (
@@ -23,7 +24,6 @@ from dailycast.briefing.selection import (
 from dailycast.briefing.service import (
     ALREADY_COMPLETED,
     ALREADY_PREPARED,
-    NOT_PREPARED,
     BriefingRunInProgressError,
     BriefingService,
     _audit_generated_result,
@@ -219,16 +219,14 @@ class RecordingNotifier(WebhookNotifier):
         self.pushed.append(markdown)
 
 
-class RecordingAlertReporter:
-    """Capture the operation alert requested by the briefing service."""
+class _RecordedAlerts:
+    """Capture the (stage, error) pairs the briefing service reports."""
 
     def __init__(self) -> None:
-        self.events: list[tuple[str, str, str | None]] = []
+        self.events: list[tuple[str, str]] = []
 
-    async def report(
-        self, *, stage: str, error: Exception | str, briefing_date: str | None = None
-    ) -> None:
-        self.events.append((stage, str(error), briefing_date))
+    async def alertmsg(self, stage: str, error: Exception) -> None:
+        self.events.append((stage, str(error)))
 
 
 class FailingNotifier(WebhookNotifier):
@@ -556,7 +554,7 @@ def _build_service(
     briefing_source_ids: frozenset[str] | None = None,
     selection_policy: BriefingSelectionPolicy | None = None,
     clock: Clock | None = None,
-    alert_reporter: RecordingAlertReporter | None = None,
+    alert: BriefingAlert | None = None,
 ) -> BriefingService:
     article_service = ArticleService(factory, clock=clock)
     collection_service = SourceCollectionService(
@@ -575,7 +573,7 @@ def _build_service(
         news_processor,
         llm,
         notifier,
-        alert_reporter=alert_reporter,
+        alert=alert,
         output_dir=output_dir,
         budget_factory=budget_factory,
         briefing_source_ids=briefing_source_ids,
@@ -871,65 +869,20 @@ def test_briefing_model_fallback_reports_the_generation_error(
 ) -> None:
     """A title-list fallback remains deliverable but does not hide a model outage from operators."""
     _seed_source(session_factory, "telecom-source", category="telecom")
-    alerts = RecordingAlertReporter()
+    alerts = _RecordedAlerts()
     service = _build_service(
         session_factory,
         tmp_path / "briefings",
         collector=FakeRSSCollector({"telecom-source": [_candidate("telecom-source", "t1")]}),
         llm=FakeBriefingLLM({"通信行业日报": RuntimeError("llm unavailable")}),
         notifier=None,
-        alert_reporter=alerts,
+        alert=alerts.alertmsg,
     )
 
     report = asyncio.run(service.prepare())
 
     assert report.date == "2026-08-27"
-    assert alerts.events == [("消息生成", "llm unavailable", "2026-08-27")]
-
-
-def test_briefing_focus_fallback_reports_the_generation_error(
-    session_factory: sessionmaker[Session], tmp_path: Path
-) -> None:
-    """The compact title list can still send when its generated lead sentence fails."""
-    collector, llm = _two_category_setup(session_factory)
-    llm._results_by_marker["最终「昨日关注」"] = RuntimeError("focus unavailable")
-    alerts = RecordingAlertReporter()
-    service = _build_service(
-        session_factory,
-        tmp_path / "briefings",
-        collector=collector,
-        llm=llm,
-        notifier=None,
-        alert_reporter=alerts,
-    )
-
-    report = asyncio.run(service.prepare())
-
-    assert report.date == "2026-08-27"
-    assert alerts.events == [("消息生成", "focus unavailable", "2026-08-27")]
-
-
-def test_briefing_preparation_reports_when_no_complete_message_is_ready(
-    session_factory: sessionmaker[Session], tmp_path: Path
-) -> None:
-    """A successful but empty collection cannot leave 08:30 silently unable to send."""
-    _seed_source(session_factory, "telecom-source", category="telecom")
-    alerts = RecordingAlertReporter()
-    service = _build_service(
-        session_factory,
-        tmp_path / "briefings",
-        collector=FakeRSSCollector({"telecom-source": []}),
-        llm=FakeBriefingLLM({}),
-        notifier=None,
-        alert_reporter=alerts,
-    )
-
-    report = asyncio.run(service.prepare())
-
-    assert report.date == "2026-08-27"
-    assert alerts.events == [
-        ("消息生成", "no complete prepared message", "2026-08-27")
-    ]
+    assert alerts.events == [("消息生成", "llm unavailable")]
 
 
 def test_briefing_push_failure_reports_the_delivery_error(
@@ -937,20 +890,20 @@ def test_briefing_push_failure_reports_the_delivery_error(
 ) -> None:
     """A failed main webhook alerts operators while its saved message remains retryable."""
     collector, llm = _two_category_setup(session_factory)
-    alerts = RecordingAlertReporter()
+    alerts = _RecordedAlerts()
     service = _build_service(
         session_factory,
         tmp_path / "briefings",
         collector=collector,
         llm=llm,
         notifier=FailingNotifier(),
-        alert_reporter=alerts,
+        alert=alerts.alertmsg,
     )
 
     report = asyncio.run(service.run())
 
     assert report.date == "2026-08-27"
-    assert alerts.events == [("企业微信发送", "webhook down", "2026-08-27")]
+    assert alerts.events == [("企业微信发送", "webhook down")]
 
 
 def test_model_outage_sends_six_explicitly_degraded_verified_titles(
@@ -1393,26 +1346,6 @@ def test_prepared_delivery_pushes_saved_markdown_without_recollecting_or_regener
     assert llm.operations == generated_before_delivery
     assert all(entry.push_status == "sent" for entry in delivered.categories)
     assert len(list(output_dir.glob("*.done"))) == 2
-
-
-def test_prepared_delivery_reports_when_no_message_is_available(
-    session_factory: sessionmaker[Session], tmp_path: Path
-) -> None:
-    """The 08:30 delivery path reports a missing prepared message itself."""
-    alerts = RecordingAlertReporter()
-    service = _build_service(
-        session_factory,
-        tmp_path / "briefings",
-        collector=FakeRSSCollector({}),
-        llm=FakeBriefingLLM({}),
-        notifier=RecordingNotifier(),
-        alert_reporter=alerts,
-    )
-
-    report = asyncio.run(service.deliver_prepared())
-
-    assert all(entry.reason == NOT_PREPARED for entry in report.categories)
-    assert alerts.events == [("企业微信发送", NOT_PREPARED, "2026-08-27")]
 
 
 def test_force_run_regenerates_despite_completion_markers(

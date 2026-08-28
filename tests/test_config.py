@@ -163,7 +163,6 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.briefing.cron_expression == "30 8 * * mon-fri"
     assert settings.monitoring.webhook_url == "https://qyapi.example.test/alert-hook"
     assert settings.monitoring.webhook_format == "wecom_markdown_v2"
-    assert settings.monitoring.provider_preflight_cron_expression == "40 7 * * mon-fri"
     # The briefing budget work reintroduced explicit per-provider and per-run
     # output ceilings so BudgetReservingLLMProvider can reserve per attempt.
     assert settings.llm.max_output_tokens == 2000

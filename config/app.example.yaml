@@ -178,7 +178,6 @@ briefing:
 # URL with DAILYCAST_MONITORING__WEBHOOK_URL; no boolean enable switch is used.
 monitoring:
   webhook_format: wecom_markdown_v2
-  provider_preflight_cron_expression: "40 7 * * mon-fri"
 
 # Native OpenAI web-search discovery is disabled in local development unless
 # explicitly enabled. It is used only by the briefing-specific web_research

@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.briefing.alerts import BriefingAlertReporter
+from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.prompt import (
     build_briefing_messages,
     build_briefing_repair_messages,
@@ -138,7 +138,7 @@ class BriefingService:
         llm_provider: LLMProvider,
         notifier: WebhookNotifier | None,
         *,
-        alert_reporter: BriefingAlertReporter | None = None,
+        alert: BriefingAlert | None = None,
         window_hours: int = 24,
         max_items_per_category: int = 10,
         max_evidence_chars_per_article: int = 800,
@@ -156,7 +156,7 @@ class BriefingService:
         self._news_processor = news_processor
         self._llm_provider = llm_provider
         self._notifier = notifier
-        self._alert_reporter = alert_reporter
+        self._alert = alert
         self._window_hours = window_hours
         self._max_items_per_category = max_items_per_category
         self._max_evidence_chars_per_article = max_evidence_chars_per_article
@@ -299,19 +299,13 @@ class BriefingService:
             merged_focus = (
                 None
                 if any(delivery.result.degraded for delivery in pending_deliveries)
-                else await self._generate_merged_focus(
-                    pending_deliveries, provider, briefing_date=briefing_date
-                )
+                else await self._generate_merged_focus(pending_deliveries, provider)
             )
             merged_markdown = self._render_merged_markdown(
                 briefing_date, pending_deliveries, focus=merged_focus
             )
             self._write_merged_markdown(briefing_date, merged_markdown)
             self._write_prepared_marker(run_date, briefing_date, pending_deliveries)
-        else:
-            await self._report_alert(
-                "消息生成", RuntimeError("no complete prepared message"), briefing_date.isoformat()
-            )
         prepared_report = BriefingRunReport(
             date=briefing_date.isoformat(), categories=tuple(reports)
         )
@@ -340,8 +334,6 @@ class BriefingService:
                     "briefing_date": briefing_date.isoformat(),
                 },
             )
-            error = RuntimeError(NOT_PREPARED)
-            await self._report_alert("企业微信发送", error, briefing_date.isoformat())
             return BriefingRunReport(
                 date=briefing_date.isoformat(),
                 categories=tuple(
@@ -364,7 +356,7 @@ class BriefingService:
                 ),
             )
 
-        push_status = await self._push(prepared.markdown, briefing_date=briefing_date)
+        push_status = await self._push(prepared.markdown)
         if push_status != "failed":
             for category in prepared.categories:
                 _atomic_write(
@@ -524,7 +516,7 @@ class BriefingService:
         try:
             result = await self._generate_result(category, evidence, provider)
         except Exception as error:
-            await self._report_alert("消息生成", error, briefing_date.isoformat())
+            await self._alert_message("消息生成", error)
             logger.exception(
                 "briefing model generation failed; using evidence fallback",
                 extra={"category": category, "error": str(error)},
@@ -534,7 +526,6 @@ class BriefingService:
         try:
             file_path = self._write_markdown(briefing_date, category, markdown)
         except Exception as error:
-            await self._report_alert("消息生成", error, briefing_date.isoformat())
             logger.exception("briefing category persistence failed", extra={"category": category})
             return (
                 BriefingCategoryReport(
@@ -632,8 +623,6 @@ class BriefingService:
         self,
         pending_deliveries: list[_PendingBriefingDelivery],
         provider: LLMProvider,
-        *,
-        briefing_date: date,
     ) -> str | None:
         """Write the one lead sentence after selection, without changing selected items."""
         try:
@@ -649,8 +638,7 @@ class BriefingService:
                 model_options={},
             )
             return MergedBriefingFocus.model_validate(structured.content).focus
-        except Exception as error:
-            await self._report_alert("消息生成", error, briefing_date.isoformat())
+        except Exception:
             logger.exception("briefing merged focus generation failed; sending title list only")
             return None
 
@@ -809,27 +797,20 @@ class BriefingService:
         await self._notifier.push(markdown)
         return "sent"
 
-    async def _report_alert(
-        self, stage: str, error: Exception | str, briefing_date: str | None
-    ) -> None:
-        """Report a recoverable briefing fault without changing its fallback behavior."""
-        if self._alert_reporter is None:
+    async def _alert_message(self, stage: str, error: Exception) -> None:
+        """Notify the monitoring robot without changing the briefing's fallback behavior."""
+        if self._alert is None:
             return
-        try:
-            await self._alert_reporter.report(
-                stage=stage, error=error, briefing_date=briefing_date
-            )
-        except Exception:
-            logger.exception("briefing alert reporting failed", extra={"stage": stage})
+        await self._alert(stage, error)
 
-    async def _push(self, markdown: str, *, briefing_date: date) -> str:
+    async def _push(self, markdown: str) -> str:
         """Push one rendered briefing without turning a push failure into a lost file."""
         if self._notifier is None:
             return "disabled"
         try:
             await self._notifier.push(markdown)
         except Exception as error:
-            await self._report_alert("企业微信发送", error, briefing_date.isoformat())
+            await self._alert_message("企业微信发送", error)
             logger.exception("briefing webhook push failed")
             return "failed"
         return "sent"

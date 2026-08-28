@@ -114,7 +114,7 @@ def test_briefing_scheduler_prepares_before_the_delivery_tick() -> None:
 
 def test_briefing_scheduler_alerts_when_preparation_raises() -> None:
     """A collection or generation exception reaches the independent alert path."""
-    alerts: list[tuple[str, str, str | None]] = []
+    alerts: list[tuple[str, str]] = []
 
     async def prepare() -> BriefingRunReport:
         raise RuntimeError("collection failed")
@@ -122,8 +122,8 @@ def test_briefing_scheduler_alerts_when_preparation_raises() -> None:
     async def deliver() -> BriefingRunReport:
         return BriefingRunReport(date="2026-08-27", categories=())
 
-    async def alert(stage: str, error: Exception, briefing_date: str | None) -> None:
-        alerts.append((stage, str(error), briefing_date))
+    async def alert(stage: str, error: Exception) -> None:
+        alerts.append((stage, str(error)))
 
     scheduler = BriefingScheduler(
         prepare,
@@ -137,12 +137,12 @@ def test_briefing_scheduler_alerts_when_preparation_raises() -> None:
 
     asyncio.run(scheduler.trigger_prepare())
 
-    assert alerts == [("消息生成", "collection failed", None)]
+    assert alerts == [("消息生成", "collection failed")]
 
 
 def test_briefing_scheduler_alerts_when_delivery_raises() -> None:
     """A scheduler-level delivery failure is reported when it escapes the service."""
-    alerts: list[tuple[str, str, str | None]] = []
+    alerts: list[tuple[str, str]] = []
 
     async def prepare() -> BriefingRunReport:
         return BriefingRunReport(date="2026-08-27", categories=())
@@ -150,8 +150,8 @@ def test_briefing_scheduler_alerts_when_delivery_raises() -> None:
     async def deliver() -> BriefingRunReport:
         raise RuntimeError("delivery crashed")
 
-    async def alert(stage: str, error: Exception, briefing_date: str | None) -> None:
-        alerts.append((stage, str(error), briefing_date))
+    async def alert(stage: str, error: Exception) -> None:
+        alerts.append((stage, str(error)))
 
     scheduler = BriefingScheduler(
         prepare,
@@ -165,11 +165,11 @@ def test_briefing_scheduler_alerts_when_delivery_raises() -> None:
 
     asyncio.run(scheduler.trigger_delivery())
 
-    assert alerts == [("企业微信发送", "delivery crashed", None)]
+    assert alerts == [("企业微信发送", "delivery crashed")]
 
 
-def test_briefing_scheduler_runs_provider_preflight_before_preparation() -> None:
-    """The provider check has its own early tick and does not delay the 07:55 preparation run."""
+def test_briefing_scheduler_probes_providers_before_preparation() -> None:
+    """The provider ping runs just before generation on the same prepare tick."""
     actions: list[str] = []
 
     async def prepare() -> BriefingRunReport:
@@ -190,15 +190,42 @@ def test_briefing_scheduler_runs_provider_preflight_before_preparation() -> None
         preparation_retry_cron_expression="15 8 * * mon-fri",
         delivery_cron_expression="30 8 * * mon-fri",
         timezone="Asia/Shanghai",
-        provider_preflight=preflight,
-        provider_preflight_cron_expression="40 7 * * mon-fri",
+        preflight=preflight,
     )
 
-    asyncio.run(scheduler.trigger_provider_preflight())
+    asyncio.run(scheduler.trigger_prepare())
+    asyncio.run(scheduler.trigger_delivery())
 
-    assert actions == ["preflight"]
-    assert str(scheduler.build_provider_preflight_trigger().fields[5]) == "7"
-    assert str(scheduler.build_provider_preflight_trigger().fields[6]) == "40"
+    assert actions == ["preflight", "prepare", "deliver"]
+
+
+def test_briefing_scheduler_keeps_preparing_when_the_probe_itself_crashes() -> None:
+    """A broken probe must never block the briefing it was meant to guard."""
+    actions: list[str] = []
+
+    async def prepare() -> BriefingRunReport:
+        actions.append("prepare")
+        return BriefingRunReport(date="2026-08-27", categories=())
+
+    async def deliver() -> BriefingRunReport:
+        return BriefingRunReport(date="2026-08-27", categories=())
+
+    async def preflight() -> None:
+        raise RuntimeError("probe crashed")
+
+    scheduler = BriefingScheduler(
+        prepare,
+        deliver,
+        preparation_cron_expression="55 7 * * mon-fri",
+        preparation_retry_cron_expression="15 8 * * mon-fri",
+        delivery_cron_expression="30 8 * * mon-fri",
+        timezone="Asia/Shanghai",
+        preflight=preflight,
+    )
+
+    asyncio.run(scheduler.trigger_prepare())
+
+    assert actions == ["prepare"]
 
 
 def _scheduled_command() -> TaskCommand:

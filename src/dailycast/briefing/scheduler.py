@@ -10,11 +10,10 @@ from collections.abc import Awaitable, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.service import BriefingRunInProgressError, BriefingRunReport
 
 logger = logging.getLogger(__name__)
-
-BriefingAlert = Callable[[str, Exception, str | None], Awaitable[None]]
 
 
 class BriefingScheduler:
@@ -30,8 +29,7 @@ class BriefingScheduler:
         delivery_cron_expression: str,
         timezone: str,
         alert: BriefingAlert | None = None,
-        provider_preflight: Callable[[], Awaitable[None]] | None = None,
-        provider_preflight_cron_expression: str | None = None,
+        preflight: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._prepare = prepare
         self._deliver = deliver
@@ -40,8 +38,7 @@ class BriefingScheduler:
         self._delivery_cron_expression = delivery_cron_expression
         self._timezone = timezone
         self._alert = alert
-        self._provider_preflight = provider_preflight
-        self._provider_preflight_cron_expression = provider_preflight_cron_expression
+        self._preflight = preflight
         self._scheduler: AsyncIOScheduler | None = None
 
     def start(self) -> None:
@@ -51,35 +48,23 @@ class BriefingScheduler:
         if self._scheduler is not None and self._scheduler.running:
             return
         scheduler = AsyncIOScheduler(timezone=self._timezone)
-        jobs: list[tuple[str, Callable[[], Awaitable[None]], CronTrigger]] = []
-        if self._provider_preflight is not None:
-            jobs.append(
-                (
-                    "dailycast-briefing-provider-preflight",
-                    self.trigger_provider_preflight,
-                    self.build_provider_preflight_trigger(),
-                )
-            )
-        jobs.extend(
+        for job_id, callback, trigger in (
             (
-                (
-                    "dailycast-briefing-prepare",
-                    self.trigger_prepare,
-                    self.build_preparation_trigger(),
-                ),
-                (
-                    "dailycast-briefing-prepare-retry",
-                    self.trigger_prepare,
-                    self.build_preparation_retry_trigger(),
-                ),
-                (
-                    "dailycast-briefing-deliver",
-                    self.trigger_delivery,
-                    self.build_delivery_trigger(),
-                ),
-            )
-        )
-        for job_id, callback, trigger in jobs:
+                "dailycast-briefing-prepare",
+                self.trigger_prepare,
+                self.build_preparation_trigger(),
+            ),
+            (
+                "dailycast-briefing-prepare-retry",
+                self.trigger_prepare,
+                self.build_preparation_retry_trigger(),
+            ),
+            (
+                "dailycast-briefing-deliver",
+                self.trigger_delivery,
+                self.build_delivery_trigger(),
+            ),
+        ):
             scheduler.add_job(
                 callback,
                 trigger=trigger,
@@ -94,15 +79,6 @@ class BriefingScheduler:
     def build_preparation_trigger(self) -> CronTrigger:
         """Build the first early preparation trigger for the daily report."""
         return CronTrigger.from_crontab(self._preparation_cron_expression, timezone=self._timezone)
-
-    def build_provider_preflight_trigger(self) -> CronTrigger:
-        """Build the early provider probe trigger when alerting is configured."""
-        if self._provider_preflight_cron_expression is None:
-            msg = "provider preflight is not configured"
-            raise RuntimeError(msg)
-        return CronTrigger.from_crontab(
-            self._provider_preflight_cron_expression, timezone=self._timezone
-        )
 
     def build_preparation_retry_trigger(self) -> CronTrigger:
         """Build the retry trigger used only when the early report is not ready."""
@@ -124,42 +100,38 @@ class BriefingScheduler:
             self._scheduler.shutdown(wait=False)
 
     async def trigger_prepare(self) -> None:
-        """Prepare one briefing while keeping a failed tick isolated from the process."""
+        """Probe providers, then prepare one briefing, keeping a failed tick isolated."""
+        await self._run_preflight()
         try:
             await self._prepare()
         except BriefingRunInProgressError:
             logger.info("scheduled briefing preparation skipped: a run is already in progress")
         except Exception as error:
-            await self._report_alert("消息生成", error)
+            await self._alert_message("消息生成", error)
             logger.exception("scheduled briefing preparation failed")
-
-    async def trigger_provider_preflight(self) -> None:
-        """Run the independent model probe before any collection or generation begins."""
-        if self._provider_preflight is None:
-            return
-        try:
-            await self._provider_preflight()
-        except Exception:
-            logger.exception("scheduled briefing provider preflight failed")
 
     async def trigger_delivery(self) -> None:
         """Deliver the already-persisted briefing without any collection or LLM work."""
         try:
             await self._deliver()
         except Exception as error:
-            await self._report_alert("企业微信发送", error)
+            await self._alert_message("企业微信发送", error)
             logger.exception("scheduled briefing delivery failed")
 
-    async def _report_alert(
-        self, stage: str, error: Exception, briefing_date: str | None = None
-    ) -> None:
-        """Keep alert delivery best-effort so a second webhook cannot destabilize scheduling."""
-        if self._alert is None:
+    async def _run_preflight(self) -> None:
+        """Best-effort provider probe; a broken probe must never block preparation."""
+        if self._preflight is None:
             return
         try:
-            await self._alert(stage, error, briefing_date)
+            await self._preflight()
         except Exception:
-            logger.exception("scheduled briefing alert failed", extra={"stage": stage})
+            logger.exception("briefing provider preflight failed")
+
+    async def _alert_message(self, stage: str, error: Exception) -> None:
+        """Notify the monitoring robot; a second webhook cannot destabilize scheduling."""
+        if self._alert is None:
+            return
+        await self._alert(stage, error)
 
     @staticmethod
     def _is_uvicorn_reload() -> bool:
