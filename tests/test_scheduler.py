@@ -7,7 +7,7 @@ import asyncio
 from apscheduler.triggers.cron import CronTrigger
 
 from dailycast.briefing.scheduler import BriefingScheduler
-from dailycast.briefing.service import BriefingRunReport
+from dailycast.briefing.service import BriefingRunInProgressError, BriefingRunReport
 from dailycast.db.models import TaskType, TriggerType
 from dailycast.pipeline.contracts import TaskCommand
 from dailycast.scheduler.service import SchedulerService
@@ -166,6 +166,34 @@ def test_briefing_scheduler_alerts_when_delivery_raises() -> None:
     asyncio.run(scheduler.trigger_delivery())
 
     assert alerts == [("企业微信发送", "delivery crashed")]
+
+
+def test_briefing_scheduler_does_not_alert_when_delivery_hits_an_in_progress_run() -> None:
+    """A slow 08:15 prepare overlapping the 08:30 tick is not a delivery failure."""
+    alerts: list[tuple[str, str]] = []
+
+    async def prepare() -> BriefingRunReport:
+        return BriefingRunReport(date="2026-08-27", categories=())
+
+    async def deliver() -> BriefingRunReport:
+        raise BriefingRunInProgressError("briefing run already in progress")
+
+    async def alert(stage: str, error: Exception) -> None:
+        alerts.append((stage, str(error)))
+
+    scheduler = BriefingScheduler(
+        prepare,
+        deliver,
+        preparation_cron_expression="55 7 * * mon-fri",
+        preparation_retry_cron_expression="15 8 * * mon-fri",
+        delivery_cron_expression="30 8 * * mon-fri",
+        timezone="Asia/Shanghai",
+        alert=alert,
+    )
+
+    asyncio.run(scheduler.trigger_delivery())
+
+    assert alerts == []
 
 
 def test_briefing_scheduler_probes_providers_before_preparation() -> None:

@@ -334,6 +334,7 @@ class BriefingService:
                     "briefing_date": briefing_date.isoformat(),
                 },
             )
+            await self._alert_message("日报未准备好", RuntimeError(NOT_PREPARED))
             return BriefingRunReport(
                 date=briefing_date.isoformat(),
                 categories=tuple(
@@ -516,7 +517,7 @@ class BriefingService:
         try:
             result = await self._generate_result(category, evidence, provider)
         except Exception as error:
-            await self._alert_message("消息生成", error)
+            await self._alert_message(f"消息生成（{CATEGORY_TITLES[category]}）", error)
             logger.exception(
                 "briefing model generation failed; using evidence fallback",
                 extra={"category": category, "error": str(error)},

@@ -114,6 +114,8 @@ class BriefingScheduler:
         """Deliver the already-persisted briefing without any collection or LLM work."""
         try:
             await self._deliver()
+        except BriefingRunInProgressError:
+            logger.info("scheduled briefing delivery skipped: a run is already in progress")
         except Exception as error:
             await self._alert_message("企业微信发送", error)
             logger.exception("scheduled briefing delivery failed")

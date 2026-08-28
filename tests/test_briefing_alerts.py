@@ -95,6 +95,24 @@ def test_provider_preflight_is_silent_when_every_provider_answers() -> None:
     assert alerts == []
 
 
+def test_provider_preflight_reports_a_hung_provider_instead_of_waiting() -> None:
+    """One wedged endpoint cannot stall the 07:55 generation start."""
+    alerts: list[tuple[str, str]] = []
+
+    async def alertmsg(stage: str, error: Exception) -> None:
+        alerts.append((stage, error.__class__.__name__))
+
+    asyncio.run(
+        preflight_providers(
+            (_ProbeProvider("hung", delay=10.0),),
+            alertmsg,
+            probe_timeout_seconds=0.01,
+        )
+    )
+
+    assert alerts == [("AI Provider 预检（hung）", "TimeoutError")]
+
+
 class _ProbeResponse(BaseModel):
     ok: bool
 
@@ -110,9 +128,11 @@ class _ProbeProvider:
         provider_name: str,
         *,
         error: Exception | None = None,
+        delay: float = 0.0,
     ) -> None:
         self.provider_name = provider_name
         self._error = error
+        self._delay = delay
         self.calls = 0
 
     def generation_config_hash(self, model_options: object) -> str:
@@ -128,6 +148,8 @@ class _ProbeProvider:
     ) -> StructuredResult:
         del operation, messages, response_schema, model_options
         self.calls += 1
+        if self._delay:
+            await asyncio.sleep(self._delay)
         if self._error is not None:
             raise self._error
         return StructuredResult(

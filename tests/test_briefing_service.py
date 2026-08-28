@@ -24,6 +24,7 @@ from dailycast.briefing.selection import (
 from dailycast.briefing.service import (
     ALREADY_COMPLETED,
     ALREADY_PREPARED,
+    NOT_PREPARED,
     BriefingRunInProgressError,
     BriefingService,
     _audit_generated_result,
@@ -882,7 +883,7 @@ def test_briefing_model_fallback_reports_the_generation_error(
     report = asyncio.run(service.prepare())
 
     assert report.date == "2026-08-27"
-    assert alerts.events == [("消息生成", "llm unavailable")]
+    assert alerts.events == [("消息生成（通信行业日报）", "llm unavailable")]
 
 
 def test_briefing_push_failure_reports_the_delivery_error(
@@ -1346,6 +1347,26 @@ def test_prepared_delivery_pushes_saved_markdown_without_recollecting_or_regener
     assert llm.operations == generated_before_delivery
     assert all(entry.push_status == "sent" for entry in delivered.categories)
     assert len(list(output_dir.glob("*.done"))) == 2
+
+
+def test_prepared_delivery_alerts_when_no_message_is_available(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The most important alert: 08:30 arrived with nothing deliverable."""
+    alerts = _RecordedAlerts()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector({}),
+        llm=FakeBriefingLLM({}),
+        notifier=RecordingNotifier(),
+        alert=alerts.alertmsg,
+    )
+
+    report = asyncio.run(service.deliver_prepared())
+
+    assert all(entry.reason == NOT_PREPARED for entry in report.categories)
+    assert alerts.events == [("日报未准备好", NOT_PREPARED)]
 
 
 def test_force_run_regenerates_despite_completion_markers(
