@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -13,6 +13,8 @@ from fastapi import FastAPI
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from dailycast.briefing.alerts import BriefingAlertReporter
+from dailycast.briefing.monitoring import BriefingProviderProbe
 from dailycast.briefing.scheduler import BriefingScheduler
 from dailycast.briefing.selection import load_selection_policy
 from dailycast.briefing.service import BriefingService
@@ -392,6 +394,28 @@ def _build_briefing_runtime(
             settings.briefing.webhook_url,
             payload_format=settings.briefing.webhook_format,
         )
+    alert_reporter: BriefingAlertReporter | None = None
+    if settings.monitoring.webhook_url:
+        alert_reporter = BriefingAlertReporter(
+            WebhookNotifier(
+                settings.monitoring.webhook_url,
+                payload_format=settings.monitoring.webhook_format,
+            ),
+            now=lambda: datetime.now(UTC),
+            timezone=settings.app.timezone,
+        )
+
+    async def report_alert(stage: str, error: Exception, briefing_date: str | None) -> None:
+        if alert_reporter is None:
+            return
+        await alert_reporter.report(stage=stage, error=error, briefing_date=briefing_date)
+
+    provider_preflight = None
+    if alert_reporter is not None:
+        configured_providers = getattr(llm_provider, "providers", (llm_provider,))
+        provider_preflight = BriefingProviderProbe(
+            configured_providers, alert=report_alert
+        ).run
     briefing_service = BriefingService(
         session_factory,
         collection_service,
@@ -400,6 +424,7 @@ def _build_briefing_runtime(
         news_processor,
         llm_provider,
         notifier,
+        alert_reporter=alert_reporter,
         window_hours=settings.briefing.window_hours,
         max_items_per_category=settings.briefing.max_items_per_category,
         max_evidence_chars_per_article=settings.briefing.max_evidence_chars_per_article,
@@ -420,6 +445,13 @@ def _build_briefing_runtime(
         preparation_retry_cron_expression=settings.briefing.preparation_retry_cron_expression,
         delivery_cron_expression=settings.briefing.cron_expression,
         timezone=settings.app.timezone,
+        alert=report_alert if alert_reporter is not None else None,
+        provider_preflight=provider_preflight,
+        provider_preflight_cron_expression=(
+            settings.monitoring.provider_preflight_cron_expression
+            if provider_preflight is not None
+            else None
+        ),
     )
     try:
         briefing_scheduler.start()

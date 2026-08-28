@@ -121,6 +121,14 @@ class BriefingSettings(BaseModel):
         return self
 
 
+class MonitoringSettings(BaseModel):
+    """Independent operational-alert delivery settings."""
+
+    webhook_url: str | None = None
+    webhook_format: WebhookFormat = "wecom_markdown_v2"
+    provider_preflight_cron_expression: str = "40 7 * * mon-fri"
+
+
 class WebResearchSettings(BaseModel):
     """Bound native web-search discovery for briefing-only sources."""
 
@@ -380,6 +388,7 @@ class Settings(BaseSettings):
     sources: SourcesSettings = Field(default_factory=SourcesSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     briefing: BriefingSettings = Field(default_factory=BriefingSettings)
+    monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     web_research: WebResearchSettings = Field(default_factory=WebResearchSettings)
     task_execution: TaskExecutionSettings = Field(default_factory=TaskExecutionSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)

@@ -625,6 +625,19 @@ def test_webhook_enabled_requires_a_webhook_url() -> None:
         BriefingSettings(webhook_enabled=True, webhook_url="")
 
 
+def test_monitoring_settings_uses_an_independent_alert_webhook() -> None:
+    """An alert robot is configured separately from the briefing delivery robot."""
+    from dailycast.core.config import MonitoringSettings
+
+    settings = MonitoringSettings(
+        webhook_url="https://qyapi.example.test/alert-hook",
+        webhook_format="wecom_markdown_v2",
+    )
+
+    assert settings.webhook_url == "https://qyapi.example.test/alert-hook"
+    assert settings.webhook_format == "wecom_markdown_v2"
+
+
 def test_briefing_settings_load_from_yaml(app_config_path: Path, tmp_path: Path) -> None:
     """The nested briefing block flows through the existing YAML settings source."""
     app_config_path.write_text(
