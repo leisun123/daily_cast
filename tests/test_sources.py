@@ -315,9 +315,7 @@ def test_checked_in_research_queries_keep_ai_global_but_sources_chinese() -> Non
     project_root = Path(__file__).resolve().parents[1]
     sources = _load_source_configuration(project_root / "config" / "briefing.sources.yaml")
     source_by_id = {source.id: source for source in sources.sources}
-    telecom_query = str(
-        source_by_id["openai-web-research-telecom-management"].config["query"]
-    )
+    telecom_query = str(source_by_id["openai-web-research-telecom-management"].config["query"])
     ai_query = str(source_by_id["openai-web-research-ai-management"].config["query"])
 
     assert "Token" in telecom_query
@@ -841,9 +839,7 @@ def test_content_extractor_honors_a_meta_declared_legacy_charset() -> None:
         <p>中国移动启动网络设备集采，项目覆盖多个省份的通信基础设施建设。</p>
         <p>此次采购明确了供货安排和后续交付节奏，相关单位将按计划推进。</p>
         </article></body></html>
-        """.encode(
-            "gb2312"
-        )
+        """.encode("gb2312")
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(
                 lambda request: httpx.Response(
@@ -1800,9 +1796,9 @@ def test_collection_pipeline_persists_articles_and_continues_after_one_extractio
                 assert unit.session is not None
                 current = TaskRunRepository(unit.session).get(task_run.id)
                 assert current is not None
-                assert (
-                    current.status == TaskRunStatus.SUCCEEDED_WITH_WARNINGS
-                ), current.error_summary
+                assert current.status == TaskRunStatus.SUCCEEDED_WITH_WARNINGS, (
+                    current.error_summary
+                )
                 assert [step.step_name for step in current.steps] == [
                     "collecting",
                     "extracting",

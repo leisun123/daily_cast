@@ -195,13 +195,16 @@ class LLMArtifactService:
                 )
 
         effective_options = dict(model_options)
-        generated, usage, provider_call_count, selected_provider = (
-            await self._generate_with_fallback(
-                operation=operation,
-                messages=messages,
-                response_schema=response_schema,
-                model_options=effective_options,
-            )
+        (
+            generated,
+            usage,
+            provider_call_count,
+            selected_provider,
+        ) = await self._generate_with_fallback(
+            operation=operation,
+            messages=messages,
+            response_schema=response_schema,
+            model_options=effective_options,
         )
         try:
             content = _validated_content(
@@ -211,13 +214,16 @@ class LLMArtifactService:
             if not error.repairable:
                 raise
             repair_messages = _schema_repair_messages(messages)
-            generated, repair_usage, repair_calls, selected_provider = (
-                await self._generate_with_fallback(
-                    operation=operation,
-                    messages=repair_messages,
-                    response_schema=response_schema,
-                    model_options=effective_options,
-                )
+            (
+                generated,
+                repair_usage,
+                repair_calls,
+                selected_provider,
+            ) = await self._generate_with_fallback(
+                operation=operation,
+                messages=repair_messages,
+                response_schema=response_schema,
+                model_options=effective_options,
             )
             usage = _add_usage(usage, repair_usage)
             provider_call_count += repair_calls

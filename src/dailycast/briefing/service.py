@@ -338,9 +338,7 @@ class BriefingService:
             return BriefingRunReport(
                 date=briefing_date.isoformat(),
                 categories=tuple(
-                    BriefingCategoryReport(
-                        category=category, status="failed", reason=NOT_PREPARED
-                    )
+                    BriefingCategoryReport(category=category, status="failed", reason=NOT_PREPARED)
                     for category in CATEGORY_TITLES
                 ),
             )
@@ -367,9 +365,11 @@ class BriefingService:
 
         if prepared_report is not None:
             reports = tuple(
-                replace(report, push_status=push_status)
-                if report.category in prepared.categories
-                else report
+                (
+                    replace(report, push_status=push_status)
+                    if report.category in prepared.categories
+                    else report
+                )
                 for report in prepared_report.categories
             )
         else:
@@ -668,8 +668,7 @@ class BriefingService:
                 _log_incomplete_fallback_title(entry)
         return BriefingResult(
             overview=(
-                f"模型服务暂时不可用，以下为 {CATEGORY_TITLES[category]}"
-                "已核验原文标题降级列表。"
+                f"模型服务暂时不可用，以下为 {CATEGORY_TITLES[category]}已核验原文标题降级列表。"
             ),
             items=items,
             degraded=True,
@@ -761,8 +760,10 @@ class BriefingService:
             categories = tuple(str(category) for category in payload["categories"])
         except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError, KeyError):
             return None
-        if recorded_date != briefing_date or not categories or any(
-            category not in CATEGORY_TITLES for category in categories
+        if (
+            recorded_date != briefing_date
+            or not categories
+            or any(category not in CATEGORY_TITLES for category in categories)
         ):
             return None
         merged_path = self._output_dir / f"{briefing_date.isoformat()}-merged.md"
@@ -941,17 +942,12 @@ def _effective_publisher_cap(
     if publisher_cap is None:
         return None
     target = min(MAX_BRIEFING_ITEMS, len(evidence))
-    if (
-        _publisher_capacity(evidence, publisher_cap) < target
-        and fallback_publisher_cap is not None
-    ):
+    if _publisher_capacity(evidence, publisher_cap) < target and fallback_publisher_cap is not None:
         return fallback_publisher_cap
     return publisher_cap
 
 
-def _publisher_capacity(
-    evidence: tuple[RankedBriefingEvidence, ...], publisher_cap: int
-) -> int:
+def _publisher_capacity(evidence: tuple[RankedBriefingEvidence, ...], publisher_cap: int) -> int:
     """Return how many slots a verified pool can fill under one outlet ceiling."""
     counts: dict[str, int] = {}
     for entry in evidence:

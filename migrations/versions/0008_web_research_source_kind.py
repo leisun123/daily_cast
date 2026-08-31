@@ -35,18 +35,18 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Refuse to erase configured research sources while restoring the old constraint."""
-    has_research_source = op.get_bind().execute(
-        sa.text("SELECT 1 FROM sources WHERE kind = 'web_research' LIMIT 1")
-    ).scalar()
+    has_research_source = (
+        op.get_bind()
+        .execute(sa.text("SELECT 1 FROM sources WHERE kind = 'web_research' LIMIT 1"))
+        .scalar()
+    )
     if has_research_source is not None:
         msg = "cannot downgrade while web_research sources exist"
         raise RuntimeError(msg)
     _replace_source_kind_constraint(_NEW_SOURCE_KIND, _OLD_SOURCE_KIND)
 
 
-def _replace_source_kind_constraint(
-    existing_type: sa.Enum, target_type: sa.Enum
-) -> None:
+def _replace_source_kind_constraint(existing_type: sa.Enum, target_type: sa.Enum) -> None:
     """Rebuild SQLite's constrained table without breaking referencing Article rows."""
     connection = op.get_bind()
     is_sqlite = connection.dialect.name == "sqlite"

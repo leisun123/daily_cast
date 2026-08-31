@@ -18,8 +18,8 @@ jobs:
         run: poetry install --with dev
       - name: Ruff
         run: poetry run ruff check .
-      - name: Black
-        run: poetry run black --check .
+      - name: Ruff format
+        run: poetry run ruff format --check .
       - name: Mypy
         run: poetry run mypy src
       - name: Pytest
