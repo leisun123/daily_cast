@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_BRIEFING_ITEMS = 6
 
@@ -78,6 +78,20 @@ class BriefingItem(BaseModel):
         if not isinstance(value, str):
             return value
         return value.strip().strip("｜|")
+
+    @model_validator(mode="after")
+    def remove_repeated_theme_prefix_from_headline(self) -> BriefingItem:
+        """Keep the renderer-owned topic tag out of a model-written headline."""
+        if not self.theme:
+            return self
+        for separator in ("｜", "|"):
+            prefix = f"{self.theme}{separator}"
+            if self.headline.startswith(prefix):
+                headline = self.headline.removeprefix(prefix).lstrip()
+                if headline:
+                    self.headline = headline
+                break
+        return self
 
     @field_validator("summary", mode="before")
     @classmethod

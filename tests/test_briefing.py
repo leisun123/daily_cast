@@ -224,6 +224,48 @@ def test_briefing_result_accepts_a_valid_payload() -> None:
     assert len(result.items) == 1
 
 
+def test_merged_renderer_removes_a_repeated_theme_prefix_from_an_ai_headline() -> None:
+    """A model must not make the user-visible merged title display one theme twice."""
+    source_url = "https://news.example.test/hy4"
+    item = BriefingItem(
+        headline="国产模型｜腾讯发布并开源 Hy4 Preview",
+        theme="国产模型",
+        summary="腾讯发布并开源了 Hy4 Preview。",
+        why_it_matters="这让企业多了可部署的国产模型选择。",
+        source_name="腾讯",
+        source_url=source_url,
+    )
+
+    markdown = render_merged_briefing(
+        date(2026, 8, 30),
+        [
+            (
+                "AI",
+                "🤖 AI",
+                BriefingResult(overview="国产模型持续迭代。", items=[item]),
+                [_evidence(source_url=source_url)],
+            )
+        ],
+    )
+
+    assert "**国产模型｜** [腾讯发布并开源 Hy4 Preview]" in markdown
+    assert "国产模型｜国产模型｜" not in markdown
+
+
+def test_briefing_item_removes_an_ascii_repeated_theme_prefix_from_its_headline() -> None:
+    """The contract also normalizes the ASCII delimiter emitted by some models."""
+    item = BriefingItem(
+        headline="国产模型|腾讯发布并开源 Hy4 Preview",
+        theme="国产模型",
+        summary="腾讯发布并开源了 Hy4 Preview。",
+        why_it_matters="这让企业多了可部署的国产模型选择。",
+        source_name="腾讯",
+        source_url="https://news.example.test/hy4",
+    )
+
+    assert item.headline == "腾讯发布并开源 Hy4 Preview"
+
+
 def test_briefing_result_rejects_extra_fields() -> None:
     """Extra keys hint at a schema drift between prompt and provider output."""
     with pytest.raises(ValueError):
