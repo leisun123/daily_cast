@@ -200,9 +200,9 @@ class RSSPublisher:
         ElementTree.SubElement(channel, "description").text = self._settings.feed_description
         ElementTree.SubElement(channel, "language").text = self._settings.language
         ElementTree.SubElement(channel, "author").text = self._settings.author
-        ElementTree.SubElement(channel, f"{{{_ITUNES_NAMESPACE}}}author").text = (
-            self._settings.author
-        )
+        ElementTree.SubElement(
+            channel, f"{{{_ITUNES_NAMESPACE}}}author"
+        ).text = self._settings.author
         ElementTree.SubElement(
             channel,
             f"{{{_ITUNES_NAMESPACE}}}image",

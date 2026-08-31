@@ -668,7 +668,7 @@ class BriefingService:
                 _log_incomplete_fallback_title(entry)
         return BriefingResult(
             overview=(
-                f"模型服务暂时不可用，以下为 {CATEGORY_TITLES[category]}" "已核验原文标题降级列表。"
+                f"模型服务暂时不可用，以下为 {CATEGORY_TITLES[category]}已核验原文标题降级列表。"
             ),
             items=items,
             degraded=True,
