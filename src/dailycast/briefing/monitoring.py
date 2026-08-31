@@ -12,10 +12,10 @@ from dailycast.briefing.alerts import BriefingAlert
 from dailycast.db.models import LLMOperation
 from dailycast.llm.contracts import LLMMessage, LLMProvider
 
-# The output budget assumes non-reasoning models: a model that bills thinking
-# tokens against max_output_tokens could exhaust it before emitting the JSON
-# and then alert every morning.
-_PROBE_MAX_OUTPUT_TOKENS = 16
+# Reasoning models bill their thinking tokens against the output budget before
+# any JSON appears (deepseek-v4-pro burns 16+ tokens reasoning about even this
+# one-line prompt), so the probe must leave room for a full chain of thought.
+_PROBE_MAX_OUTPUT_TOKENS = 1024
 _PROBE_TIMEOUT_SECONDS = 30.0
 
 
