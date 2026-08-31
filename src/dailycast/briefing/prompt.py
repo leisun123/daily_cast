@@ -100,9 +100,9 @@ def build_briefing_repair_messages(
         editorial_selection=True,
         required_count=missing_count,
     )
-    accepted = "\n".join(
-        f"- {item.headline}｜{item.source_url}" for item in accepted_items
-    ) or "- 无"
+    accepted = (
+        "\n".join(f"- {item.headline}｜{item.source_url}" for item in accepted_items) or "- 无"
+    )
     repair_context = (
         "这是一次校验后的补选，不是重新生成整份日报。此前结果经过原文链接、重复事件和来源数量"
         f"校验后还缺 {missing_count} 条。请只从下面的剩余候选中补选恰好 {missing_count} 条；"
@@ -126,8 +126,7 @@ def _editorial_selection_instruction(category: str | None, *, required_count: in
     )
     if category == "telecom":
         return (
-            shared
-            + "请由你自行挑选最值得中国移动管理层阅读的国内通信新闻。选择和输出都必须按地域"
+            shared + "请由你自行挑选最值得中国移动管理层阅读的国内通信新闻。选择和输出都必须按地域"
             "落地价值排序，而不是按来源、发布时间或候选顺序：先常州，再江苏省级，再其他"
             "地级市，最后才是全国性动态；全国性新闻只有在会实质影响运营商战略、投资、监管"
             "或网络建设时才可入选，且不得排在更具体的地方动态之前。相同地域内，再优先中国"
@@ -139,8 +138,7 @@ def _editorial_selection_instruction(category: str | None, *, required_count: in
         )
     if category == "ai":
         return (
-            shared
-            + "请由你自行挑选最值得中国移动管理层阅读的全球 AI 发展新闻，不得因为一条新闻"
+            shared + "请由你自行挑选最值得中国移动管理层阅读的全球 AI 发展新闻，不得因为一条新闻"
             "与通信行业相关就提高其优先级。事件范围不限国内：既覆盖字节、腾讯、华为、小米、"
             "阿里、百度、DeepSeek、智谱、月之暗面、MiniMax，也覆盖 OpenAI GPT、Anthropic Claude、"
             "Google Gemini、Meta Llama、xAI Grok 等全球重要大模型的发布、升级、开源、本地化或"

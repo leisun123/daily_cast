@@ -399,9 +399,7 @@ def test_editorial_audit_does_not_select_an_omitted_candidate() -> None:
 
     audited = _audit_generated_result(result, evidence, allow_evidence_backfill=False)
 
-    assert [item.source_url for item in audited.items] == [
-        "https://source-1.example.test/article"
-    ]
+    assert [item.source_url for item in audited.items] == ["https://source-1.example.test/article"]
 
 
 def test_generated_briefing_audit_limits_one_ai_publisher_and_fills_alternatives() -> None:
@@ -458,10 +456,10 @@ def test_generated_briefing_audit_drops_an_omitted_long_raw_title() -> None:
                 title=(
                     f"中国移动网络建设进展 {index}"
                     if index < 5
-                        else (
-                            "半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司"
-                            "并计划进入更多城市，后续还将拓展海外市场、教育场景和更多家庭用户"
-                        )
+                    else (
+                        "半年3轮10亿，他们都投了这家已经把机器人卖到500个家庭的公司"
+                        "并计划进入更多城市，后续还将拓展海外市场、教育场景和更多家庭用户"
+                    )
                 ),
                 source_name=f"来源 {index}",
                 published_at=published_at,
@@ -646,7 +644,7 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
             f"https://telecom-source.example.test/t{index}" in briefings["telecom"]
             for index in range(1, 6)
         )
-            == 5
+        == 5
     )
     assert (
         sum(f"https://ai-source.example.test/a{index}" in briefings["ai"] for index in range(1, 6))
@@ -659,8 +657,7 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
     assert "## 🤖 AI" in delivered
     assert (
         "## 昨日关注\n> 运营商将算力投资、6G战略和网络智能化同步推进；"
-        "国内 AI 侧，国产模型与智能体应用加速。"
-        in delivered
+        "国内 AI 侧，国产模型与智能体应用加速。" in delivered
     )
     assert "重点动态" not in delivered
     assert len(llm.focus_prompts) == 1

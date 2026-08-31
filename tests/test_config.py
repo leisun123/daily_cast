@@ -137,9 +137,7 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
 ) -> None:
     """Zeabur supplies only dynamic values while this checked-in YAML owns stable defaults."""
     monkeypatch.setenv("DAILYCAST_BRIEFING__WEBHOOK_URL", "https://qyapi.example.test/hook")
-    monkeypatch.setenv(
-        "DAILYCAST_MONITORING__WEBHOOK_URL", "https://qyapi.example.test/alert-hook"
-    )
+    monkeypatch.setenv("DAILYCAST_MONITORING__WEBHOOK_URL", "https://qyapi.example.test/alert-hook")
     settings = load_settings(
         config_path=Path(__file__).resolve().parents[1] / "config" / "zeabur.yaml",
         env_file=tmp_path / "absent.env",

@@ -85,9 +85,7 @@ def test_provider_preflight_is_silent_when_every_provider_answers() -> None:
         alerts.append((stage, str(error)))
 
     asyncio.run(
-        preflight_providers(
-            (_ProbeProvider("primary"), _ProbeProvider("fallback")), alertmsg
-        )
+        preflight_providers((_ProbeProvider("primary"), _ProbeProvider("fallback")), alertmsg)
     )
 
     assert alerts == []

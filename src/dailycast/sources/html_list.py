@@ -115,9 +115,8 @@ class HTMLListCollector:
             if len(candidates) >= (source.max_items_per_run or 50):
                 break
             title = _text_content(anchor)
-            if (
-                options.include_title_keywords
-                and not _matches_keywords(title, options.include_title_keywords)
+            if options.include_title_keywords and not _matches_keywords(
+                title, options.include_title_keywords
             ):
                 continue
             candidate, entry_error = _to_candidate(source, options, anchor, response.final_url)
