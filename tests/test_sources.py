@@ -315,9 +315,7 @@ def test_checked_in_research_queries_keep_ai_global_but_sources_chinese() -> Non
     project_root = Path(__file__).resolve().parents[1]
     sources = _load_source_configuration(project_root / "config" / "briefing.sources.yaml")
     source_by_id = {source.id: source for source in sources.sources}
-    telecom_query = str(
-        source_by_id["openai-web-research-telecom-management"].config["query"]
-    )
+    telecom_query = str(source_by_id["openai-web-research-telecom-management"].config["query"])
     ai_query = str(source_by_id["openai-web-research-ai-management"].config["query"])
 
     assert "Token" in telecom_query
