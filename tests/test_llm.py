@@ -1118,3 +1118,67 @@ def test_provider_generation_identity_uses_only_semantic_non_secret_settings() -
             )
 
     asyncio.run(scenario())
+
+
+def test_provider_ping_checks_reachability_without_generating() -> None:
+    """Ping hits the models list, raising typed errors for auth and server failures."""
+    requests: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((str(request.url), request.headers.get("Authorization")))
+        if request.url.path.endswith("/models") and "auth" in request.url.host:
+            return httpx.Response(401)
+        if request.url.path.endswith("/models") and "crash" in request.url.host:
+            return httpx.Response(500)
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    def build(base_url: str) -> OpenAICompatibleLLMProvider:
+        return OpenAICompatibleLLMProvider(
+            base_url=base_url,
+            api_key="test-key",
+            model="test-model",
+            timeout_seconds=2,
+            temperature=0.1,
+            max_output_tokens=None,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+
+    def scenario() -> None:
+        import asyncio
+
+        healthy = build("https://models.example/v1")
+        unauthorized = build("https://auth.example/v1")
+        broken = build("https://crash.example/v1")
+        responses_style = OpenAIResponsesLLMProvider(
+            base_url="https://models.example/v1",
+            api_key="test-key",
+            model="test-model",
+            timeout_seconds=2,
+            temperature=0.1,
+            max_output_tokens=None,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+
+        async def run() -> None:
+            await healthy.ping()
+            await responses_style.ping()
+            for provider in (unauthorized, broken):
+                try:
+                    await provider.ping()
+                except LLMProviderError:
+                    pass
+                else:
+                    msg = f"{provider.provider_name} ping should have raised"
+                    raise AssertionError(msg)
+
+        asyncio.run(run())
+
+    scenario()
+
+    assert [url for url, _ in requests] == [
+        "https://models.example/v1/models",
+        "https://models.example/v1/models",
+        "https://auth.example/v1/models",
+        "https://crash.example/v1/models",
+    ]
+    assert all(auth == "Bearer test-key" for _, auth in requests)

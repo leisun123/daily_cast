@@ -1,12 +1,13 @@
 """FastAPI lifespan that initializes the currently implemented runtime infrastructure."""
 
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -15,7 +16,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.alerts import BriefingAlert, build_alert
-from dailycast.briefing.monitoring import preflight_providers
+from dailycast.briefing.monitoring import PingableProvider, preflight_providers
 from dailycast.briefing.scheduler import BriefingScheduler
 from dailycast.briefing.selection import load_selection_policy
 from dailycast.briefing.service import BriefingService
@@ -405,7 +406,10 @@ def _build_briefing_runtime(
 
     preflight: Callable[[], Awaitable[None]] | None = None
     if alert is not None:
-        configured_providers = getattr(llm_provider, "providers", (llm_provider,))
+        configured_providers = cast(
+            "Sequence[PingableProvider]",
+            getattr(llm_provider, "providers", (llm_provider,)),
+        )
         preflight = partial(preflight_providers, configured_providers, alert)
     briefing_service = BriefingService(
         session_factory,

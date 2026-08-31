@@ -94,6 +94,18 @@ class OpenAICompatibleLLMProvider:
         }
         return sha256_text(_canonical_json(payload))
 
+    async def ping(self) -> None:
+        """Confirm the endpoint answers with valid credentials without generating."""
+        response = await self._client.get(
+            f"{self._endpoint[: -len('/chat/completions')]}/models",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=10.0,
+        )
+        if response.status_code in (401, 403):
+            raise LLMProviderAuthenticationError
+        if response.status_code >= 400:
+            raise LLMProviderError
+
     async def generate_structured(
         self,
         operation: LLMOperation,

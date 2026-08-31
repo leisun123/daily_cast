@@ -7,11 +7,9 @@ import json
 from datetime import UTC, datetime
 
 import httpx
-from pydantic import BaseModel
 
 from dailycast.briefing.alerts import build_alert
 from dailycast.briefing.monitoring import preflight_providers
-from dailycast.llm.contracts import LLMMessage, LLMUsage, StructuredResult
 
 ALERT_WEBHOOK_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=alert-test-key"
 
@@ -66,7 +64,7 @@ def test_alertmsg_never_raises_when_the_alert_robot_itself_is_down() -> None:
 def test_provider_preflight_alerts_only_the_provider_that_cannot_answer() -> None:
     """A healthy fallback does not hide an unavailable preferred provider from operators."""
     alerts: list[tuple[str, str]] = []
-    primary = _ProbeProvider("primary", error=RuntimeError("rate limited"))
+    primary = _ProbeProvider("primary", error=RuntimeError("connection refused"))
     fallback = _ProbeProvider("fallback")
 
     async def alertmsg(stage: str, error: Exception) -> None:
@@ -76,7 +74,7 @@ def test_provider_preflight_alerts_only_the_provider_that_cannot_answer() -> Non
 
     assert primary.calls == 1
     assert fallback.calls == 1
-    assert alerts == [("AI Provider 预检（primary）", "rate limited")]
+    assert alerts == [("AI Provider 预检（primary）", "connection refused")]
 
 
 def test_provider_preflight_is_silent_when_every_provider_answers() -> None:
@@ -113,15 +111,8 @@ def test_provider_preflight_reports_a_hung_provider_instead_of_waiting() -> None
     assert alerts == [("AI Provider 预检（hung）", "TimeoutError")]
 
 
-class _ProbeResponse(BaseModel):
-    ok: bool
-
-
 class _ProbeProvider:
-    """Minimal structured provider double; only external network transport is omitted."""
-
-    max_output_tokens = 32
-    model = "test-model"
+    """Minimal pingable provider double; only external network transport is omitted."""
 
     def __init__(
         self,
@@ -135,26 +126,9 @@ class _ProbeProvider:
         self._delay = delay
         self.calls = 0
 
-    def generation_config_hash(self, model_options: object) -> str:
-        del model_options
-        return "test"
-
-    async def generate_structured(
-        self,
-        operation: object,
-        messages: list[LLMMessage],
-        response_schema: type[BaseModel],
-        model_options: object,
-    ) -> StructuredResult:
-        del operation, messages, response_schema, model_options
+    async def ping(self) -> None:
         self.calls += 1
         if self._delay:
             await asyncio.sleep(self._delay)
         if self._error is not None:
             raise self._error
-        return StructuredResult(
-            content=_ProbeResponse(ok=True).model_dump(),
-            model=self.model,
-            usage=LLMUsage(),
-            request_id=None,
-        )
