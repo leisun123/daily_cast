@@ -866,15 +866,23 @@ def test_briefing_model_fallback_reports_the_generation_error(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
     """A title-list fallback remains deliverable but does not hide a model outage from operators."""
+    now = datetime(2026, 8, 27, 16, 30, tzinfo=UTC)
     _seed_source(session_factory, "telecom-source", category="telecom")
     alerts = _RecordedAlerts()
     service = _build_service(
         session_factory,
         tmp_path / "briefings",
-        collector=FakeRSSCollector({"telecom-source": [_candidate("telecom-source", "t1")]}),
+        collector=FakeRSSCollector(
+            {
+                "telecom-source": [
+                    _candidate("telecom-source", "t1", published_at=now - timedelta(hours=12))
+                ]
+            }
+        ),
         llm=FakeBriefingLLM({"通信行业日报": RuntimeError("llm unavailable")}),
         notifier=None,
         alert=alerts.alertmsg,
+        clock=FixedClock(now),
     )
 
     report = asyncio.run(service.prepare())
@@ -887,7 +895,8 @@ def test_briefing_push_failure_reports_the_delivery_error(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
     """A failed main webhook alerts operators while its saved message remains retryable."""
-    collector, llm = _two_category_setup(session_factory)
+    now = datetime(2026, 8, 27, 16, 30, tzinfo=UTC)
+    collector, llm = _two_category_setup(session_factory, now=now)
     alerts = _RecordedAlerts()
     service = _build_service(
         session_factory,
@@ -896,6 +905,7 @@ def test_briefing_push_failure_reports_the_delivery_error(
         llm=llm,
         notifier=FailingNotifier(),
         alert=alerts.alertmsg,
+        clock=FixedClock(now),
     )
 
     report = asyncio.run(service.run())
@@ -1276,14 +1286,17 @@ def test_briefing_run_rejects_article_without_verified_publication_date(
 
 def _two_category_setup(
     session_factory: sessionmaker[Session],
+    *,
+    now: datetime | None = None,
 ) -> tuple[FakeRSSCollector, FakeBriefingLLM]:
     """Seed one telecom and one ai source with matching canned LLM payloads."""
+    published_at = None if now is None else now - timedelta(hours=12)
     _seed_source(session_factory, "telecom-source", category="telecom")
     _seed_source(session_factory, "ai-source", category="ai")
     collector = FakeRSSCollector(
         {
-            "telecom-source": [_candidate("telecom-source", "t1")],
-            "ai-source": [_candidate("ai-source", "a1")],
+            "telecom-source": [_candidate("telecom-source", "t1", published_at=published_at)],
+            "ai-source": [_candidate("ai-source", "a1", published_at=published_at)],
         }
     )
     llm = FakeBriefingLLM(
