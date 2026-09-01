@@ -26,9 +26,14 @@ llm:
   timeout_seconds: 120
   fallback:
     response_format: json_object
-    # A reasoning model regenerating a full briefing can outrun the primary
-    # 120s budget during peak hours; the fallback only runs when the primary
-    # already failed, so give it the widest legal headroom.
+    # DeepSeek is a reasoning model: it spends thousands of output tokens
+    # thinking before the JSON even starts (measured ~2050 thinking + ~210
+    # content on one category brief), and max_tokens caps that combined
+    # budget. At the shared 2000 cap it burns everything on thought and
+    # returns an empty body, so the fallback gets its own roomy ceilings.
+    max_output_tokens: 8000
+    # Its full thinking-then-writing run measures ~40s off-peak; the widest
+    # legal headroom covers peak hours too.
     timeout_seconds: 300
   # A seven-section Chinese episode plus semantic review and metadata can reserve
   # more than the general 60k default before provider calls are made.
