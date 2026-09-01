@@ -1120,17 +1120,19 @@ def test_provider_generation_identity_uses_only_semantic_non_secret_settings() -
     asyncio.run(scenario())
 
 
-def test_provider_ping_checks_reachability_without_generating() -> None:
-    """Ping hits the models list, raising typed errors for auth and server failures."""
-    requests: list[tuple[str, str | None]] = []
+def test_provider_ping_exercises_the_generation_path() -> None:
+    """Ping sends one minimal completion and only requires 2xx, not valid JSON."""
+    requests: list[tuple[str, str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        requests.append((str(request.url), request.headers.get("Authorization")))
-        if request.url.path.endswith("/models") and "auth" in request.url.host:
+        requests.append((str(request.url), request.method, request.read().decode()))
+        if "auth" in request.url.host:
             return httpx.Response(401)
-        if request.url.path.endswith("/models") and "crash" in request.url.host:
-            return httpx.Response(500)
-        return httpx.Response(200, json={"object": "list", "data": []})
+        if "crash" in request.url.host:
+            return httpx.Response(503)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "garbage, not json"}}]}
+        )
 
     def build(base_url: str) -> OpenAICompatibleLLMProvider:
         return OpenAICompatibleLLMProvider(
@@ -1160,6 +1162,7 @@ def test_provider_ping_checks_reachability_without_generating() -> None:
         )
 
         async def run() -> None:
+            # Even a non-JSON body counts: any 2xx completion proves the path.
             await healthy.ping()
             await responses_style.ping()
             for provider in (unauthorized, broken):
@@ -1175,10 +1178,12 @@ def test_provider_ping_checks_reachability_without_generating() -> None:
 
     scenario()
 
-    assert [url for url, _ in requests] == [
-        "https://models.example/v1/models",
-        "https://models.example/v1/models",
-        "https://auth.example/v1/models",
-        "https://crash.example/v1/models",
+    assert [(url, method) for url, method, _ in requests] == [
+        ("https://models.example/v1/chat/completions", "POST"),
+        ("https://models.example/v1/responses", "POST"),
+        ("https://auth.example/v1/chat/completions", "POST"),
+        ("https://crash.example/v1/chat/completions", "POST"),
     ]
-    assert all(auth == "Bearer test-key" for _, auth in requests)
+    bodies = [body for _, _, body in requests]
+    assert '"max_tokens":512' in bodies[0]
+    assert '"max_output_tokens":512' in bodies[1]

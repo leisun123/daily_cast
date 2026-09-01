@@ -102,11 +102,23 @@ class OpenAIResponsesLLMProvider:
         return sha256_text(_canonical_json(payload))
 
     async def ping(self) -> None:
-        """Confirm the endpoint answers with valid credentials without generating."""
-        response = await self._client.get(
-            f"{self._endpoint[: -len('/responses')]}/models",
+        """Exercise the real generation path with one minimal response.
+
+        The models list can stay green while the upstream model service is
+        down (a gateway answers metadata itself), so health means one tiny
+        generation returning 2xx. The response body is deliberately not
+        validated: reasoning models may spend the whole budget thinking, and
+        any successful completion still proves the path works.
+        """
+        response = await self._client.post(
+            self._endpoint,
             headers={"Authorization": f"Bearer {self._api_key}"},
-            timeout=10.0,
+            json={
+                "model": self.model,
+                "input": "Reply with the word: ok",
+                "max_output_tokens": 512,
+            },
+            timeout=60.0,
         )
         if response.status_code in (401, 403):
             raise LLMProviderAuthenticationError

@@ -8,7 +8,9 @@ from typing import Protocol
 
 from dailycast.briefing.alerts import BriefingAlert
 
-_PROBE_TIMEOUT_SECONDS = 30.0
+# Providers cap their own probe at 60s; the outer bound only guards a wedged
+# transport that never returns.
+_PROBE_TIMEOUT_SECONDS = 90.0
 
 
 class PingableProvider(Protocol):
