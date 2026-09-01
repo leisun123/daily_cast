@@ -26,6 +26,10 @@ llm:
   timeout_seconds: 120
   fallback:
     response_format: json_object
+    # A reasoning model regenerating a full briefing can outrun the primary
+    # 120s budget during peak hours; the fallback only runs when the primary
+    # already failed, so give it the widest legal headroom.
+    timeout_seconds: 300
   # A seven-section Chinese episode plus semantic review and metadata can reserve
   # more than the general 60k default before provider calls are made.
   budget:

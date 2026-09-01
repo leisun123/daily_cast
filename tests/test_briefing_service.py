@@ -888,7 +888,9 @@ def test_briefing_model_fallback_reports_the_generation_error(
     report = asyncio.run(service.prepare())
 
     assert report.date == "2026-08-27"
-    assert alerts.events == [("消息生成（通信行业日报）", "llm unavailable")]
+    assert alerts.events == [
+        ("消息生成（通信行业日报）已降级为标题列表，日报仍将按时发送", "llm unavailable")
+    ]
 
 
 def test_briefing_push_failure_reports_the_delivery_error(

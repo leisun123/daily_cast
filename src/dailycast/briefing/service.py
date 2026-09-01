@@ -517,7 +517,10 @@ class BriefingService:
         try:
             result = await self._generate_result(category, evidence, provider)
         except Exception as error:
-            await self._alert_message(f"消息生成（{CATEGORY_TITLES[category]}）", error)
+            await self._alert_message(
+                f"消息生成（{CATEGORY_TITLES[category]}）已降级为标题列表，日报仍将按时发送",
+                error,
+            )
             logger.exception(
                 "briefing model generation failed; using evidence fallback",
                 extra={"category": category, "error": str(error)},
