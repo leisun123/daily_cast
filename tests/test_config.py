@@ -161,9 +161,9 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.briefing.cron_expression == "30 8 * * mon-fri"
     assert settings.monitoring.webhook_url == "https://qyapi.example.test/alert-hook"
     assert settings.monitoring.webhook_format == "wecom_markdown_v2"
-    # The briefing budget work reintroduced explicit per-provider and per-run
-    # output ceilings so BudgetReservingLLMProvider can reserve per attempt.
-    assert settings.llm.max_output_tokens == 2000
+    # The output budget belongs to the model: neither provider carries an
+    # external cap (reasoning models share thinking and content with it).
+    assert settings.llm.max_output_tokens is None
     assert settings.llm.budget.max_output_tokens == 15_000
 
 

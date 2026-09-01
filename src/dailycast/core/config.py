@@ -163,10 +163,10 @@ class LLMProviderSettings(BaseModel):
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=10)
-    # Null leaves the output budget to the provider — required for reasoning
-    # models, whose thinking shares the output allowance and cannot be capped
-    # from outside without truncating the answer to nothing.
-    max_output_tokens: int | None = Field(default=2000, ge=1)
+    # The output budget belongs to the model: null (the default) sends no
+    # cap, so reasoning models can split their allowance between thinking
+    # and content. An external cap only truncates them to an empty answer.
+    max_output_tokens: int | None = Field(default=None, ge=1)
     response_format: str = "json_schema"
 
     @field_validator("provider")

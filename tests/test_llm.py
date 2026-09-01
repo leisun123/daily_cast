@@ -265,8 +265,8 @@ def test_llm_settings_have_explicit_safe_defaults(app_config_path: Path) -> None
     assert settings.llm.temperature == 0.1
     assert settings.llm.budget.max_calls == 12
     assert settings.llm.budget.max_input_tokens == 60_000
-    # Explicit output ceilings reserve the per-attempt budget for the briefing flow.
-    assert settings.llm.max_output_tokens == 2000
+    # The output budget belongs to the model: providers default to uncapped.
+    assert settings.llm.max_output_tokens is None
     assert settings.llm.budget.max_output_tokens == 15_000
 
 

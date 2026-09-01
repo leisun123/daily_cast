@@ -55,7 +55,6 @@ llm:
     model: deepseek-chat
     temperature: 0.1
     top_p: null
-    max_output_tokens: 2000
     timeout_seconds: 120
     max_retries: 2
     response_format: json_object
