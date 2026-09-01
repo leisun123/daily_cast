@@ -1178,12 +1178,39 @@ def test_provider_ping_exercises_the_generation_path() -> None:
 
     scenario()
 
+    # A 5xx is retried once before failing; a 401 reports on the first try.
     assert [(url, method) for url, method, _ in requests] == [
         ("https://models.example/v1/chat/completions", "POST"),
         ("https://models.example/v1/responses", "POST"),
         ("https://auth.example/v1/chat/completions", "POST"),
         ("https://crash.example/v1/chat/completions", "POST"),
+        ("https://crash.example/v1/chat/completions", "POST"),
     ]
     bodies = [body for _, _, body in requests]
     assert '"max_tokens":512' in bodies[0]
     assert '"max_output_tokens":512' in bodies[1]
+
+
+def test_provider_ping_survives_one_transient_blip() -> None:
+    """A single 5xx blip must not page the operator for a healthy provider."""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://blip.example/v1",
+        api_key="test-key",
+        model="test-model",
+        timeout_seconds=2,
+        temperature=0.1,
+        max_output_tokens=None,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    asyncio.run(provider.ping())
+
+    assert len(attempts) == 2

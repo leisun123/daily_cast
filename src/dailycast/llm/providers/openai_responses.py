@@ -108,22 +108,39 @@ class OpenAIResponsesLLMProvider:
         down (a gateway answers metadata itself), so health means one tiny
         generation returning 2xx. The response body is deliberately not
         validated: reasoning models may spend the whole budget thinking, and
-        any successful completion still proves the path works.
+        any successful completion still proves the path works. Transient
+        transport hiccups and 5xx answers get one retry so a blip does not
+        page the operator; deterministic failures (4xx) report immediately.
         """
-        response = await self._client.post(
-            self._endpoint,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-            json={
-                "model": self.model,
-                "input": "Reply with the word: ok",
-                "max_output_tokens": 512,
-            },
-            timeout=60.0,
-        )
-        if response.status_code in (401, 403):
-            raise LLMProviderAuthenticationError
-        if response.status_code >= 400:
-            raise LLMProviderError
+        for attempt in (1, 2):
+            try:
+                response = await self._client.post(
+                    self._endpoint,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json={
+                        "model": self.model,
+                        "input": "Reply with the word: ok",
+                        "max_output_tokens": 512,
+                    },
+                    timeout=60.0,
+                )
+            except httpx.TimeoutException as error:
+                if attempt == 2:
+                    raise LLMProviderTimeoutError from error
+                await asyncio.sleep(2.0)
+                continue
+            except httpx.TransportError as error:
+                if attempt == 2:
+                    raise LLMProviderError from error
+                await asyncio.sleep(2.0)
+                continue
+            if response.status_code < 400:
+                return
+            if response.status_code in (401, 403):
+                raise LLMProviderAuthenticationError
+            if attempt == 2:
+                raise LLMProviderError
+            await asyncio.sleep(2.0)
 
     async def generate_structured(
         self,
