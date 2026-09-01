@@ -1187,8 +1187,9 @@ def test_provider_ping_exercises_the_generation_path() -> None:
         ("https://crash.example/v1/chat/completions", "POST"),
     ]
     bodies = [body for _, _, body in requests]
-    assert '"max_tokens":512' in bodies[0]
-    assert '"max_output_tokens":512' in bodies[1]
+    # No output budget is imposed: the model manages its own.
+    assert "max_tokens" not in bodies[0]
+    assert "max_output_tokens" not in bodies[1]
 
 
 def test_provider_ping_survives_one_transient_blip() -> None:

@@ -26,14 +26,10 @@ llm:
   timeout_seconds: 120
   fallback:
     response_format: json_object
-    # DeepSeek is a reasoning model: it spends thousands of output tokens
-    # thinking before the JSON even starts (measured ~2050 thinking + ~210
-    # content on one category brief), and max_tokens caps that combined
-    # budget. At the shared 2000 cap it burns everything on thought and
-    # returns an empty body, so the fallback gets its own roomy ceilings.
-    max_output_tokens: 8000
-    # Its full thinking-then-writing run measures ~40s off-peak; the widest
-    # legal headroom covers peak hours too.
+    # DeepSeek reasons before answering and shares its output allowance
+    # between thinking and content, so no external cap is set — the model
+    # manages its own budget (a full category brief measures 20-40s).
+    max_output_tokens: null
     timeout_seconds: 300
   # A seven-section Chinese episode plus semantic review and metadata can reserve
   # more than the general 60k default before provider calls are made.

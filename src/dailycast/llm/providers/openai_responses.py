@@ -106,9 +106,9 @@ class OpenAIResponsesLLMProvider:
 
         The models list can stay green while the upstream model service is
         down (a gateway answers metadata itself), so health means one tiny
-        generation returning 2xx. The response body is deliberately not
-        validated: reasoning models may spend the whole budget thinking, and
-        any successful completion still proves the path works. Transient
+        generation returning 2xx. No output budget is imposed and the body
+        is not validated: the model manages its own reasoning, and any
+        successful completion still proves the path works. Transient
         transport hiccups and 5xx answers get one retry so a blip does not
         page the operator; deterministic failures (4xx) report immediately.
         """
@@ -117,11 +117,7 @@ class OpenAIResponsesLLMProvider:
                 response = await self._client.post(
                     self._endpoint,
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    json={
-                        "model": self.model,
-                        "input": "Reply with the word: ok",
-                        "max_output_tokens": 512,
-                    },
+                    json={"model": self.model, "input": "Reply with the word: ok"},
                     timeout=60.0,
                 )
             except httpx.TimeoutException as error:
