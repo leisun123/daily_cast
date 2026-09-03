@@ -12,11 +12,18 @@ WECOM_MARKDOWN_MAX_BYTES = 4096
 RENDER_BYTE_BUDGET = 4000
 _TRUNCATION_SUFFIX = "\n…（内容过长，已截断）"
 _RSS_MIRROR_SUFFIX = re.compile(r"[（(]RSSHub(?:\s*镜像)?[）)]", flags=re.IGNORECASE)
+_WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _format_issue_date(issue_date: date) -> str:
+    """Render the issue date as `2026年09月03日 周四`, zero-padded and weekday-labelled."""
+    weekday = _WEEKDAY_LABELS[issue_date.weekday()]
+    return f"{issue_date.year}年{issue_date.month:02d}月{issue_date.day:02d}日 {weekday}"
 
 
 def render_briefing(
     category_title: str,
-    briefing_date: date,
+    issue_date: date,
     result: BriefingResult,
     evidence: Sequence[BriefingEvidence],
 ) -> str:
@@ -25,7 +32,9 @@ def render_briefing(
     The LLM writes headlines and summaries, but the rendered link target is
     always validated against the evidence: a URL the LLM invented is replaced
     by the matching source's evidence URL, and an item that matches no evidence
-    at all is dropped rather than shipped with a fabricated link.
+    at all is dropped rather than shipped with a fabricated link.  The title
+    carries the issue date (the delivery day), not the collection-window date
+    the covered news belongs to.
     """
     urls_in_evidence = {entry.source_url for entry in evidence}
     fallback_url_by_source: dict[str, str] = {}
@@ -45,17 +54,17 @@ def render_briefing(
         block = _item_block(number, item, url)
         candidate = _render_lines(
             category_title,
-            briefing_date,
+            issue_date,
             result.overview,
             [*accepted_blocks, block],
         )
         if len(candidate.encode("utf-8")) <= RENDER_BYTE_BUDGET:
             accepted_blocks.append(block)
-    return _render_lines(category_title, briefing_date, result.overview, accepted_blocks)
+    return _render_lines(category_title, issue_date, result.overview, accepted_blocks)
 
 
 def render_merged_briefing(
-    briefing_date: date,
+    issue_date: date,
     categories: Sequence[tuple[str, str, BriefingResult, Sequence[BriefingEvidence]]],
     *,
     focus: str | None = None,
@@ -76,7 +85,7 @@ def render_merged_briefing(
         display_heading = f"{heading}（降级版）" if result.degraded else heading
         sections.append((display_heading, resolved_items))
 
-    lines = [f"# 【行业观察日报】{briefing_date.month}月{briefing_date.day}日"]
+    lines = [f"# 【行业观察日报】{_format_issue_date(issue_date)}"]
     if focus is not None and focus.strip():
         # Keep heading and quote as sibling blocks: some WeCom clients render
         # bold markers literally when they are nested inside a quote.
@@ -114,13 +123,13 @@ def truncate_markdown(content: str, max_bytes: int = RENDER_BYTE_BUDGET) -> str:
 
 def _render_lines(
     category_title: str,
-    briefing_date: date,
+    issue_date: date,
     overview: str,
     item_blocks: Sequence[Sequence[str]],
 ) -> str:
     """Render the header and complete item blocks with their final item count."""
     lines = [
-        f"# {category_title}｜{briefing_date.month}月{briefing_date.day}日",
+        f"# {category_title}｜{_format_issue_date(issue_date)}",
         f"*今日精选 · {len(item_blocks)} 条*",
         "",
         "> **今日要点**",

@@ -668,6 +668,44 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
     assert len(delivered.encode("utf-8")) <= RENDER_BYTE_BUDGET
 
 
+def test_briefing_title_shows_the_delivery_day_not_the_collected_news_day(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The 08:30 Shanghai run titles today's issue even though it reports yesterday's news."""
+    now = datetime(2026, 9, 3, 0, 30, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    notifier = RecordingNotifier()
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory,
+        output_dir,
+        collector=FakeRSSCollector(
+            {
+                "telecom-source": [
+                    _candidate("telecom-source", "t1", published_at=now - timedelta(hours=12))
+                ]
+            }
+        ),
+        llm=FakeBriefingLLM(
+            {
+                "通信行业日报": _llm_payload(
+                    "https://telecom-source.example.test/t1", "来源 telecom-source"
+                )
+            }
+        ),
+        notifier=notifier,
+        clock=FixedClock(now),
+    )
+
+    report = asyncio.run(service.run())
+
+    assert notifier.pushed[0].startswith("# 【行业观察日报】2026年09月03日 周四")
+    assert report.date == "2026-09-02"
+    briefings = read_briefings_for_date(output_dir, date(2026, 9, 2))
+    assert briefings["merged"].startswith("# 【行业观察日报】2026年09月03日 周四")
+    assert briefings["telecom"].startswith("# 通信行业日报｜2026年09月03日 周四")
+
+
 def test_briefing_run_trims_overlong_model_prose_and_still_pushes(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:

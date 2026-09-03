@@ -290,6 +290,7 @@ class BriefingService:
                 evidence,
                 provider,
                 marker_date=run_date,
+                issue_date=run_date,
                 force=force,
             )
             reports.append(category_report)
@@ -302,7 +303,7 @@ class BriefingService:
                 else await self._generate_merged_focus(pending_deliveries, provider)
             )
             merged_markdown = self._render_merged_markdown(
-                briefing_date, pending_deliveries, focus=merged_focus
+                run_date, pending_deliveries, focus=merged_focus
             )
             self._write_merged_markdown(briefing_date, merged_markdown)
             self._write_prepared_marker(run_date, briefing_date, pending_deliveries)
@@ -488,9 +489,14 @@ class BriefingService:
         provider: LLMProvider,
         *,
         marker_date: date,
+        issue_date: date,
         force: bool,
     ) -> tuple[BriefingCategoryReport, _PendingBriefingDelivery | None]:
-        """Generate one category while deferring delivery until every category is ready."""
+        """Generate one category while deferring delivery until every category is ready.
+
+        ``briefing_date`` names the collected news day for persisted files;
+        ``issue_date`` is the delivery day shown in the rendered title.
+        """
         marker_path = self._marker_path(marker_date, category)
         if not force and marker_path.is_file():
             logger.info(
@@ -526,7 +532,7 @@ class BriefingService:
                 extra={"category": category, "error": str(error)},
             )
             result = self._fallback_result(category, evidence)
-        markdown = self._render_markdown(category, briefing_date, result, evidence)
+        markdown = self._render_markdown(category, issue_date, result, evidence)
         try:
             file_path = self._write_markdown(briefing_date, category, markdown)
         except Exception as error:
@@ -680,7 +686,7 @@ class BriefingService:
     def _render_markdown(
         self,
         category: str,
-        briefing_date: date,
+        issue_date: date,
         result: BriefingResult,
         evidence: tuple[RankedBriefingEvidence, ...],
     ) -> str:
@@ -688,7 +694,7 @@ class BriefingService:
         return truncate_markdown(
             render_briefing(
                 CATEGORY_TITLES[category],
-                briefing_date,
+                issue_date,
                 result,
                 [entry.evidence for entry in evidence],
             )
@@ -696,15 +702,19 @@ class BriefingService:
 
     def _render_merged_markdown(
         self,
-        briefing_date: date,
+        issue_date: date,
         pending_deliveries: list[_PendingBriefingDelivery],
         *,
         focus: str | None,
     ) -> str:
-        """Use the compact preview layout for the one group-message delivery."""
+        """Use the compact preview layout for the one group-message delivery.
+
+        The title shows the delivery day (``issue_date``); persisted file names
+        keep using the collected news day (``briefing_date``).
+        """
         section_labels = {"telecom": ("通信", "📡 通信"), "ai": ("AI", "🤖 AI")}
         return render_merged_briefing(
-            briefing_date,
+            issue_date,
             [
                 (
                     *section_labels[delivery.category],

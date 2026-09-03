@@ -102,6 +102,7 @@ def test_merged_renderer_keeps_the_model_selected_theme_before_each_headline() -
         ],
     )
 
+    assert markdown.startswith("# 【行业观察日报】2026年08月25日 周二\n")
     assert "1. **5G-A 场景｜** [头条一句话](https://news.example.test/telecom)" in markdown
     assert "2. **国产模型｜** [头条一句话](https://news.example.test/ai)" in markdown
 
@@ -373,7 +374,7 @@ def test_renderer_uses_spaced_quote_blocks_and_reader_friendly_source() -> None:
         [_evidence()],
     )
 
-    assert markdown.startswith("# 通信行业日报｜8月20日\n")
+    assert markdown.startswith("# 通信行业日报｜2026年08月20日 周四\n")
     assert "*今日精选 · 1 条*" in markdown
     assert (
         "> **今日要点**\n> 概览一句话。\n\n"
