@@ -5,17 +5,19 @@
 # startup while their historical articles and operational status remain intact.
 #
 # Verified 2026-08 (DailyCast UA):
-# - C114 sub-feeds are gb2312 RSS 2.0; feedparser handles the declared encoding.
+# - C114's RSS generation froze around 2026-08-21 (the feeds still return the
+#   same mid-August items, without pubDate elements), and c114.com.cn also
+#   intermittently drops datacenter connections. The telecom brief therefore
+#   reads C114's server-rendered operator (www.c114.com.cn/local/) and
+#   equipment (www.c114.com.cn/news/18.html) channel pages instead: gb2312
+#   pages whose dated entries sit inside div.newsText blocks and link to
+#   /news/... article paths. The html_list collector handles these through the
+#   `date_context_tags`, `allow_month_day_dates` ("9/3" style dates) and
+#   charset-aware decoding options. The broader C114 top-news surface stays
+#   excluded: its rolling front page has no per-entry dates at all.
 # - miit.gov.cn returns a dated, UTF-8 HTML news list. Its dated, same-host
 #   announcements enter the candidate pool; the LLM distinguishes
 #   information-communications policy from general industrial news.
-# - `rsshub://36kr/hot-list` is the documented RSSHub route for 36Kr's
-#   24-hour hot list. DailyCast resolves it only through the deployment's
-#   `briefing.rsshub_base_url`; broad stories remain candidates for the LLM to
-#   judge instead of being discarded by local title matching.
-# - C114 operators/equipment sub-feeds are used for the telecom brief; the
-#   broader C114 top-news feed is deliberately excluded because its rolling
-#   entries can be stale or too general for a daily operational briefing.
 # - GSMA's official RSS and ZTE's official newsroom are directly reachable and
 #   retain their own public article URLs. The ZTE URL-path boundary excludes
 #   its dated solution-navigation links from being mistaken for news.
@@ -49,6 +51,8 @@
 #   likewise held back until their public list endpoint is stable end-to-end.
 # - news.cctv.com/rss/keji.xml is 404. 36Kr's own RSS center is retained as a
 #   fallback option, but current direct requests receive an anti-bot HTML page.
+#   The 36kr hot list stays out of the seeds until the deployment configures
+#   DAILYCAST_BRIEFING__RSSHUB_BASE_URL (see the note at the end of `sources:`).
 # - Google News keyword RSS links are JS interstitials (no server redirect, no
 #   extractable body) and require VPN to open - violates the "links must be
 #   reachable without VPN" requirement.
@@ -125,24 +129,34 @@ sources:
       timezone: Asia/Shanghai
   - id: c114-operators
     name: C114 电信运营商
-    kind: rss
-    entry_url: https://www.c114.com.cn/rss/rss_news_21.xml
+    kind: html_list
+    entry_url: https://www.c114.com.cn/local/
     priority: 85
     language: zh-CN
     request_timeout_seconds: 20
-    max_items_per_run: 30
+    max_items_per_run: 40
     config:
       briefing_category: telecom
+      article_url_path_prefixes:
+        - /news/
+      date_context_tags: [li, div]
+      allow_month_day_dates: true
+      timezone: Asia/Shanghai
   - id: c114-equipment
     name: C114 设备商动态
-    kind: rss
-    entry_url: https://www.c114.com.cn/rss/rss_news_18.xml
+    kind: html_list
+    entry_url: https://www.c114.com.cn/news/18.html
     priority: 70
     language: zh-CN
     request_timeout_seconds: 20
-    max_items_per_run: 30
+    max_items_per_run: 40
     config:
       briefing_category: telecom
+      article_url_path_prefixes:
+        - /news/
+      date_context_tags: [li, div]
+      allow_month_day_dates: true
+      timezone: Asia/Shanghai
   - id: leiphone-feed
     name: 雷峰网
     kind: rss
@@ -153,13 +167,7 @@ sources:
     max_items_per_run: 60
     config:
       briefing_category: ai
-  - id: kr36-hot-list
-    name: 36氪 24小时热榜
-    kind: rss
-    entry_url: rsshub://36kr/hot-list?limit=100
-    priority: 75
-    language: zh-CN
-    request_timeout_seconds: 20
-    max_items_per_run: 100
-    config:
-      briefing_category: ai
+  # kr36-hot-list (rsshub://36kr/hot-list?limit=100, briefing_category: ai) was
+  # removed on 2026-09: the deployment runs without DAILYCAST_BRIEFING__RSSHUB_BASE_URL,
+  # so the route errored with RSSHUB_BASE_URL_REQUIRED on every run. Re-add the
+  # entry above once a known-good RSSHub instance is configured.

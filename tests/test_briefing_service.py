@@ -927,7 +927,9 @@ def test_briefing_model_fallback_reports_the_generation_error(
 
     assert report.date == "2026-08-27"
     assert alerts.events == [
-        ("消息生成（通信行业日报）已降级为标题列表，日报仍将按时发送", "llm unavailable")
+        ("消息生成（通信行业日报）已降级为标题列表，日报仍将按时发送", "llm unavailable"),
+        ("简报条目不足（通信行业日报）", "合格候选仅 1 条，最终入选 1 条，低于目标 6 条"),
+        ("简报条目不足（AI 动态日报）", "无合格候选，板块整体缺失（目标 6 条）"),
     ]
 
 
@@ -951,7 +953,117 @@ def test_briefing_push_failure_reports_the_delivery_error(
     report = asyncio.run(service.run())
 
     assert report.date == "2026-08-27"
-    assert alerts.events == [("企业微信发送", "webhook down")]
+    assert alerts.events == [
+        ("简报条目不足（通信行业日报）", "合格候选仅 1 条，最终入选 1 条，低于目标 6 条"),
+        ("简报条目不足（AI 动态日报）", "合格候选仅 1 条，最终入选 1 条，低于目标 6 条"),
+        ("企业微信发送", "webhook down"),
+    ]
+
+
+def test_item_shortfall_alerts_report_a_thin_candidate_pool(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A pool below target is reported with both the candidate and selection counts."""
+    now = datetime(2026, 8, 27, 16, 30, tzinfo=UTC)
+    telecom_urls = []
+    for index in range(1, 4):
+        source_id = f"telecom-{index}"
+        _seed_source(session_factory, source_id, category="telecom")
+        telecom_urls.append(f"https://{source_id}.example.test/t{index}")
+    _seed_source(session_factory, "ai-source", category="ai")
+    collector = FakeRSSCollector(
+        {
+            **{
+                f"telecom-{index}": [
+                    _candidate(
+                        f"telecom-{index}", f"t{index}", published_at=now - timedelta(hours=12)
+                    )
+                ]
+                for index in range(1, 4)
+            },
+            "ai-source": [_candidate("ai-source", "a1", published_at=now - timedelta(hours=12))],
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payloads(telecom_urls, "运营商动态"),
+            "AI 动态日报": _llm_payload("https://ai-source.example.test/a1", "来源 ai-source"),
+        }
+    )
+    alerts = _RecordedAlerts()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+
+    asyncio.run(service.prepare())
+
+    assert alerts.events == [
+        ("简报条目不足（通信行业日报）", "合格候选仅 3 条，最终入选 3 条，低于目标 6 条"),
+        ("简报条目不足（AI 动态日报）", "合格候选仅 1 条，最终入选 1 条，低于目标 6 条"),
+    ]
+
+
+def test_healthy_categories_raise_no_shortfall_alert(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A full six-item selection from an adequate pool stays silent."""
+    now = datetime(2026, 8, 27, 16, 30, tzinfo=UTC)
+    telecom_urls = []
+    for index in range(1, 9):
+        source_id = f"telecom-{index}"
+        _seed_source(session_factory, source_id, category="telecom")
+        telecom_urls.append(f"https://{source_id}.example.test/t{index}")
+    ai_urls = []
+    for index in range(1, 9):
+        source_id = f"ai-{index}"
+        _seed_source(session_factory, source_id, category="ai")
+        ai_urls.append(f"https://{source_id}.example.test/a{index}")
+    collector = FakeRSSCollector(
+        {
+            **{
+                f"telecom-{index}": [
+                    _candidate(
+                        f"telecom-{index}", f"t{index}", published_at=now - timedelta(hours=12)
+                    )
+                ]
+                for index in range(1, 9)
+            },
+            **{
+                f"ai-{index}": [
+                    _candidate(f"ai-{index}", f"a{index}", published_at=now - timedelta(hours=12))
+                ]
+                for index in range(1, 9)
+            },
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payloads(telecom_urls[:6], "运营商动态"),
+            "AI 动态日报": _llm_payloads(ai_urls[:6], "AI 中文来源"),
+        }
+    )
+    alerts = _RecordedAlerts()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+
+    report = asyncio.run(service.prepare())
+
+    telecom_report = next(entry for entry in report.categories if entry.category == "telecom")
+    assert telecom_report.article_count == 8
+    assert alerts.events == []
 
 
 def test_model_outage_sends_six_explicitly_degraded_verified_titles(
