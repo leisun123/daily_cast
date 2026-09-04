@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -51,7 +52,12 @@ from dailycast.sources.bootstrap import (
     load_configured_source_ids,
 )
 from dailycast.sources.contracts import ArticleCandidate, CollectionResult, CollectionWindow
-from dailycast.sources.extraction import ContentExtractor, FetchPolicy, SafeHttpFetcher
+from dailycast.sources.extraction import (
+    ContentExtractor,
+    FetchPolicy,
+    SafeHttpFetcher,
+    decode_html,
+)
 from dailycast.sources.html_list import HTMLListCollector
 from dailycast.sources.research import (
     ResearchCollector,
@@ -741,6 +747,264 @@ def test_html_list_collector_rejects_an_undated_matching_navigation_link() -> No
     asyncio.run(scenario())
 
 
+def test_html_list_collector_decodes_a_legacy_charset_list_page() -> None:
+    """A gb2312 channel page produces readable titles through the shared charset decoder."""
+
+    async def scenario() -> None:
+        html = (
+            "<html><body><ul>"
+            '<li><a href="/news/16/a1.html">中兴通讯发布新一代算力服务器</a>'
+            "<span>2026-08-20</span></li>"
+            "</ul></body></html>"
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=gb2312"},
+                    content=html.encode("gb2312"),
+                    request=request,
+                )
+            )
+        )
+        try:
+            source = Source(
+                **source_values()
+                | {
+                    "id": "legacy-telecom-list",
+                    "name": "传统编码通信列表",
+                    "kind": SourceKind.HTML_LIST,
+                    "entry_url": "https://legacy.example.test/news/18.html",
+                    "normalized_entry_url": "https://legacy.example.test/news/18.html",
+                    "language": "zh-CN",
+                    "config_json": (
+                        '{"article_url_path_prefixes":["/news/"],"timezone":"Asia/Shanghai"}'
+                    ),
+                }
+            )
+            result = await HTMLListCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).collect(
+                source,
+                CollectionWindow(
+                    start=datetime(2026, 8, 19, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 8, 21, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert [candidate.title for candidate in result.candidates] == [
+            "中兴通讯发布新一代算力服务器"
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_html_list_collector_infers_the_year_for_configured_month_day_dates() -> None:
+    """C114-style "9/3" entries become exact local midnights, preferring the trailing date."""
+
+    async def scenario() -> None:
+        now = datetime.now(UTC)
+        yesterday_local = (now.astimezone(ZoneInfo("Asia/Shanghai")) - timedelta(days=1)).date()
+        month_day = f"{yesterday_local.month}/{yesterday_local.day}"
+        html = f"""
+        <html><body><div class="list">
+          <div class="newsText">
+            <a href="https://www.c114.com.cn/news/118/a1316917.html"
+               >评分9/10，中国移动完成多地无线网扩容</a>
+            <div class="news_bottom"><div class="time fr"><span>{month_day}</span></div></div>
+          </div>
+          <div class="newsText">
+            <a href="https://www.c114.com.cn/topic/6732.html">运营商业绩专题</a>
+            <div class="news_bottom"><div class="time fr"><span>{month_day}</span></div></div>
+          </div>
+        </div></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            source = Source(
+                **source_values()
+                | {
+                    "id": "c114-operators",
+                    "name": "C114 电信运营商",
+                    "kind": SourceKind.HTML_LIST,
+                    "entry_url": "https://www.c114.com.cn/local/",
+                    "normalized_entry_url": "https://www.c114.com.cn/local/",
+                    "language": "zh-CN",
+                    "config_json": (
+                        '{"article_url_path_prefixes":["/news/"],'
+                        '"date_context_tags":["li","div"],'
+                        '"allow_month_day_dates":true,'
+                        '"timezone":"Asia/Shanghai"}'
+                    ),
+                }
+            )
+            result = await HTMLListCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).collect(
+                source,
+                CollectionWindow(
+                    start=datetime(
+                        yesterday_local.year,
+                        yesterday_local.month,
+                        yesterday_local.day,
+                        tzinfo=ZoneInfo("Asia/Shanghai"),
+                    ).astimezone(UTC)
+                    - timedelta(minutes=1),
+                    end=now + timedelta(days=1),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert [candidate.title for candidate in result.candidates] == [
+            "评分9/10，中国移动完成多地无线网扩容"
+        ]
+        expected = datetime(
+            yesterday_local.year,
+            yesterday_local.month,
+            yesterday_local.day,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ).astimezone(UTC)
+        assert result.candidates[0].published_at == expected
+
+    asyncio.run(scenario())
+
+
+def test_html_list_collector_rolls_back_the_year_for_distant_future_month_day_dates() -> None:
+    """A "12/30" observed in September belongs to the previous year, not the coming one."""
+
+    async def scenario() -> None:
+        now = datetime.now(UTC)
+        observed_local = now.astimezone(ZoneInfo("Asia/Shanghai")).date()
+        future = observed_local + timedelta(days=60)
+        try:
+            expected_date = date(future.year - 1, future.month, future.day)
+        except ValueError:
+            pytest.skip("Feb 29 has no predecessor-year equivalent")
+        month_day = f"{future.month}/{future.day}"
+        html = f"""
+        <html><body><div class="list">
+          <div class="newsText">
+            <a href="https://www.c114.com.cn/news/126/a1316862.html">设备商完成新一代光网交付</a>
+            <div class="news_bottom"><div class="time fr"><span>{month_day}</span></div></div>
+          </div>
+        </div></body></html>
+        """
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                    request=request,
+                )
+            )
+        )
+        try:
+            source = Source(
+                **source_values()
+                | {
+                    "id": "c114-equipment",
+                    "name": "C114 设备商动态",
+                    "kind": SourceKind.HTML_LIST,
+                    "entry_url": "https://www.c114.com.cn/news/18.html",
+                    "normalized_entry_url": "https://www.c114.com.cn/news/18.html",
+                    "language": "zh-CN",
+                    "config_json": (
+                        '{"article_url_path_prefixes":["/news/"],'
+                        '"date_context_tags":["li","div"],'
+                        '"allow_month_day_dates":true,'
+                        '"timezone":"Asia/Shanghai"}'
+                    ),
+                }
+            )
+            result = await HTMLListCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).collect(
+                source,
+                CollectionWindow(
+                    start=datetime(
+                        expected_date.year,
+                        expected_date.month,
+                        expected_date.day,
+                        tzinfo=ZoneInfo("Asia/Shanghai"),
+                    ).astimezone(UTC)
+                    - timedelta(minutes=1),
+                    end=now + timedelta(days=1),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        expected = datetime(
+            expected_date.year,
+            expected_date.month,
+            expected_date.day,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ).astimezone(UTC)
+        assert [candidate.published_at for candidate in result.candidates] == [expected]
+
+    asyncio.run(scenario())
+
+
+def test_html_list_collector_rejects_page_level_date_context_tags() -> None:
+    """A date context that would swallow the whole page is a configuration error."""
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text="<html><body><p>x</p></body></html>",
+                    request=request,
+                )
+            )
+        )
+        try:
+            source = Source(
+                **source_values()
+                | {
+                    "id": "broken-telecom-list",
+                    "name": "错误配置通信列表",
+                    "kind": SourceKind.HTML_LIST,
+                    "entry_url": "https://broken.example.test/news",
+                    "normalized_entry_url": "https://broken.example.test/news",
+                    "config_json": '{"date_context_tags":["body"],"timezone":"UTC"}',
+                }
+            )
+            result = await HTMLListCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).collect(
+                source,
+                CollectionWindow(
+                    start=datetime(2026, 8, 19, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 8, 21, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is not None
+        assert result.error.code == "INVALID_HTML_LIST_CONFIG"
+
+    asyncio.run(scenario())
+
+
 def test_recruitment_source_uses_the_extended_tracking_window(app_config_path: Path) -> None:
     """Official recruitment tracking is not limited to the general breaking-news window."""
 
@@ -863,6 +1127,20 @@ def test_content_extractor_honors_a_meta_declared_legacy_charset() -> None:
         assert "�" not in result.content_text
 
     asyncio.run(scenario())
+
+
+def test_decode_html_upgrades_a_gb2312_declaration_to_gb18030() -> None:
+    """Pages declaring gb2312 but serving GBK-only bytes stay readable."""
+
+    body = "<html><head></head><body>设备商完成新一代光网交付</body></html>"
+    content = body.encode("gb18030")
+    assert decode_html(content, "text/html; charset=gb2312") == body
+    assert decode_html(content, "text/html; charset=GBK") == body
+    meta_page = (
+        '<html><head><meta http-equiv="content-type" '
+        'content="text/html; charset=gb2312" /></head><body>设备商交付</body></html>'
+    )
+    assert decode_html(meta_page.encode("gb18030"), "text/html") == meta_page
 
 
 def test_content_extractor_reads_a_verified_publication_time_from_article_metadata() -> None:

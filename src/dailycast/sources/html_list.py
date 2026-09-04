@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -18,9 +18,22 @@ from dailycast.sources.contracts import (
     CollectionWindow,
     SourceError,
 )
-from dailycast.sources.extraction import FetchPolicy, SafeHttpFetcher, SourceFetchError
+from dailycast.sources.extraction import (
+    FetchPolicy,
+    SafeHttpFetcher,
+    SourceFetchError,
+    decode_html,
+)
 
 _DATE_PATTERN = re.compile(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b")
+# C114-style list pages date their entries "9/3" without a year; the slash form
+# is deliberate because a prose dash ("9-3") is far more ambiguous.
+_MONTH_DAY_PATTERN = re.compile(r"\b(\d{1,2})/(\d{1,2})\b")
+_DEFAULT_DATE_CONTEXT_TAGS = ("li", "article", "tr")
+_FORBIDDEN_DATE_CONTEXT_TAGS = frozenset({"document", "html", "body"})
+# A "12/30" observed in September belongs to the previous year; a "9/3" seen in
+# September does not. Anything dated more than this far ahead rolls back a year.
+_FUTURE_MONTH_DAY_TOLERANCE_DAYS = 7
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 _VOID_TAGS = frozenset(
     {
@@ -50,6 +63,8 @@ class _HTMLListOptions:
     timezone: ZoneInfo
     allowed_host: str
     include_title_keywords: tuple[str, ...] = ()
+    allow_month_day_dates: bool = False
+    date_context_tags: tuple[str, ...] = _DEFAULT_DATE_CONTEXT_TAGS
 
 
 @dataclass(slots=True)
@@ -96,7 +111,7 @@ class HTMLListCollector:
 
         parser = _ListPageParser()
         try:
-            parser.feed(response.content.decode("utf-8", errors="replace"))
+            parser.feed(decode_html(response.content, response.headers.get("content-type", "")))
             parser.close()
         except Exception as error:
             return CollectionResult(
@@ -119,7 +134,9 @@ class HTMLListCollector:
                 title, options.include_title_keywords
             ):
                 continue
-            candidate, entry_error = _to_candidate(source, options, anchor, response.final_url)
+            candidate, entry_error = _to_candidate(
+                source, options, anchor, response.final_url, response.fetched_at
+            )
             if entry_error is not None:
                 errors.append(entry_error)
                 continue
@@ -173,6 +190,8 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
         keywords = raw.get("include_title_keywords", [])
         path_prefixes = raw.get("article_url_path_prefixes", [])
         timezone_name = raw.get("timezone", "UTC")
+        allow_month_day_dates = raw.get("allow_month_day_dates", False)
+        context_tags = raw.get("date_context_tags", list(_DEFAULT_DATE_CONTEXT_TAGS))
         if not isinstance(keywords, list) or not all(isinstance(value, str) for value in keywords):
             raise ValueError("include_title_keywords must be a list of strings")
         cleaned_keywords = tuple(value.strip() for value in keywords if value.strip())
@@ -183,6 +202,21 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
         cleaned_path_prefixes = tuple(value.strip() for value in path_prefixes if value.strip())
         if any(not value.startswith("/") for value in cleaned_path_prefixes):
             raise ValueError("article_url_path_prefixes must start with '/'")
+        if not isinstance(allow_month_day_dates, bool):
+            raise ValueError("allow_month_day_dates must be a boolean")
+        if not isinstance(context_tags, list) or not all(
+            isinstance(value, str) for value in context_tags
+        ):
+            raise ValueError("date_context_tags must be a list of strings")
+        cleaned_context_tags = tuple(
+            value.strip().casefold() for value in context_tags if value.strip()
+        )
+        if not cleaned_context_tags:
+            raise ValueError("date_context_tags must not be empty")
+        if any(not re.fullmatch(r"[a-z][a-z0-9]*", tag) for tag in cleaned_context_tags):
+            raise ValueError("date_context_tags entries must be simple HTML tag names")
+        if _FORBIDDEN_DATE_CONTEXT_TAGS.intersection(cleaned_context_tags):
+            raise ValueError("date_context_tags must stay below the page-container level")
         if not isinstance(timezone_name, str):
             raise ValueError("timezone must be a string")
         entry_host = urlsplit(source.entry_url).hostname
@@ -194,6 +228,8 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
                 article_url_path_prefixes=cleaned_path_prefixes,
                 timezone=ZoneInfo(timezone_name),
                 allowed_host=entry_host.lower(),
+                allow_month_day_dates=allow_month_day_dates,
+                date_context_tags=cleaned_context_tags,
             ),
             None,
         )
@@ -214,7 +250,7 @@ def _iter_anchors(node: _Node) -> Iterator[_Node]:
 
 
 def _to_candidate(
-    source: Source, options: _HTMLListOptions, anchor: _Node, list_url: str
+    source: Source, options: _HTMLListOptions, anchor: _Node, list_url: str, fetched_at: datetime
 ) -> tuple[ArticleCandidate | None, SourceError | None]:
     """Map one dated, matched same-host anchor from an announcement list.
 
@@ -250,7 +286,7 @@ def _to_candidate(
             summary="matching announcement has no title",
             retryable=False,
         )
-    published_at = _nearby_date(anchor, options.timezone)
+    published_at = _nearby_date(anchor, options, fetched_at)
     if published_at is None:
         return None, SourceError(
             code="MISSING_PUBLICATION_DATE",
@@ -279,23 +315,44 @@ def _matches_keywords(title: str, keywords: tuple[str, ...]) -> bool:
     )
 
 
-def _nearby_date(anchor: _Node, timezone: ZoneInfo) -> datetime | None:
-    """Read one ISO-like publication date from the closest list-item context, when available."""
+def _nearby_date(anchor: _Node, options: _HTMLListOptions, fetched_at: datetime) -> datetime | None:
+    """Read one publication date from the closest configured list-item context, when present."""
     context = anchor
-    while context.parent is not None and context.tag not in {"li", "article", "tr"}:
+    while context.parent is not None and context.tag not in options.date_context_tags:
         context = context.parent
-    matched = _DATE_PATTERN.search(_text_content(context))
-    if matched is None:
+    context_text = _text_content(context)
+    matched = _DATE_PATTERN.search(context_text)
+    if matched is not None:
+        try:
+            return datetime(
+                int(matched.group(1)),
+                int(matched.group(2)),
+                int(matched.group(3)),
+                tzinfo=options.timezone,
+            ).astimezone(UTC)
+        except ValueError:
+            return None
+    if not options.allow_month_day_dates:
         return None
+    # Year-less entries print the date after the title, so the last match is the
+    # one belonging to this entry rather than one embedded in a headline.
+    month_day_matches = _MONTH_DAY_PATTERN.findall(context_text)
+    if not month_day_matches:
+        return None
+    month, day = (int(value) for value in month_day_matches[-1])
+    observed = fetched_at.astimezone(options.timezone).date()
     try:
-        return datetime(
-            int(matched.group(1)),
-            int(matched.group(2)),
-            int(matched.group(3)),
-            tzinfo=timezone,
-        ).astimezone(UTC)
+        published = date(observed.year, month, day)
     except ValueError:
         return None
+    if (published - observed).days > _FUTURE_MONTH_DAY_TOLERANCE_DAYS:
+        try:
+            published = date(observed.year - 1, month, day)
+        except ValueError:
+            return None
+    return datetime(
+        published.year, published.month, published.day, tzinfo=options.timezone
+    ).astimezone(UTC)
 
 
 def _text_content(node: _Node) -> str:

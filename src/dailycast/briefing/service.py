@@ -296,6 +296,7 @@ class BriefingService:
             reports.append(category_report)
             if pending_delivery is not None:
                 pending_deliveries.append(pending_delivery)
+        await self._alert_item_shortfalls(reports, pending_deliveries)
         if pending_deliveries:
             merged_focus = (
                 None
@@ -811,6 +812,55 @@ class BriefingService:
         )
         await self._notifier.push(markdown)
         return "sent"
+
+    async def _alert_item_shortfalls(
+        self,
+        reports: list[BriefingCategoryReport],
+        deliveries: list[_PendingBriefingDelivery],
+    ) -> None:
+        """Report every category whose evidence pool or delivered items fall below target.
+
+        A thin candidate pool signals dead or failing sources; a thin selection
+        below an adequate pool signals an editorial bar worth reviewing. Either
+        way the delivered message will visibly list fewer items than promised,
+        so operators hear about it the same morning instead of finding out
+        after several short editions.
+        """
+        if self._alert is None:
+            return
+        selected_counts = {delivery.category: len(delivery.result.items) for delivery in deliveries}
+        for report in reports:
+            summary = self._shortfall_summary(report, selected_counts.get(report.category))
+            if summary is None:
+                continue
+            await self._alert_message(
+                f"简报条目不足（{CATEGORY_TITLES[report.category]}）", RuntimeError(summary)
+            )
+
+    @staticmethod
+    def _shortfall_summary(
+        report: BriefingCategoryReport, selected_count: int | None
+    ) -> str | None:
+        """Return the one-line shortfall description, or None when the category is healthy."""
+        target = MAX_BRIEFING_ITEMS
+        if report.status == "skipped":
+            if report.reason == NO_ELIGIBLE_ARTICLES:
+                return f"无合格候选，板块整体缺失（目标 {target} 条）"
+            return None
+        if report.status == "failed":
+            return f"板块生成失败：{report.error}" if report.error else "板块生成失败"
+        if selected_count is None:
+            return None
+        if report.article_count >= target and selected_count >= target:
+            return None
+        evidence_part = (
+            f"合格候选仅 {report.article_count} 条"
+            if report.article_count < target
+            else f"合格候选 {report.article_count} 条"
+        )
+        if selected_count < target:
+            return f"{evidence_part}，最终入选 {selected_count} 条，低于目标 {target} 条"
+        return f"{evidence_part}，入选 {selected_count} 条"
 
     async def _alert_message(self, stage: str, error: Exception) -> None:
         """Notify the monitoring robot without changing the briefing's fallback behavior."""

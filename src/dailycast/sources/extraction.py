@@ -57,6 +57,10 @@ _NUMERIC_DATE = re.compile(
 )
 _DECLARED_HTML_CHARSET = re.compile(rb"\bcharset\s*=\s*[\"']?([a-z0-9._-]+)", re.IGNORECASE)
 _HEADER_CHARSET = re.compile(r"\bcharset\s*=\s*[\"']?([a-z0-9._-]+)", re.IGNORECASE)
+# Chinese sites declare "gb2312" while serving GBK/GB18030 bytes; the strict
+# codec then fails and the page degrades into replacement characters. Browsers
+# therefore treat every legacy Chinese declaration as its gb18030 superset.
+_LEGACY_CHARSET_UPGRADES = {"gb2312": "gb18030", "gbk": "gb18030"}
 _C114_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
@@ -270,7 +274,7 @@ class ContentExtractor:
                     retryable=False,
                 ),
             )
-        html_text = _decode_html(response.content, raw_content_type)
+        html_text = decode_html(response.content, raw_content_type)
         if _looks_like_access_challenge(html_text):
             return ExtractedArticle(
                 requested_url=url,
@@ -329,7 +333,7 @@ class ContentExtractor:
         )
 
 
-def _decode_html(content: bytes, content_type: str) -> str:
+def decode_html(content: bytes, content_type: str) -> str:
     """Decode HTML using its HTTP or in-document charset before a safe UTF-8 fallback."""
     header_match = _HEADER_CHARSET.search(content_type)
     meta_match = _DECLARED_HTML_CHARSET.search(content[:4096])
@@ -343,13 +347,14 @@ def _decode_html(content: bytes, content_type: str) -> str:
         if charset is None:
             continue
         normalized = charset.casefold()
-        if normalized in attempted:
-            continue
-        attempted.add(normalized)
-        try:
-            return content.decode(charset)
-        except (LookupError, UnicodeDecodeError):
-            continue
+        for variant in (normalized, _LEGACY_CHARSET_UPGRADES.get(normalized)):
+            if variant is None or variant in attempted:
+                continue
+            attempted.add(variant)
+            try:
+                return content.decode(variant)
+            except (LookupError, UnicodeDecodeError):
+                continue
     return content.decode("utf-8", errors="replace")
 
 
