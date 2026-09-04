@@ -305,13 +305,20 @@ def test_briefing_source_configuration_keeps_web_research_out_of_podcast_seeds()
         "openai-web-research-ai-management",
     }
     expected_verified_source_ids = {"zte-official-news", "c114-operators", "leiphone-feed"}
+    expected_vertical_ai_source_ids = {"qbitai", "aihot-all", "aibase-news"}
     assert expected_research_ids.issubset(briefing_ids)
     assert expected_research_ids.isdisjoint(podcast_ids)
     assert expected_verified_source_ids.issubset(briefing_ids)
     assert expected_verified_source_ids.isdisjoint(podcast_ids)
+    assert expected_vertical_ai_source_ids.issubset(briefing_ids)
+    assert expected_vertical_ai_source_ids.isdisjoint(podcast_ids)
     assert "openai-web-research-telecom" not in briefing_ids
     assert "openai-web-research-ai" not in briefing_ids
-    assert "qbitai" not in briefing_ids
+    # Comprehensive hot-list/newsflash feeds stay excluded: under the
+    # freshness-ordered per-publisher cap their general-interest items crowd
+    # vertical candidates out of the pool before editorial review.
+    assert "kr36-hot-list" not in briefing_ids
+    assert "kr36-newsflashes" not in briefing_ids
     assert "gsma-newsroom" not in briefing_ids
     assert "light-reading-telecom" not in briefing_ids
 

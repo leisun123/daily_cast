@@ -23,10 +23,11 @@
 #   its dated solution-navigation links from being mistaken for news.
 # - AIHOT (aihot.virxact.com) is a mainland-hosted, ICP-filed Chinese AI news
 #   aggregator with a public RSS feed (feed/all.xml, 7-day deduplicated
-#   window). Its entries link to the original article ("阅读原文"); candidates
-#   whose original needs VPN are rejected by the briefing reachability rule.
-# - 量子位 (qbitai.com/feed) verified 2026-08-24 without proxy: it returns
-#   zh-CN RSS 2.0 directly and remains a candidate for future source expansion.
+#   window), re-adopted 2026-09-04 after re-verification from the deployment.
+#   Its entries link to the original article ("阅读原文"); candidates whose
+#   original needs VPN are rejected by the briefing reachability rule.
+# - 量子位 (qbitai.com/feed) re-verified 2026-09-04 from the deployment: pure
+#   zh-CN AI coverage with minute-fresh pubDates, now part of the seeds.
 #   IT之家's same RSS URL already belongs to the default `ithome-rss` source;
 #   it must not be declared again under a briefing-only identity.
 # - 雷峰网 (leiphone.com/feed) verified 2026-08-24 without proxy: full-text
@@ -51,11 +52,17 @@
 #   likewise held back until their public list endpoint is stable end-to-end.
 # - news.cctv.com/rss/keji.xml is 404. 36Kr's own RSS center is retained as a
 #   fallback option, but current direct requests receive an anti-bot HTML page.
-#   The 36kr hot list and newsflashes are served through the deployment's own
-#   RSSHub instance instead (see the note at the end of `sources:`); RSSHub's
-#   /c114/roll route was evaluated on 2026-09-04 and rejected — its detail-page
-#   date parsing no longer matches C114's markup ("Invalid Date" on every
-#   entry), so C114 stays on the direct channel-page collectors above.
+#   Comprehensive hot lists and newsflash feeds (36Kr hot list / newsflashes)
+#   stay excluded on purpose: under the freshness-ordered per-publisher cap
+#   their capital-market and society items crowd vertical candidates out of
+#   the pool before editorial review. The deployment's own RSSHub instance
+#   instead serves the AIbase vertical route (see the note at the end of
+#   `sources:`); RSSHub's /c114/roll route was evaluated on 2026-09-04 and
+#   rejected — its detail-page date parsing no longer matches C114's markup
+#   ("Invalid Date" on every entry), so C114 stays on the direct channel-page
+#   collectors above. No reachable telecom-vertical RSS exists beyond those:
+#   通信世界网 is JS-rendered without feeds, 飞象网 and 讯石光通讯 reject
+#   datacenter connections, 人民邮电网 serves an incomplete TLS chain.
 # - Google News keyword RSS links are JS interstitials (no server redirect, no
 #   extractable body) and require VPN to open - violates the "links must be
 #   reachable without VPN" requirement.
@@ -170,30 +177,43 @@ sources:
     max_items_per_run: 60
     config:
       briefing_category: ai
-  # Both 36Kr routes resolve through the deployment's own RSSHub instance
-  # (DAILYCAST_BRIEFING__RSSHUB_BASE_URL, verified 2026-09-04 with minute-fresh
-  # pubDates). The instance-level ACCESS_KEY is injected from
+  # Vertical AI outlets, adopted 2026-09-04 in place of comprehensive hot
+  # lists. 量子位 (qbitai.com/feed) and AIHOT (aihot.virxact.com/feed/all.xml)
+  # are direct zh-CN AI-only feeds, verified from the deployment with
+  # minute-fresh pubDates; AIbase resolves through the deployment's own RSSHub
+  # instance (DAILYCAST_BRIEFING__RSSHUB_BASE_URL, ACCESS_KEY injected from
   # DAILYCAST_BRIEFING__RSSHUB_ACCESS_KEY at resolve time, so the committed
-  # route carries no secret. The hot list and newsflashes mix non-AI general
-  # and capital-market items; the editorial candidate caps plus the LLM review
-  # bound their influence on the brief.
-  - id: kr36-hot-list
-    name: 36氪 24小时热榜
+  # route carries no secret). Comprehensive general-interest sources such as
+  # 36Kr's hot list and newsflashes stay excluded on purpose: under the
+  # freshness-ordered per-publisher cap their capital-market and society
+  # items crowd the AI pool before the LLM ever sees them.
+  - id: qbitai
+    name: 量子位
     kind: rss
-    entry_url: rsshub://36kr/hot-list?limit=100
+    entry_url: https://www.qbitai.com/feed
+    priority: 76
+    language: zh-CN
+    request_timeout_seconds: 20
+    max_items_per_run: 30
+    config:
+      briefing_category: ai
+  - id: aibase-news
+    name: AIbase 资讯
+    kind: rss
+    entry_url: rsshub://aibase/news
     priority: 75
     language: zh-CN
     request_timeout_seconds: 30
-    max_items_per_run: 100
+    max_items_per_run: 60
     config:
       briefing_category: ai
-  - id: kr36-newsflashes
-    name: 36氪快讯
+  - id: aihot-all
+    name: AIHOT 全部 AI 动态
     kind: rss
-    entry_url: rsshub://36kr/newsflashes
+    entry_url: https://aihot.virxact.com/feed/all.xml
     priority: 74
     language: zh-CN
-    request_timeout_seconds: 30
-    max_items_per_run: 100
+    request_timeout_seconds: 20
+    max_items_per_run: 60
     config:
       briefing_category: ai
