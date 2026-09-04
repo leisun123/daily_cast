@@ -622,6 +622,15 @@ def test_rsshub_route_appends_the_access_key_from_the_environment() -> None:
         assert requested_urls == [
             "https://rsshub.example.test/private-instance/36kr/newsflashes?key=secret-instance-key"
         ]
+        # The fetch keeps the instance key, but nothing derived from the feed
+        # URL may persist it: joined entry links and metadata stay canonical.
+        assert result.candidates
+        for candidate in result.candidates:
+            assert candidate.metadata["feed_url"] == (
+                "https://rsshub.example.test/private-instance/36kr/newsflashes"
+            )
+            assert "secret-instance-key" not in candidate.url
+            assert "secret-instance-key" not in json.dumps(candidate.metadata, ensure_ascii=False)
 
     asyncio.run(scenario())
 

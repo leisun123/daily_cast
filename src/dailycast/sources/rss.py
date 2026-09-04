@@ -21,6 +21,10 @@ from dailycast.sources.contracts import (
 )
 from dailycast.sources.extraction import FetchPolicy, SafeHttpFetcher, SourceFetchError
 
+# Credential-bearing query parameters never belong in persisted provenance.
+# RSSHub's ACCESS_KEY arrives as `key=`; the denylist covers its common cousins.
+_SENSITIVE_QUERY_PARAMS = frozenset({"key", "access_key", "api_key", "token", "sign", "password"})
+
 
 class RSSCollector:
     """Discover bounded article candidates from one configured RSS or Atom feed."""
@@ -116,18 +120,19 @@ class RSSCollector:
         raw_external_id = entry.get("id") or entry.get("guid")
         external_id = str(raw_external_id) if raw_external_id is not None else None
         published_at = RSSCollector._entry_datetime(entry)
+        canonical_feed_url = _url_without_secret_query(feed_url)
         return (
             ArticleCandidate(
                 source_id=source.id,
                 external_id=external_id,
-                url=urljoin(feed_url, raw_url.strip()),
+                url=urljoin(canonical_feed_url, raw_url.strip()),
                 title=RSSCollector._plain_text(raw_title) or raw_title.strip(),
                 summary=summary,
                 content_text=content_text,
                 published_at=published_at,
                 published_at_inferred=published_at is None,
                 language=source.language,
-                metadata={"feed_url": feed_url},
+                metadata={"feed_url": canonical_feed_url},
             ),
             None,
         )
@@ -192,6 +197,25 @@ def _matches_title(title: str, keywords: tuple[str, ...]) -> bool:
     """Keep configured topical matches while preserving the original feed order."""
     normalized_title = title.casefold()
     return any(keyword.casefold() in normalized_title for keyword in keywords)
+
+
+def _url_without_secret_query(url: str) -> str:
+    """Return the URL with credential-bearing query parameters removed.
+
+    The resolved feed URL must keep its key for fetching, but everything derived
+    from it — joined entry links and persisted candidate metadata — must stay
+    secret-free so the instance ACCESS_KEY never reaches SQLite or backups.
+    """
+    parsed = urlsplit(url)
+    if not parsed.query:
+        return url
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    kept = [
+        (name, value) for name, value in pairs if name.casefold() not in _SENSITIVE_QUERY_PARAMS
+    ]
+    if len(kept) == len(pairs):
+        return url
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(kept), parsed.fragment))
 
 
 def _resolve_feed_url(
