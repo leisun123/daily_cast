@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import feedparser
 
@@ -25,16 +25,25 @@ from dailycast.sources.extraction import FetchPolicy, SafeHttpFetcher, SourceFet
 class RSSCollector:
     """Discover bounded article candidates from one configured RSS or Atom feed."""
 
-    def __init__(self, fetcher: SafeHttpFetcher, *, rsshub_base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        fetcher: SafeHttpFetcher,
+        *,
+        rsshub_base_url: str | None = None,
+        rsshub_access_key: str | None = None,
+    ) -> None:
         self._fetcher = fetcher
         self._rsshub_base_url = rsshub_base_url
+        self._rsshub_access_key = rsshub_access_key
 
     async def collect(self, source: Source, window: CollectionWindow) -> CollectionResult:
         """Fetch, parse, window-filter, and map valid feed entries without database access."""
         title_keywords, filter_error = _title_filter(source)
         if filter_error is not None:
             return CollectionResult(source_id=source.id, error=filter_error)
-        feed_url, route_error = _resolve_feed_url(source.entry_url, self._rsshub_base_url)
+        feed_url, route_error = _resolve_feed_url(
+            source.entry_url, self._rsshub_base_url, self._rsshub_access_key
+        )
         if route_error is not None:
             return CollectionResult(source_id=source.id, error=route_error)
         assert feed_url is not None
@@ -186,7 +195,9 @@ def _matches_title(title: str, keywords: tuple[str, ...]) -> bool:
 
 
 def _resolve_feed_url(
-    entry_url: str, rsshub_base_url: str | None
+    entry_url: str,
+    rsshub_base_url: str | None,
+    rsshub_access_key: str | None = None,
 ) -> tuple[str | None, SourceError | None]:
     """Translate an RSSHub route only through a deployment-controlled HTTP(S) base URL."""
     route = urlsplit(entry_url)
@@ -243,13 +254,20 @@ def _resolve_feed_url(
             retryable=False,
         )
     authority = base.netloc
+    query = route.query
+    if rsshub_access_key:
+        # The instance-level RSSHub ACCESS_KEY travels through the environment,
+        # never through the committed source seeds.
+        pairs = parse_qsl(query, keep_blank_values=True)
+        pairs.append(("key", rsshub_access_key))
+        query = urlencode(pairs)
     return (
         urlunsplit(
             (
                 base.scheme.lower(),
                 authority,
                 f"/{resolved_path}",
-                route.query,
+                query,
                 "",
             )
         ),

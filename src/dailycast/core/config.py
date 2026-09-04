@@ -108,6 +108,9 @@ class BriefingSettings(BaseModel):
     # HTTP(S) endpoint. Keep it unset unless the deployment has a known-good
     # RSSHub instance; regular RSS sources do not depend on it.
     rsshub_base_url: str | None = None
+    # Instance-level RSSHub ACCESS_KEY appended to every resolved route. Keep it
+    # in the deployment environment so the committed source seeds stay secret-free.
+    rsshub_access_key: str | None = None
     webhook_enabled: bool = False
     webhook_url: str | None = None
     webhook_format: WebhookFormat = "wecom_markdown"

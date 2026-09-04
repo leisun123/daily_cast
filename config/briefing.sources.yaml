@@ -51,8 +51,11 @@
 #   likewise held back until their public list endpoint is stable end-to-end.
 # - news.cctv.com/rss/keji.xml is 404. 36Kr's own RSS center is retained as a
 #   fallback option, but current direct requests receive an anti-bot HTML page.
-#   The 36kr hot list stays out of the seeds until the deployment configures
-#   DAILYCAST_BRIEFING__RSSHUB_BASE_URL (see the note at the end of `sources:`).
+#   The 36kr hot list and newsflashes are served through the deployment's own
+#   RSSHub instance instead (see the note at the end of `sources:`); RSSHub's
+#   /c114/roll route was evaluated on 2026-09-04 and rejected — its detail-page
+#   date parsing no longer matches C114's markup ("Invalid Date" on every
+#   entry), so C114 stays on the direct channel-page collectors above.
 # - Google News keyword RSS links are JS interstitials (no server redirect, no
 #   extractable body) and require VPN to open - violates the "links must be
 #   reachable without VPN" requirement.
@@ -167,7 +170,30 @@ sources:
     max_items_per_run: 60
     config:
       briefing_category: ai
-  # kr36-hot-list (rsshub://36kr/hot-list?limit=100, briefing_category: ai) was
-  # removed on 2026-09: the deployment runs without DAILYCAST_BRIEFING__RSSHUB_BASE_URL,
-  # so the route errored with RSSHUB_BASE_URL_REQUIRED on every run. Re-add the
-  # entry above once a known-good RSSHub instance is configured.
+  # Both 36Kr routes resolve through the deployment's own RSSHub instance
+  # (DAILYCAST_BRIEFING__RSSHUB_BASE_URL, verified 2026-09-04 with minute-fresh
+  # pubDates). The instance-level ACCESS_KEY is injected from
+  # DAILYCAST_BRIEFING__RSSHUB_ACCESS_KEY at resolve time, so the committed
+  # route carries no secret. The hot list and newsflashes mix non-AI general
+  # and capital-market items; the editorial candidate caps plus the LLM review
+  # bound their influence on the brief.
+  - id: kr36-hot-list
+    name: 36氪 24小时热榜
+    kind: rss
+    entry_url: rsshub://36kr/hot-list?limit=100
+    priority: 75
+    language: zh-CN
+    request_timeout_seconds: 30
+    max_items_per_run: 100
+    config:
+      briefing_category: ai
+  - id: kr36-newsflashes
+    name: 36氪快讯
+    kind: rss
+    entry_url: rsshub://36kr/newsflashes
+    priority: 74
+    language: zh-CN
+    request_timeout_seconds: 30
+    max_items_per_run: 100
+    config:
+      briefing_category: ai

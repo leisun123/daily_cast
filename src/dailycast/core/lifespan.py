@@ -188,7 +188,9 @@ def build_lifespan(
                 session_factory,
                 {
                     SourceKind.RSS: RSSCollector(
-                        fetcher, rsshub_base_url=settings.briefing.rsshub_base_url
+                        fetcher,
+                        rsshub_base_url=settings.briefing.rsshub_base_url,
+                        rsshub_access_key=settings.briefing.rsshub_access_key,
                     ),
                     SourceKind.HTML_LIST: HTMLListCollector(fetcher),
                     SourceKind.WEB_RESEARCH: ResearchCollector(
