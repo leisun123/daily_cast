@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import feedparser
 
@@ -21,20 +21,33 @@ from dailycast.sources.contracts import (
 )
 from dailycast.sources.extraction import FetchPolicy, SafeHttpFetcher, SourceFetchError
 
+# Credential-bearing query parameters never belong in persisted provenance.
+# RSSHub's ACCESS_KEY arrives as `key=`; the denylist covers its common cousins.
+_SENSITIVE_QUERY_PARAMS = frozenset({"key", "access_key", "api_key", "token", "sign", "password"})
+
 
 class RSSCollector:
     """Discover bounded article candidates from one configured RSS or Atom feed."""
 
-    def __init__(self, fetcher: SafeHttpFetcher, *, rsshub_base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        fetcher: SafeHttpFetcher,
+        *,
+        rsshub_base_url: str | None = None,
+        rsshub_access_key: str | None = None,
+    ) -> None:
         self._fetcher = fetcher
         self._rsshub_base_url = rsshub_base_url
+        self._rsshub_access_key = rsshub_access_key
 
     async def collect(self, source: Source, window: CollectionWindow) -> CollectionResult:
         """Fetch, parse, window-filter, and map valid feed entries without database access."""
         title_keywords, filter_error = _title_filter(source)
         if filter_error is not None:
             return CollectionResult(source_id=source.id, error=filter_error)
-        feed_url, route_error = _resolve_feed_url(source.entry_url, self._rsshub_base_url)
+        feed_url, route_error = _resolve_feed_url(
+            source.entry_url, self._rsshub_base_url, self._rsshub_access_key
+        )
         if route_error is not None:
             return CollectionResult(source_id=source.id, error=route_error)
         assert feed_url is not None
@@ -107,18 +120,19 @@ class RSSCollector:
         raw_external_id = entry.get("id") or entry.get("guid")
         external_id = str(raw_external_id) if raw_external_id is not None else None
         published_at = RSSCollector._entry_datetime(entry)
+        canonical_feed_url = _url_without_secret_query(feed_url)
         return (
             ArticleCandidate(
                 source_id=source.id,
                 external_id=external_id,
-                url=urljoin(feed_url, raw_url.strip()),
+                url=urljoin(canonical_feed_url, raw_url.strip()),
                 title=RSSCollector._plain_text(raw_title) or raw_title.strip(),
                 summary=summary,
                 content_text=content_text,
                 published_at=published_at,
                 published_at_inferred=published_at is None,
                 language=source.language,
-                metadata={"feed_url": feed_url},
+                metadata={"feed_url": canonical_feed_url},
             ),
             None,
         )
@@ -185,8 +199,29 @@ def _matches_title(title: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword.casefold() in normalized_title for keyword in keywords)
 
 
+def _url_without_secret_query(url: str) -> str:
+    """Return the URL with credential-bearing query parameters removed.
+
+    The resolved feed URL must keep its key for fetching, but everything derived
+    from it — joined entry links and persisted candidate metadata — must stay
+    secret-free so the instance ACCESS_KEY never reaches SQLite or backups.
+    """
+    parsed = urlsplit(url)
+    if not parsed.query:
+        return url
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    kept = [
+        (name, value) for name, value in pairs if name.casefold() not in _SENSITIVE_QUERY_PARAMS
+    ]
+    if len(kept) == len(pairs):
+        return url
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(kept), parsed.fragment))
+
+
 def _resolve_feed_url(
-    entry_url: str, rsshub_base_url: str | None
+    entry_url: str,
+    rsshub_base_url: str | None,
+    rsshub_access_key: str | None = None,
 ) -> tuple[str | None, SourceError | None]:
     """Translate an RSSHub route only through a deployment-controlled HTTP(S) base URL."""
     route = urlsplit(entry_url)
@@ -243,13 +278,20 @@ def _resolve_feed_url(
             retryable=False,
         )
     authority = base.netloc
+    query = route.query
+    if rsshub_access_key:
+        # The instance-level RSSHub ACCESS_KEY travels through the environment,
+        # never through the committed source seeds.
+        pairs = parse_qsl(query, keep_blank_values=True)
+        pairs.append(("key", rsshub_access_key))
+        query = urlencode(pairs)
     return (
         urlunsplit(
             (
                 base.scheme.lower(),
                 authority,
                 f"/{resolved_path}",
-                route.query,
+                query,
                 "",
             )
         ),

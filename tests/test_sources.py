@@ -305,13 +305,20 @@ def test_briefing_source_configuration_keeps_web_research_out_of_podcast_seeds()
         "openai-web-research-ai-management",
     }
     expected_verified_source_ids = {"zte-official-news", "c114-operators", "leiphone-feed"}
+    expected_vertical_ai_source_ids = {"qbitai", "aihot-all", "aibase-news"}
     assert expected_research_ids.issubset(briefing_ids)
     assert expected_research_ids.isdisjoint(podcast_ids)
     assert expected_verified_source_ids.issubset(briefing_ids)
     assert expected_verified_source_ids.isdisjoint(podcast_ids)
+    assert expected_vertical_ai_source_ids.issubset(briefing_ids)
+    assert expected_vertical_ai_source_ids.isdisjoint(podcast_ids)
     assert "openai-web-research-telecom" not in briefing_ids
     assert "openai-web-research-ai" not in briefing_ids
-    assert "qbitai" not in briefing_ids
+    # Comprehensive hot-list/newsflash feeds stay excluded: under the
+    # freshness-ordered per-publisher cap their general-interest items crowd
+    # vertical candidates out of the pool before editorial review.
+    assert "kr36-hot-list" not in briefing_ids
+    assert "kr36-newsflashes" not in briefing_ids
     assert "gsma-newsroom" not in briefing_ids
     assert "light-reading-telecom" not in briefing_ids
 
@@ -568,6 +575,62 @@ def test_rsshub_route_uses_configured_base_url_without_losing_its_query() -> Non
         assert requested_urls == [
             "https://rsshub.example.test/private-instance/36kr/hot-list?limit=100"
         ]
+
+    asyncio.run(scenario())
+
+
+def test_rsshub_route_appends_the_access_key_from_the_environment() -> None:
+    """The instance ACCESS_KEY joins the route query without touching the seed or base URL."""
+
+    async def scenario() -> None:
+        requested_urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_urls.append(str(request.url))
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/rss+xml"},
+                content=fixture_feed(),
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            route_source = Source(
+                **source_values()
+                | {
+                    "id": "kr36-newsflashes",
+                    "entry_url": "rsshub://36kr/newsflashes",
+                    "normalized_entry_url": "rsshub://36kr/newsflashes",
+                }
+            )
+            result = await RSSCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls()),
+                rsshub_base_url="https://rsshub.example.test/private-instance",
+                rsshub_access_key="secret-instance-key",
+            ).collect(
+                route_source,
+                CollectionWindow(
+                    start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert requested_urls == [
+            "https://rsshub.example.test/private-instance/36kr/newsflashes?key=secret-instance-key"
+        ]
+        # The fetch keeps the instance key, but nothing derived from the feed
+        # URL may persist it: joined entry links and metadata stay canonical.
+        assert result.candidates
+        for candidate in result.candidates:
+            assert candidate.metadata["feed_url"] == (
+                "https://rsshub.example.test/private-instance/36kr/newsflashes"
+            )
+            assert "secret-instance-key" not in candidate.url
+            assert "secret-instance-key" not in json.dumps(candidate.metadata, ensure_ascii=False)
 
     asyncio.run(scenario())
 
