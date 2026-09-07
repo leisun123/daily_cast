@@ -305,9 +305,15 @@ class PublishingSettings(BaseModel):
 
 
 class LoggingSettings(BaseModel):
-    """Console logging configuration."""
+    """Console and optional rotating-file logging configuration."""
 
     level: str = "INFO"
+    # Optional rotating JSON log file for deployments whose platform log-query
+    # API is unavailable: the file survives restarts and is readable through
+    # container exec. Relative paths resolve below DATA_DIR.
+    file_path: Path | None = None
+    max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
+    backup_count: int = Field(default=3, ge=0, le=20)
 
 
 class YamlSettingsSource(PydanticBaseSettingsSource):

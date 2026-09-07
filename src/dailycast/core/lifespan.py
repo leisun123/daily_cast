@@ -133,9 +133,17 @@ def build_lifespan(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings = load_settings(config_path=config_path)
-        configure_logging(settings.logging.level)
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         settings.public_dir.mkdir(parents=True, exist_ok=True)
+        log_file_path = settings.logging.file_path
+        if log_file_path is not None and not log_file_path.is_absolute():
+            log_file_path = settings.data_dir / log_file_path
+        configure_logging(
+            settings.logging.level,
+            file_path=log_file_path,
+            max_bytes=settings.logging.max_bytes,
+            backup_count=settings.logging.backup_count,
+        )
         engine = create_sqlite_engine(settings.database)
         alembic_ini_path = PROJECT_ROOT / "alembic.ini"
         try:
