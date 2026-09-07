@@ -4,6 +4,8 @@ import json
 import logging
 from contextvars import ContextVar, Token
 from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 request_id_context: ContextVar[str] = ContextVar("request_id", default="-")
@@ -52,11 +54,33 @@ class TaskJsonFormatter(JsonFormatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def configure_logging(level: str) -> None:
-    """Configure the root logger once with JSON output to standard error."""
+def configure_logging(
+    level: str,
+    *,
+    file_path: Path | None = None,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 3,
+) -> None:
+    """Configure the root logger once with JSON output to standard error.
+
+    When ``file_path`` is set, the same JSON stream is mirrored to a rotating
+    file so deployments whose platform log-query API is unavailable can still
+    inspect past runs through container exec.
+    """
     root_logger = logging.getLogger()
     root_logger.setLevel(level.upper())
     handler = logging.StreamHandler()
     handler.setFormatter(TaskJsonFormatter())
     root_logger.handlers.clear()
     root_logger.addHandler(handler)
+    if file_path is None:
+        return
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        file_path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(TaskJsonFormatter())
+    root_logger.addHandler(file_handler)

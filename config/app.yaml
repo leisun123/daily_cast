@@ -141,6 +141,9 @@ publishing:
 # Structured JSON logs are written to the console at this minimum level.
 logging:
   level: INFO
+  # Optional rotating JSON log file; relative paths resolve below DATA_DIR.
+  # Leave unset to log to the console only.
+  file_path: null
 
 # Daily telecom + AI text briefing pushed to a webhook target. This flow is
 # independent of the podcast pipeline: it collects only sources seeded with a

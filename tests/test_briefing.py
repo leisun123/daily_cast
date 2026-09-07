@@ -168,6 +168,34 @@ def test_telecom_editorial_prompt_orders_local_management_events_before_national
     assert "不得排在更具体的地方动态之前" in prompt
 
 
+def test_editorial_prompt_treats_multi_source_coverage_as_attention_not_duplication() -> None:
+    """Several outlets reporting one event must merge into one item, never skip the event."""
+    prompt = build_briefing_messages(
+        "AI 动态日报",
+        [_ranked_evidence(_evidence())],
+        category="ai",
+        editorial_selection=True,
+    )[-1].content
+
+    assert "同一事件被多家独立来源报道说明事件关注度高" in prompt
+    assert "必须合并为一条入选" in prompt
+    assert "整体跳过" in prompt
+
+
+def test_ai_editorial_prompt_makes_major_model_releases_mandatory_headliners() -> None:
+    """A major release in the pool must be selected even when the window moved on."""
+    prompt = build_briefing_messages(
+        "AI 动态日报",
+        [_ranked_evidence(_evidence())],
+        category="ai",
+        editorial_selection=True,
+    )[-1].content
+
+    assert "重大模型发布、重大版本升级或重量级开源属于必选头条事件" in prompt
+    assert "就必须合并选入一条代表并排在最前" in prompt
+    assert "发布时间早于窗口内其他候选不是遗漏的理由" in prompt
+
+
 def test_merged_renderer_keeps_six_items_per_category_in_one_message() -> None:
     """The final WeCom artifact carries the agreed 6+6 stories without splitting."""
     telecom_urls = [f"https://telecom.example.test/{index}" for index in range(1, 7)]
