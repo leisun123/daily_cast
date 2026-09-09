@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -94,6 +95,15 @@ class BriefingRunReport:
 
     date: str
     categories: tuple[BriefingCategoryReport, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BriefingDryRunReport:
+    """One full generation's output with every delivery side effect suppressed."""
+
+    date: str
+    categories: tuple[BriefingCategoryReport, ...]
+    merged_markdown: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +216,29 @@ class BriefingService:
         finally:
             self._run_reserved = False
 
+    async def dry_run(self) -> BriefingDryRunReport:
+        """Generate one full briefing and return it without any delivery side effect.
+
+        Unlike ``prepare`` this never writes the marker that the 08:30 delivery
+        tick consumes, so a rehearsal can never leak into the scheduled send;
+        output files land below a ``dry-run`` subdirectory the acceptance
+        readout ignores, and operator alerts stay silent.
+        """
+        self._try_reserve_run()
+        try:
+            prepared = await self._prepare_once(force=True, dry_run=True)
+            merged_path = self._dry_run_dir() / f"{prepared.briefing_date.isoformat()}-merged.md"
+            merged_markdown: str | None = None
+            with contextlib.suppress(FileNotFoundError):
+                merged_markdown = merged_path.read_text(encoding="utf-8")
+            return BriefingDryRunReport(
+                date=prepared.briefing_date.isoformat(),
+                categories=prepared.report.categories,
+                merged_markdown=merged_markdown,
+            )
+        finally:
+            self._run_reserved = False
+
     async def deliver_prepared(self) -> BriefingRunReport:
         """Post only the report prepared for this delivery day; never generate at 08:30."""
         self._try_reserve_run()
@@ -235,13 +268,19 @@ class BriefingService:
         finally:
             self._run_reserved = False
 
-    async def _prepare_once(self, *, force: bool) -> _PreparedRun:
+    def _dry_run_dir(self) -> Path:
+        """Locate the rehearsal output directory that delivery and acceptance reads ignore."""
+        return self._output_dir / "dry-run"
+
+    async def _prepare_once(self, *, force: bool, dry_run: bool = False) -> _PreparedRun:
         """Collect, generate, and atomically persist the combined message for later delivery."""
         now = self._clock.now()
         window = self._collection_window(now)
         run_date = now.astimezone(self._timezone).date()
         briefing_date = (window.end.astimezone(self._timezone) - timedelta(microseconds=1)).date()
-        existing = None if force else self._load_prepared_briefing(run_date, briefing_date)
+        existing = (
+            None if (force or dry_run) else self._load_prepared_briefing(run_date, briefing_date)
+        )
         if existing is not None:
             all_delivered = all(
                 self._marker_path(run_date, category).is_file() for category in existing.categories
@@ -291,12 +330,14 @@ class BriefingService:
                 provider,
                 marker_date=run_date,
                 issue_date=run_date,
-                force=force,
+                force=force or dry_run,
+                dry_run=dry_run,
             )
             reports.append(category_report)
             if pending_delivery is not None:
                 pending_deliveries.append(pending_delivery)
-        await self._alert_item_shortfalls(reports, pending_deliveries)
+        if not dry_run:
+            await self._alert_item_shortfalls(reports, pending_deliveries)
         if pending_deliveries:
             merged_focus = (
                 None
@@ -306,8 +347,11 @@ class BriefingService:
             merged_markdown = self._render_merged_markdown(
                 run_date, pending_deliveries, focus=merged_focus
             )
-            self._write_merged_markdown(briefing_date, merged_markdown)
-            self._write_prepared_marker(run_date, briefing_date, pending_deliveries)
+            output_dir = self._dry_run_dir() if dry_run else self._output_dir
+            merged_path = output_dir / f"{briefing_date.isoformat()}-merged.md"
+            _atomic_write(merged_path, merged_markdown)
+            if not dry_run:
+                self._write_prepared_marker(run_date, briefing_date, pending_deliveries)
         prepared_report = BriefingRunReport(
             date=briefing_date.isoformat(), categories=tuple(reports)
         )
@@ -492,11 +536,13 @@ class BriefingService:
         marker_date: date,
         issue_date: date,
         force: bool,
+        dry_run: bool = False,
     ) -> tuple[BriefingCategoryReport, _PendingBriefingDelivery | None]:
         """Generate one category while deferring delivery until every category is ready.
 
         ``briefing_date`` names the collected news day for persisted files;
-        ``issue_date`` is the delivery day shown in the rendered title.
+        ``issue_date`` is the delivery day shown in the rendered title. A dry
+        run redirects persistence below the rehearsal directory and stays silent.
         """
         marker_path = self._marker_path(marker_date, category)
         if not force and marker_path.is_file():
@@ -524,10 +570,11 @@ class BriefingService:
         try:
             result = await self._generate_result(category, evidence, provider)
         except Exception as error:
-            await self._alert_message(
-                f"消息生成（{CATEGORY_TITLES[category]}）已降级为标题列表，日报仍将按时发送",
-                error,
-            )
+            if not dry_run:
+                await self._alert_message(
+                    f"消息生成（{CATEGORY_TITLES[category]}）已降级为标题列表，日报仍将按时发送",
+                    error,
+                )
             logger.exception(
                 "briefing model generation failed; using evidence fallback",
                 extra={"category": category, "error": str(error)},
@@ -535,7 +582,8 @@ class BriefingService:
             result = self._fallback_result(category, evidence)
         markdown = self._render_markdown(category, issue_date, result, evidence)
         try:
-            file_path = self._write_markdown(briefing_date, category, markdown)
+            output_dir = self._dry_run_dir() if dry_run else self._output_dir
+            file_path = self._write_markdown(briefing_date, category, markdown, output_dir)
         except Exception as error:
             logger.exception("briefing category persistence failed", extra={"category": category})
             return (
@@ -727,15 +775,11 @@ class BriefingService:
             focus=focus,
         )
 
-    def _write_markdown(self, briefing_date: date, category: str, markdown: str) -> Path:
+    def _write_markdown(
+        self, briefing_date: date, category: str, markdown: str, output_dir: Path | None = None
+    ) -> Path:
         """Persist one briefing below the configured briefing work directory."""
-        target = self._output_dir / f"{briefing_date.isoformat()}-{category}.md"
-        _atomic_write(target, markdown)
-        return target
-
-    def _write_merged_markdown(self, briefing_date: date, markdown: str) -> Path:
-        """Persist the exact compact message used for delivery and acceptance checks."""
-        target = self._output_dir / f"{briefing_date.isoformat()}-merged.md"
+        target = (output_dir or self._output_dir) / f"{briefing_date.isoformat()}-{category}.md"
         _atomic_write(target, markdown)
         return target
 
@@ -1088,15 +1132,15 @@ def latest_briefing_date(output_dir: Path) -> date | None:
 def _budgeted_provider(provider: LLMProvider, budget: BudgetController) -> LLMProvider:
     """Reserve budget per real provider attempt for one briefing run.
 
-    A failover chain turns one logical call into up to two physical attempts,
-    so each leg is wrapped separately and reassembled: the primary and the
-    fallback each reserve with their own output-token allowance right before
-    they are actually invoked.
+    A failover chain turns one logical call into up to one physical attempt per
+    configured provider, so each leg is wrapped separately and reassembled:
+    every chain member reserves with its own output-token allowance right
+    before it is actually invoked.
     """
     if isinstance(provider, FailoverLLMProvider):
         return FailoverLLMProvider(
             BudgetReservingLLMProvider(provider.primary, budget),
-            BudgetReservingLLMProvider(provider.fallback, budget),
+            [BudgetReservingLLMProvider(fallback, budget) for fallback in provider.providers[1:]],
         )
     return BudgetReservingLLMProvider(provider, budget)
 

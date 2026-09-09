@@ -31,8 +31,8 @@ def test_zeabur_template_uses_github_and_persistent_runtime_volumes() -> None:
     assert spec["env"]["DAILYCAST_PUBLISHING__PUBLIC_BASE_URL"]["default"] == "${ZEABUR_WEB_URL}"
 
 
-def test_zeabur_template_exposes_the_eight_dailycast_llm_environment_names() -> None:
-    """Template input names configure the preferred and fallback endpoints explicitly."""
+def test_zeabur_template_exposes_the_llm_environment_names_for_a_two_fallback_chain() -> None:
+    """Template input names configure the preferred and indexed fallback endpoints explicitly."""
     template_path = Path(__file__).parents[1] / "zeabur.yaml"
     resource = yaml.safe_load(template_path.read_text(encoding="utf-8"))
     variable_keys = {variable["key"] for variable in resource["spec"]["variables"]}
@@ -43,10 +43,14 @@ def test_zeabur_template_exposes_the_eight_dailycast_llm_environment_names() -> 
         "DAILYCAST_LLM__BASE_URL",
         "DAILYCAST_LLM__MODEL",
         "DAILYCAST_LLM__API_KEY",
-        "DAILYCAST_LLM__FALLBACK__PROVIDER",
-        "DAILYCAST_LLM__FALLBACK__BASE_URL",
-        "DAILYCAST_LLM__FALLBACK__MODEL",
-        "DAILYCAST_LLM__FALLBACK__API_KEY",
+        "DAILYCAST_LLM__FALLBACKS__0__PROVIDER",
+        "DAILYCAST_LLM__FALLBACKS__0__BASE_URL",
+        "DAILYCAST_LLM__FALLBACKS__0__MODEL",
+        "DAILYCAST_LLM__FALLBACKS__0__API_KEY",
+        "DAILYCAST_LLM__FALLBACKS__1__PROVIDER",
+        "DAILYCAST_LLM__FALLBACKS__1__BASE_URL",
+        "DAILYCAST_LLM__FALLBACKS__1__MODEL",
+        "DAILYCAST_LLM__FALLBACKS__1__API_KEY",
     }.issubset(variable_keys)
     assert (
         not {
@@ -54,6 +58,10 @@ def test_zeabur_template_exposes_the_eight_dailycast_llm_environment_names() -> 
             "LLM_BASE_URL",
             "LLM_MODEL",
             "LLM_API_KEY",
+            "DAILYCAST_LLM__FALLBACK__PROVIDER",
+            "DAILYCAST_LLM__FALLBACK__BASE_URL",
+            "DAILYCAST_LLM__FALLBACK__MODEL",
+            "DAILYCAST_LLM__FALLBACK__API_KEY",
         }
         & variable_keys
     )
@@ -62,10 +70,10 @@ def test_zeabur_template_exposes_the_eight_dailycast_llm_environment_names() -> 
         "DAILYCAST_LLM__BASE_URL",
         "DAILYCAST_LLM__MODEL",
         "DAILYCAST_LLM__API_KEY",
-        "DAILYCAST_LLM__FALLBACK__PROVIDER",
-        "DAILYCAST_LLM__FALLBACK__BASE_URL",
-        "DAILYCAST_LLM__FALLBACK__MODEL",
-        "DAILYCAST_LLM__FALLBACK__API_KEY",
+        "DAILYCAST_LLM__FALLBACKS__0__PROVIDER",
+        "DAILYCAST_LLM__FALLBACKS__0__BASE_URL",
+        "DAILYCAST_LLM__FALLBACKS__0__MODEL",
+        "DAILYCAST_LLM__FALLBACKS__0__API_KEY",
     } & set(service_environment)
 
 
@@ -79,6 +87,8 @@ def test_zeabur_template_moves_fixed_runtime_values_into_deployment_yaml() -> No
 
     assert service_environment == {
         "DAILYCAST_CONFIG_PATH": {"default": "/app/config/zeabur.yaml"},
+        "DAILYCAST_LLM__FALLBACKS__0__RESPONSE_FORMAT": {"default": "json_object"},
+        "DAILYCAST_LLM__FALLBACKS__0__TIMEOUT_SECONDS": {"default": 300},
         "DAILYCAST_PUBLISHING__PUBLIC_BASE_URL": {"default": "${ZEABUR_WEB_URL}"},
     }
     assert runtime_config["app"] == {

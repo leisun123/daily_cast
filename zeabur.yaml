@@ -25,22 +25,35 @@ spec:
       type: PASSWORD
       name: Primary LLM API key
       description: Preferred endpoint secret stored only in Zeabur environment configuration.
-    - key: DAILYCAST_LLM__FALLBACK__PROVIDER
+    - key: DAILYCAST_LLM__FALLBACKS__0__PROVIDER
       type: STRING
-      name: Fallback LLM provider
-      description: Fallback provider protocol; use openai_compatible for DeepSeek.
-    - key: DAILYCAST_LLM__FALLBACK__BASE_URL
+      name: First fallback LLM provider
+      description: Tried after a primary provider failure; use openai_compatible for DeepSeek.
+    - key: DAILYCAST_LLM__FALLBACKS__0__BASE_URL
       type: STRING
-      name: Fallback LLM base URL
+      name: First fallback LLM base URL
       description: Fallback endpoint without embedded credentials.
-    - key: DAILYCAST_LLM__FALLBACK__MODEL
+    - key: DAILYCAST_LLM__FALLBACKS__0__MODEL
       type: STRING
-      name: Fallback LLM model
+      name: First fallback LLM model
       description: Fallback model identifier, such as deepseek-chat.
-    - key: DAILYCAST_LLM__FALLBACK__API_KEY
+    - key: DAILYCAST_LLM__FALLBACKS__0__API_KEY
       type: PASSWORD
-      name: Fallback LLM API key
+      name: First fallback LLM API key
       description: Fallback endpoint secret stored only in Zeabur environment configuration.
+    - key: DAILYCAST_LLM__FALLBACKS__1__PROVIDER
+      type: STRING
+      name: Second fallback LLM provider (optional)
+      description: Tried after the first fallback also fails; leave unset to keep a two-provider chain.
+    - key: DAILYCAST_LLM__FALLBACKS__1__BASE_URL
+      type: STRING
+      name: Second fallback LLM base URL (optional)
+    - key: DAILYCAST_LLM__FALLBACKS__1__MODEL
+      type: STRING
+      name: Second fallback LLM model (optional)
+    - key: DAILYCAST_LLM__FALLBACKS__1__API_KEY
+      type: PASSWORD
+      name: Second fallback LLM API key (optional)
     - key: DAILYCAST_BRIEFING__WEBHOOK_URL
       type: PASSWORD
       name: Daily briefing webhook URL
@@ -81,6 +94,12 @@ spec:
         env:
           DAILYCAST_CONFIG_PATH:
             default: /app/config/zeabur.yaml
+          # An indexed env block replaces the whole YAML fallback entry, so the
+          # stable response mode and timeout travel with the endpoint fields.
+          DAILYCAST_LLM__FALLBACKS__0__RESPONSE_FORMAT:
+            default: json_object
+          DAILYCAST_LLM__FALLBACKS__0__TIMEOUT_SECONDS:
+            default: 300
           DAILYCAST_PUBLISHING__PUBLIC_BASE_URL:
             default: ${ZEABUR_WEB_URL}
         instructions:

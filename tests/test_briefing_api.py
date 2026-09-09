@@ -131,10 +131,13 @@ def test_briefing_generate_conflicts_when_disabled(app_config_path: Path) -> Non
 
     with TestClient(create_app(config_path=app_config_path)) as client:
         generate_response = client.post("/briefing/generate")
+        dry_run_response = client.post("/briefing/dry-run")
         push_response = client.post("/briefing/test-push")
         latest_response = client.get("/briefing/latest")
 
     assert generate_response.status_code == 409
+    assert dry_run_response.status_code == 409
+    assert dry_run_response.json() == {"detail": "briefing is not enabled"}
     assert push_response.status_code == 409
     assert push_response.json() == {"detail": "briefing is not enabled"}
     assert latest_response.status_code == 404
@@ -188,11 +191,14 @@ def test_briefing_generate_returns_409_while_a_run_is_in_progress(
         service._try_reserve_run()
         try:
             response = client.post("/briefing/generate")
+            dry_run_response = client.post("/briefing/dry-run")
         finally:
             service._run_reserved = False
 
     assert response.status_code == 409
     assert response.json() == {"detail": "briefing run already in progress"}
+    assert dry_run_response.status_code == 409
+    assert dry_run_response.json() == {"detail": "briefing run already in progress"}
 
 
 def test_briefing_generate_accepts_the_force_parameter(

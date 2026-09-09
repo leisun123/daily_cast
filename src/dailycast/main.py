@@ -238,6 +238,51 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
         task.add_done_callback(_log_briefing_task_result)
         return JSONResponse(status_code=202, content={"status": "accepted"})
 
+    @app.post("/briefing/dry-run", tags=["briefing"])
+    async def dry_run_briefing(
+        runtime: RuntimeDependency,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    ) -> JSONResponse:
+        """Run one full briefing generation synchronously and return it without sending.
+
+        The whole flow executes — collection, web research, LLM summaries, and
+        merged rendering — but the webhook is never touched, no prepared marker
+        is written (so the 08:30 delivery tick cannot pick the rehearsal up),
+        and output files land below the dry-run subdirectory. Generation takes
+        minutes; keep the client timeout generous. On a public_only deployment
+        the route requires the same bearer token as the other operator routes.
+        """
+        if runtime.settings.app.public_only:
+            _require_manual_trigger_token(runtime, authorization)
+        _require_ready(runtime)
+        if runtime.briefing_service is None:
+            raise HTTPException(status_code=409, detail="briefing is not enabled")
+        try:
+            report = await runtime.briefing_service.dry_run()
+        except BriefingRunInProgressError:
+            raise HTTPException(
+                status_code=409, detail="briefing run already in progress"
+            ) from None
+        return JSONResponse(
+            content={
+                "date": report.date,
+                "dry_run": True,
+                "merged_markdown": report.merged_markdown,
+                "categories": [
+                    {
+                        "category": entry.category,
+                        "status": entry.status,
+                        "article_count": entry.article_count,
+                        "file_path": str(entry.file_path) if entry.file_path else None,
+                        "push_status": entry.push_status,
+                        "error": entry.error,
+                        "reason": entry.reason,
+                    }
+                    for entry in report.categories
+                ],
+            },
+        )
+
     @app.post("/briefing/test-push", tags=["briefing"])
     async def test_briefing_push(
         runtime: RuntimeDependency,

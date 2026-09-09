@@ -15,6 +15,30 @@ from dailycast.core.config import (
 from dailycast.core.errors import ConfigurationError
 
 
+def test_deprecated_singular_fallback_env_vars_warn_and_are_ignored(
+    app_config_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Old singular FALLBACK__ names must never silently carry a deployment key away."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__API_KEY", "real-deepseek-key")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__MODEL", "deepseek-v4-pro")
+
+    with (
+        patch("dailycast.core.config.logger") as mock_logger,
+    ):
+        settings = load_settings(config_path=app_config_path, env_file=tmp_path / "absent.env")
+
+    assert settings.llm.fallbacks == []
+    warning_calls = [
+        call for call in mock_logger.warning.call_args_list if "FALLBACKS__0" in str(call)
+    ]
+    assert warning_calls
+    assert "DAILYCAST_LLM__FALLBACK__API_KEY" in str(warning_calls[0])
+
+
 def test_environment_overrides_yaml(app_config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Nested DailyCast environment variables take precedence over YAML values."""
     monkeypatch.setenv("DAILYCAST_APP__SERVER__PORT", "9012")
@@ -93,9 +117,11 @@ def test_alpha_example_keeps_semantic_review_relaxed_and_auto_publish(tmp_path: 
 
 def test_publication_platforms_default_to_rss_only_and_keep_netease_profile_private(
     app_config_path: Path,
+    tmp_path: Path,
 ) -> None:
     """Distribution defaults preserve RSS while leaving browser automation explicitly disabled."""
-    settings = load_settings(config_path=app_config_path)
+    # An absent env file keeps a developer's local .env from overriding the defaults.
+    settings = load_settings(config_path=app_config_path, env_file=tmp_path / "absent.env")
 
     assert settings.publishing.rss.enabled is True
     assert settings.publishing.netease.enabled is False
@@ -128,8 +154,8 @@ def test_alpha_example_uses_json_object_for_deepseek_fallback(tmp_path: Path) ->
         env_file=tmp_path / "absent.env",
     )
 
-    assert settings.llm.fallback is not None
-    assert settings.llm.fallback.response_format == "json_object"
+    assert settings.llm.fallbacks != []
+    assert settings.llm.fallbacks[0].response_format == "json_object"
 
 
 def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environment(
@@ -167,19 +193,20 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.llm.budget.max_output_tokens == 15_000
 
 
-def test_zeabur_eight_variable_interface_keeps_fallback_in_json_object_mode(
+def test_zeabur_fallback_chain_interface_owns_whole_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Eight dynamic endpoint values combine with the stable DeepSeek response mode."""
+    """Indexed fallback env values replace the YAML entry, so they carry the response mode."""
     monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "openai_responses")
     monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "https://gateway.example/v1")
     monkeypatch.setenv("DAILYCAST_LLM__MODEL", "gpt-5.6-terra")
     monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "primary-secret")
-    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__PROVIDER", "openai_compatible")
-    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__BASE_URL", "https://api.deepseek.example")
-    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__API_KEY", "fallback-secret")
-    monkeypatch.delenv("DAILYCAST_LLM__FALLBACK__RESPONSE_FORMAT", raising=False)
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__PROVIDER", "openai_compatible")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__BASE_URL", "https://api.deepseek.example")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__API_KEY", "fallback-secret")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__RESPONSE_FORMAT", "json_object")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__TIMEOUT_SECONDS", "300")
     monkeypatch.setenv("DAILYCAST_BRIEFING__WEBHOOK_URL", "https://qyapi.example.test/hook")
 
     settings = load_settings(
@@ -187,8 +214,9 @@ def test_zeabur_eight_variable_interface_keeps_fallback_in_json_object_mode(
         env_file=tmp_path / "absent.env",
     )
 
-    assert settings.llm.fallback is not None
-    assert settings.llm.fallback.response_format == "json_object"
+    assert len(settings.llm.fallbacks) == 1
+    assert settings.llm.fallbacks[0].response_format == "json_object"
+    assert settings.llm.fallbacks[0].timeout_seconds == 300
 
 
 def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path(
@@ -214,32 +242,32 @@ def test_zeabur_uses_production_config_when_an_existing_service_has_the_old_path
 def test_dailycast_llm_primary_and_fallback_environment_override_yaml(
     app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The explicit eight-variable interface configures both ordered endpoints."""
+    """The indexed variable interface configures the ordered fallback endpoints."""
     monkeypatch.setenv("DAILYCAST_LLM__PROVIDER", "openai_responses")
     monkeypatch.setenv("DAILYCAST_LLM__BASE_URL", "https://gateway.example/v1")
     monkeypatch.setenv("DAILYCAST_LLM__MODEL", "gpt-5.6-terra")
     monkeypatch.setenv("DAILYCAST_LLM__API_KEY", "primary-secret")
-    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__PROVIDER", "openai_compatible")
-    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__BASE_URL", "https://api.deepseek.example")
-    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__MODEL", "deepseek-test")
-    monkeypatch.setenv("DAILYCAST_LLM__FALLBACK__API_KEY", "fallback-secret")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__PROVIDER", "openai_compatible")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__BASE_URL", "https://api.deepseek.example")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__MODEL", "deepseek-test")
+    monkeypatch.setenv("DAILYCAST_LLM__FALLBACKS__0__API_KEY", "fallback-secret")
 
     settings = load_settings(config_path=app_config_path, env_file=tmp_path / "absent.env")
 
     assert settings.llm.provider == "openai_responses"
     assert settings.llm.base_url == "https://gateway.example/v1"
     assert settings.llm.api_key == "primary-secret"
-    assert settings.llm.fallback is not None
-    assert settings.llm.fallback.provider == "openai_compatible"
-    assert settings.llm.fallback.base_url == "https://api.deepseek.example"
-    assert settings.llm.fallback.model == "deepseek-test"
-    assert settings.llm.fallback.api_key == "fallback-secret"
+    assert len(settings.llm.fallbacks) == 1
+    assert settings.llm.fallbacks[0].provider == "openai_compatible"
+    assert settings.llm.fallbacks[0].base_url == "https://api.deepseek.example"
+    assert settings.llm.fallbacks[0].model == "deepseek-test"
+    assert settings.llm.fallbacks[0].api_key == "fallback-secret"
 
 
 def test_llm_settings_load_primary_and_fallback_from_dotenv(
     app_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Local .env files use the same eight-variable interface as deployments."""
+    """Local .env files use the same indexed variable interface as deployments."""
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
@@ -248,10 +276,10 @@ def test_llm_settings_load_primary_and_fallback_from_dotenv(
                 "DAILYCAST_LLM__BASE_URL=https://gateway.example/v1",
                 "DAILYCAST_LLM__MODEL=gpt-5.6-terra",
                 "DAILYCAST_LLM__API_KEY=primary-secret",
-                "DAILYCAST_LLM__FALLBACK__PROVIDER=openai_compatible",
-                "DAILYCAST_LLM__FALLBACK__BASE_URL=https://api.deepseek.example",
-                "DAILYCAST_LLM__FALLBACK__MODEL=deepseek-test",
-                "DAILYCAST_LLM__FALLBACK__API_KEY=fallback-secret",
+                "DAILYCAST_LLM__FALLBACKS__0__PROVIDER=openai_compatible",
+                "DAILYCAST_LLM__FALLBACKS__0__BASE_URL=https://api.deepseek.example",
+                "DAILYCAST_LLM__FALLBACKS__0__MODEL=deepseek-test",
+                "DAILYCAST_LLM__FALLBACKS__0__API_KEY=fallback-secret",
                 "",
             )
         ),
@@ -262,10 +290,10 @@ def test_llm_settings_load_primary_and_fallback_from_dotenv(
         "DAILYCAST_LLM__BASE_URL",
         "DAILYCAST_LLM__MODEL",
         "DAILYCAST_LLM__API_KEY",
-        "DAILYCAST_LLM__FALLBACK__PROVIDER",
-        "DAILYCAST_LLM__FALLBACK__BASE_URL",
-        "DAILYCAST_LLM__FALLBACK__MODEL",
-        "DAILYCAST_LLM__FALLBACK__API_KEY",
+        "DAILYCAST_LLM__FALLBACKS__0__PROVIDER",
+        "DAILYCAST_LLM__FALLBACKS__0__BASE_URL",
+        "DAILYCAST_LLM__FALLBACKS__0__MODEL",
+        "DAILYCAST_LLM__FALLBACKS__0__API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -275,11 +303,11 @@ def test_llm_settings_load_primary_and_fallback_from_dotenv(
     assert settings.llm.base_url == "https://gateway.example/v1"
     assert settings.llm.model == "gpt-5.6-terra"
     assert settings.llm.api_key == "primary-secret"
-    assert settings.llm.fallback is not None
-    assert settings.llm.fallback.provider == "openai_compatible"
-    assert settings.llm.fallback.base_url == "https://api.deepseek.example"
-    assert settings.llm.fallback.model == "deepseek-test"
-    assert settings.llm.fallback.api_key == "fallback-secret"
+    assert len(settings.llm.fallbacks) == 1
+    assert settings.llm.fallbacks[0].provider == "openai_compatible"
+    assert settings.llm.fallbacks[0].base_url == "https://api.deepseek.example"
+    assert settings.llm.fallbacks[0].model == "deepseek-test"
+    assert settings.llm.fallbacks[0].api_key == "fallback-secret"
 
 
 def test_legacy_llm_environment_values_do_not_override_dailycast_settings(

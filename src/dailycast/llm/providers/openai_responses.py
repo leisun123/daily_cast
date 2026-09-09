@@ -167,6 +167,9 @@ class OpenAIResponsesLLMProvider:
         options = self._semantic_options(model_options)
         response_mode = options.pop("response_format", self._response_format)
         search_context_size = options.pop("search_context_size", "medium")
+        # Explicit Zhipu-style queries do not apply here: the Responses tool
+        # derives its own searches from the prompt.
+        options.pop("search_queries", None)
         if search_context_size not in {"low", "medium", "high"}:
             msg = "web research search_context_size must be low, medium, or high"
             raise ValueError(msg)

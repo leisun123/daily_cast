@@ -12,10 +12,18 @@ from dailycast.llm.contracts import JSONValue, LLMMessage, LLMProvider, Structur
 
 
 class FailoverLLMProvider:
-    """Prefer the first provider and use the second only after a provider-level failure."""
+    """Prefer the first provider and walk the ordered fallbacks after provider failures.
 
-    def __init__(self, primary: LLMProvider, fallback: LLMProvider) -> None:
-        self.providers = (primary, fallback)
+    One provider-level failure — transport, auth, quota exhaustion, or malformed
+    responses — advances to the next configured provider exactly once per logical
+    call; the chain never retries an already-failed provider within one call.
+    """
+
+    def __init__(self, primary: LLMProvider, fallbacks: Sequence[LLMProvider]) -> None:
+        if not fallbacks:
+            msg = "FailoverLLMProvider requires at least one fallback provider"
+            raise ValueError(msg)
+        self.providers = (primary, *fallbacks)
         self.provider_name = primary.provider_name
         self.model = primary.model
         self.max_output_tokens = primary.max_output_tokens
@@ -27,7 +35,7 @@ class FailoverLLMProvider:
 
     @property
     def fallback(self) -> LLMProvider:
-        """Expose the secondary provider for per-attempt wrappers without rerouting."""
+        """Expose the first secondary provider for per-attempt wrappers."""
         return self.providers[1]
 
     def generation_config_hash(self, model_options: Mapping[str, JSONValue]) -> str:
@@ -41,15 +49,18 @@ class FailoverLLMProvider:
         response_schema: type[BaseModel],
         model_options: Mapping[str, JSONValue],
     ) -> StructuredResult:
-        """Try the primary once, then route a provider failure to the configured fallback."""
-        try:
-            return await self.providers[0].generate_structured(
-                operation, messages, response_schema, model_options
-            )
-        except LLMProviderError:
-            result = await self.providers[1].generate_structured(
-                operation, messages, response_schema, model_options
-            )
+        """Try providers in order until one succeeds or every provider has failed."""
+        last_error: LLMProviderError | None = None
+        for index, provider in enumerate(self.providers):
+            try:
+                result = await provider.generate_structured(
+                    operation, messages, response_schema, model_options
+                )
+            except LLMProviderError as error:
+                last_error = error
+                continue
+            if index == 0:
+                return result
             return StructuredResult(
                 content=result.content,
                 model=result.model,
@@ -57,8 +68,10 @@ class FailoverLLMProvider:
                 request_id=result.request_id,
                 cache_hit=result.cache_hit,
                 artifact_id=result.artifact_id,
-                provider_call_count=result.provider_call_count + 1,
+                provider_call_count=result.provider_call_count + index,
             )
+        assert last_error is not None
+        raise last_error
 
 
 __all__ = ["FailoverLLMProvider"]

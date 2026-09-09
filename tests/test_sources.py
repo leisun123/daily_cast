@@ -60,6 +60,7 @@ from dailycast.sources.extraction import (
 )
 from dailycast.sources.html_list import HTMLListCollector
 from dailycast.sources.research import (
+    _RESEARCH_FACETS,
     ResearchCollector,
     ResearchSourceOptions,
     _candidate_url_error,
@@ -1774,7 +1775,10 @@ def test_research_collector_runs_bounded_search_calls_across_telecom_facets() ->
         ]
         assert all("本轮重点" in messages[-1].content for messages in provider.messages)
         assert all(
-            options == {"search_context_size": "medium"} for options in provider.model_options
+            options == {"search_context_size": "medium", "search_queries": [facet]}
+            for options, facet in zip(
+                provider.model_options, _RESEARCH_FACETS["telecom"], strict=True
+            )
         )
 
     asyncio.run(scenario())

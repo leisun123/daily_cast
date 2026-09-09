@@ -62,7 +62,7 @@ cd dailycast
 cp .env.example .env
 ```
 
-Edit `.env` for environment-specific values and review `config/app.example.yaml` and `config/sources.example.yaml`. DailyCast prefers `gpt-5.6-terra` through the Responses API and routes provider failures to the configured DeepSeek fallback. Set `DAILYCAST_LLM__API_KEY` and `DAILYCAST_LLM__FALLBACK__API_KEY` only in your local `.env` or deployment environment; never put them in YAML or commit them.
+Edit `.env` for environment-specific values and review `config/app.example.yaml` and `config/sources.example.yaml`. DailyCast runs its primary model through the configured provider protocol and walks the ordered fallback chain on provider failures. Set `DAILYCAST_LLM__API_KEY` and the `DAILYCAST_LLM__FALLBACKS__<index>__API_KEY` values only in your local `.env` or deployment environment; never put them in YAML or commit them.
 
 Start the service:
 
@@ -177,11 +177,15 @@ curl --fail-with-body -X POST https://your-domain/briefing/test-push \
   -H 'Authorization: Bearer your-secret-token'
 ```
 
-DailyCast reads its ordered LLM configuration from exactly eight environment variables:
+DailyCast reads its ordered LLM configuration from these environment variables:
 `DAILYCAST_LLM__PROVIDER`, `DAILYCAST_LLM__BASE_URL`, `DAILYCAST_LLM__MODEL`,
-`DAILYCAST_LLM__API_KEY`, plus the corresponding four
-`DAILYCAST_LLM__FALLBACK__*` variables. The old unprefixed `LLM_*` variables are ignored;
-new deployments should create only the eight `DAILYCAST_LLM__*` rows.
+`DAILYCAST_LLM__API_KEY`, plus one indexed block per fallback provider,
+`DAILYCAST_LLM__FALLBACKS__<index>__*` (`PROVIDER`, `BASE_URL`, `MODEL`,
+`API_KEY`). After a provider-level failure of the primary, the fallbacks are
+tried once each in index order; remove unused index blocks to shorten the
+chain. The old unprefixed `LLM_*` variables and the former singular
+`DAILYCAST_LLM__FALLBACK__*` form are ignored; new deployments should create
+only the variables described here.
 
 Deploy into a selected Zeabur project with:
 

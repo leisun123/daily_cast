@@ -142,7 +142,12 @@ class ResearchCollector:
                 self._provider.generate_web_research(
                     _research_messages(options, window, focus=facet),
                     WebResearchCandidateSet,
-                    {"search_context_size": self._settings.search_context_size},
+                    {
+                        "search_context_size": self._settings.search_context_size,
+                        # Zhipu-style discovery searches each facet verbatim
+                        # instead of deriving searches from the prompt itself.
+                        "search_queries": [facet],
+                    },
                 )
                 for facet in facets
             ),

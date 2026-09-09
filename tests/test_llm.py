@@ -15,7 +15,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from dailycast.core.config import LLMSettings, load_settings
+from dailycast.core.config import LLMSettings, WebResearchSettings, load_settings
 from dailycast.core.errors import (
     AIBudgetExceededError,
     ConfigurationError,
@@ -23,6 +23,7 @@ from dailycast.core.errors import (
     LLMProviderError,
     LLMProviderResponseError,
     LLMStructuredOutputUnsupportedError,
+    LLMWebSearchUnsupportedError,
 )
 from dailycast.core.hashes import sha256_text
 from dailycast.core.lifespan import build_llm_provider, build_web_research_provider
@@ -35,8 +36,10 @@ from dailycast.llm.artifacts import LLMArtifactService, LLMResponseValidationErr
 from dailycast.llm.budget import BudgetController
 from dailycast.llm.contracts import LLMMessage, LLMProviderTimeoutError, LLMUsage, StructuredResult
 from dailycast.llm.prompts.score_events_v1 import SCORE_EVENTS_V1
+from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.llm.providers.openai_compatible import OpenAICompatibleLLMProvider
 from dailycast.llm.providers.openai_responses import OpenAIResponsesLLMProvider
+from dailycast.llm.providers.zhipu_web_search import ZhipuWebResearchProvider
 
 
 class ScoreOutput(BaseModel):
@@ -149,35 +152,11 @@ class FailingFakeLLMProvider(FakeLLMProvider):
         raise LLMProviderError()
 
 
-class FakeFailoverLLMProvider:
-    """Expose ordered providers using the runtime router contract expected by artifacts."""
+class FakeFailoverLLMProvider(FailoverLLMProvider):
+    """Reuse the real ordered router contract over fake providers for artifact tests."""
 
-    def __init__(self, primary: FakeLLMProvider, fallback: FakeLLMProvider) -> None:
-        self.providers = (primary, fallback)
-        self.provider_name = primary.provider_name
-        self.model = primary.model
-        self.max_output_tokens = primary.max_output_tokens
-
-    def generation_config_hash(self, model_options: Mapping[str, object]) -> str:
-        """Use the preferred provider identity until a fallback is actually selected."""
-        return self.providers[0].generation_config_hash(model_options)
-
-    async def generate_structured(
-        self,
-        operation: LLMOperation,
-        messages: tuple[LLMMessage, ...],
-        response_schema: type[BaseModel],
-        model_options: Mapping[str, object],
-    ) -> StructuredResult:
-        """Provide direct-call failover while artifact tests verify budget-aware routing."""
-        try:
-            return await self.providers[0].generate_structured(
-                operation, messages, response_schema, model_options
-            )
-        except LLMProviderError:
-            return await self.providers[1].generate_structured(
-                operation, messages, response_schema, model_options
-            )
+    def __init__(self, primary: FakeLLMProvider, *fallbacks: FakeLLMProvider) -> None:
+        super().__init__(primary, fallbacks)
 
 
 @pytest.fixture
@@ -363,10 +342,10 @@ def test_runtime_builds_responses_primary_with_deepseek_fallback(
                     "DAILYCAST_LLM__BASE_URL=https://models.example/v1",
                     "DAILYCAST_LLM__API_KEY=primary-key",
                     "DAILYCAST_LLM__MODEL=gpt-5.6-terra",
-                    "DAILYCAST_LLM__FALLBACK__PROVIDER=openai_compatible",
-                    "DAILYCAST_LLM__FALLBACK__BASE_URL=https://api.deepseek.com",
-                    "DAILYCAST_LLM__FALLBACK__API_KEY=fallback-key",
-                    "DAILYCAST_LLM__FALLBACK__MODEL=deepseek-v4-pro",
+                    "DAILYCAST_LLM__FALLBACKS__0__PROVIDER=openai_compatible",
+                    "DAILYCAST_LLM__FALLBACKS__0__BASE_URL=https://api.deepseek.com",
+                    "DAILYCAST_LLM__FALLBACKS__0__API_KEY=fallback-key",
+                    "DAILYCAST_LLM__FALLBACKS__0__MODEL=deepseek-v4-pro",
                     "",
                 ]
             ),
@@ -382,6 +361,85 @@ def test_runtime_builds_responses_primary_with_deepseek_fallback(
         assert provider.providers[1].model == "deepseek-v4-pro"
 
     asyncio.run(scenario())
+
+
+def test_runtime_builds_an_ordered_multi_provider_fallback_chain(
+    app_config_path: Path, tmp_path: Path
+) -> None:
+    """Two indexed fallback blocks produce a three-provider chain in configuration order."""
+
+    async def scenario() -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "DAILYCAST_LLM__PROVIDER=openai_compatible",
+                    "DAILYCAST_LLM__BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4",
+                    "DAILYCAST_LLM__API_KEY=primary-key",
+                    "DAILYCAST_LLM__MODEL=glm-5.3-flash",
+                    "DAILYCAST_LLM__FALLBACKS__0__PROVIDER=openai_compatible",
+                    "DAILYCAST_LLM__FALLBACKS__0__BASE_URL=https://api.deepseek.com",
+                    "DAILYCAST_LLM__FALLBACKS__0__API_KEY=deepseek-key",
+                    "DAILYCAST_LLM__FALLBACKS__0__MODEL=deepseek-chat",
+                    "DAILYCAST_LLM__FALLBACKS__1__PROVIDER=openai_responses",
+                    "DAILYCAST_LLM__FALLBACKS__1__BASE_URL=https://models.example/v1",
+                    "DAILYCAST_LLM__FALLBACKS__1__API_KEY=tertiary-key",
+                    "DAILYCAST_LLM__FALLBACKS__1__MODEL=gpt-5.6-terra",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        settings = load_settings(config_path=app_config_path, env_file=env_file)
+        assert [entry.model for entry in settings.llm.fallbacks] == [
+            "deepseek-chat",
+            "gpt-5.6-terra",
+        ]
+        async with httpx.AsyncClient(trust_env=False) as client:
+            provider = build_llm_provider(settings, http_client=client)
+        assert [entry.model for entry in provider.providers] == [
+            "glm-5.3-flash",
+            "deepseek-chat",
+            "gpt-5.6-terra",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_failover_chain_walks_every_provider_before_raising() -> None:
+    """Each provider-level failure advances once; exhaustion re-raises the last error."""
+
+    async def scenario() -> tuple[StructuredResult, object]:
+        first = FailingFakeLLMProvider({"score": 0})
+        second = FailingFakeLLMProvider({"score": 0})
+        third = FakeLLMProvider({"score": 7})
+        provider = FakeFailoverLLMProvider(first, second, third)
+        result = await provider.generate_structured(
+            LLMOperation.SCORE_EVENTS,
+            (LLMMessage(role="user", content="Score this."),),
+            ScoreOutput,
+            {},
+        )
+        return result, provider
+
+    result, provider = asyncio.run(scenario())
+    assert [entry.calls for entry in provider.providers] == [1, 1, 1]
+    assert result.provider_call_count == 3
+
+    async def exhausted() -> None:
+        all_failing = FakeFailoverLLMProvider(
+            FailingFakeLLMProvider({"score": 0}),
+            FailingFakeLLMProvider({"score": 0}),
+        )
+        await all_failing.generate_structured(
+            LLMOperation.SCORE_EVENTS,
+            (LLMMessage(role="user", content="Score this."),),
+            ScoreOutput,
+            {},
+        )
+
+    with pytest.raises(LLMProviderError):
+        asyncio.run(exhausted())
 
 
 def test_provider_failover_reserves_budget_and_persists_fallback_identity(
@@ -793,7 +851,306 @@ def test_lifespan_reuses_the_primary_responses_provider_for_web_research() -> No
         max_output_tokens=30,
     )
 
-    assert build_web_research_provider(provider) is provider
+    assert (
+        build_web_research_provider(
+            WebResearchSettings(),
+            LLMSettings(),
+            provider,
+            http_client=httpx.AsyncClient(),
+        )
+        is provider
+    )
+
+
+def test_lifespan_builds_zhipu_web_research_provider_from_settings() -> None:
+    """The zhipu mode reuses the primary GLM endpoint identity for discovery and filtering."""
+    built = build_web_research_provider(
+        WebResearchSettings(provider="zhipu"),
+        LLMSettings(
+            provider="openai_compatible",
+            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+            api_key="test-key",
+            model="glm-5.3-flash",
+        ),
+        OpenAICompatibleLLMProvider(
+            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+            api_key="test-key",
+            model="glm-5.3-flash",
+            timeout_seconds=2,
+            temperature=0.1,
+        ),
+        http_client=httpx.AsyncClient(),
+    )
+
+    assert isinstance(built, ZhipuWebResearchProvider)
+    assert built.model == "glm-5.3-flash"
+
+
+def test_openai_compatible_provider_sends_configured_thinking_and_hashes_it() -> None:
+    """The reasoning switch must reach the wire and change the artifact cache identity."""
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": '{"score": 7}'},
+                    }
+                ],
+                "id": "thinking-request",
+            },
+        )
+
+    async def scenario() -> tuple[dict[str, object], str, str]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICompatibleLLMProvider(
+                base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                api_key="test-key",
+                model="glm-5.3-flash",
+                timeout_seconds=2,
+                temperature=0.1,
+                response_format="json_object",
+                thinking="disabled",
+                http_client=client,
+            )
+            result = await provider.generate_structured(
+                LLMOperation.SCORE_EVENTS,
+                (LLMMessage(role="user", content="Score this."),),
+                ScoreOutput,
+                {},
+            )
+            del result
+            payload = json.loads(captured["request"].content)
+            return (
+                payload,
+                provider.generation_config_hash({}),
+                OpenAICompatibleLLMProvider(
+                    base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                    api_key="test-key",
+                    model="glm-5.3-flash",
+                    timeout_seconds=2,
+                    temperature=0.1,
+                    response_format="json_object",
+                    http_client=client,
+                ).generation_config_hash({}),
+            )
+
+    payload, hash_disabled, hash_default = asyncio.run(scenario())
+    assert payload["thinking"] == {"type": "disabled"}
+    assert hash_disabled != hash_default
+
+
+def test_zhipu_web_research_searches_then_filters_verbatim_urls() -> None:
+    """Discovery passes search-API URLs through verbatim and filters with the schema contract."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/web_search"):
+            return httpx.Response(
+                200,
+                json={
+                    "search_result": [
+                        {
+                            "title": "运营商开通 5G-A 商用网络",
+                            "link": "https://news.example.cn/5ga/2026-09-08/article.html",
+                            "media": " Example Media ",
+                            "publish_date": "2026/09/08",
+                            "content": "  运营商宣布\n开通 5G-A 网络。  ",
+                        },
+                        {"title": "无链接的坏结果", "link": "", "media": "x", "content": "y"},
+                    ]
+                },
+            )
+        payload = json.loads(request.content)
+        if any("搜索查询优化器" in m["content"] for m in payload["messages"]):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps(
+                                    {"queries": ["运营商 5G-A 最新动态"]}, ensure_ascii=False
+                                ),
+                            },
+                        }
+                    ],
+                    "id": "zhipu-query-gen",
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "candidates": [
+                                        {
+                                            "title": "运营商开通 5G-A 商用网络",
+                                            "url": "https://news.example.cn/5ga/2026-09-08/article.html",
+                                            "publisher": "Example Media",
+                                            "finding": "5G-A 商用开通",
+                                            "published_at_hint": "2026/09/08",
+                                        }
+                                    ]
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+                "id": "zhipu-request",
+                "usage": {"prompt_tokens": 90, "completion_tokens": 40},
+            },
+        )
+
+    async def scenario() -> StructuredResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = ZhipuWebResearchProvider(
+                base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                api_key="test-key",
+                model="glm-5.3-flash",
+                timeout_seconds=2,
+                temperature=0.1,
+                http_client=client,
+            )
+            return await provider.generate_web_research(
+                (
+                    LLMMessage(role="system", content="Discover article candidates."),
+                    LLMMessage(role="user", content="主题：通信行业新闻"),
+                ),
+                ScoreOutput,
+                {"search_context_size": "medium", "search_queries": ["通信行业 5G-A 新闻"]},
+            )
+
+    result = asyncio.run(scenario())
+    search_requests = [r for r in requests if r.url.path.endswith("/web_search")]
+    chat_requests = [r for r in requests if r.url.path.endswith("/chat/completions")]
+    assert len(search_requests) == 1
+    search_payload = json.loads(search_requests[0].content)
+    assert search_payload["search_query"] == "运营商 5G-A 最新动态"
+    assert search_payload["search_engine"] == "search_pro"
+    assert search_payload["count"] == 10
+    assert search_payload["search_recency_filter"] == "oneWeek"
+    assert len(chat_requests) == 2
+    filter_payload = json.loads(chat_requests[-1].content)
+    assert filter_payload["response_format"] == {"type": "json_object"}
+    system_message = filter_payload["messages"][0]["content"]
+    assert "Structured output contract" in system_message
+    context_message = filter_payload["messages"][-1]["content"]
+    assert "https://news.example.cn/5ga/2026-09-08/article.html" in context_message
+    assert "2026/09/08" in context_message
+    assert "运营商宣布 开通 5G-A 网络。" in context_message
+    assert "无链接的坏结果" not in context_message
+    assert result.content["candidates"][0]["url"] == (
+        "https://news.example.cn/5ga/2026-09-08/article.html"
+    )
+    assert result.request_id == "zhipu-request"
+    assert result.usage.input_tokens == 90
+
+
+def test_zhipu_web_research_maps_unsupported_search_to_source_error_type() -> None:
+    """A rejected search endpoint surfaces as unsupported, not a hard provider failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/web_search"):
+            return httpx.Response(422, json={"error": {"message": "no such tool"}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"queries": ["通信行业 最新"]}),
+                        },
+                    }
+                ]
+            },
+        )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = ZhipuWebResearchProvider(
+                base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                api_key="test-key",
+                model="glm-5.3-flash",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_retries=0,
+                http_client=client,
+            )
+            with pytest.raises(LLMWebSearchUnsupportedError):
+                await provider.generate_web_research(
+                    (LLMMessage(role="user", content="主题：通信行业新闻"),),
+                    ScoreOutput,
+                    {"search_queries": ["通信行业新闻"]},
+                )
+
+    asyncio.run(scenario())
+
+
+def test_zhipu_web_research_returns_empty_candidates_without_search_hits() -> None:
+    """No search hits must skip the filter call entirely instead of inventing candidates."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/web_search"):
+            return httpx.Response(200, json={"search_result": []})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"queries": ["通信行业 最新"]}),
+                        },
+                    }
+                ]
+            },
+        )
+
+    async def scenario() -> StructuredResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = ZhipuWebResearchProvider(
+                base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                api_key="test-key",
+                model="glm-5.3-flash",
+                timeout_seconds=2,
+                temperature=0.1,
+                http_client=client,
+            )
+            return await provider.generate_web_research(
+                (LLMMessage(role="user", content="主题：通信行业新闻"),),
+                ScoreOutput,
+                {"search_queries": ["通信行业新闻"]},
+            )
+
+    result = asyncio.run(scenario())
+    assert result.content == {"candidates": []}
+    chat_payloads = [
+        json.loads(request.content)
+        for request in requests
+        if request.url.path.endswith("/chat/completions")
+    ]
+    # Only the query-condensing call runs; the filter step is skipped entirely.
+    assert len(chat_payloads) == 1
+    assert any("搜索查询优化器" in m["content"] for m in chat_payloads[0]["messages"])
 
 
 def test_openai_responses_provider_rejects_missing_output_text() -> None:

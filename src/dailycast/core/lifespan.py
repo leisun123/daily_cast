@@ -21,7 +21,7 @@ from dailycast.briefing.scheduler import BriefingScheduler
 from dailycast.briefing.selection import load_selection_policy
 from dailycast.briefing.service import BriefingService
 from dailycast.briefing.webhook import WebhookNotifier
-from dailycast.core.config import LLMProviderSettings, Settings, load_settings
+from dailycast.core.config import LLMProviderSettings, Settings, WebResearchSettings, load_settings
 from dailycast.core.logging import configure_logging
 from dailycast.db.models import SourceKind, TaskType, TriggerType
 from dailycast.db.revision import RevisionStatus, inspect_revision
@@ -33,6 +33,7 @@ from dailycast.llm.editorial_service import AIEditorialService
 from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.llm.providers.openai_compatible import OpenAICompatibleLLMProvider
 from dailycast.llm.providers.openai_responses import OpenAIResponsesLLMProvider
+from dailycast.llm.providers.zhipu_web_search import ZhipuWebResearchProvider
 from dailycast.news.service import NewsProcessor
 from dailycast.news.types import ProcessingPolicy
 from dailycast.pipeline.contracts import TaskCommand
@@ -202,7 +203,12 @@ def build_lifespan(
                     ),
                     SourceKind.HTML_LIST: HTMLListCollector(fetcher),
                     SourceKind.WEB_RESEARCH: ResearchCollector(
-                        build_web_research_provider(primary_llm_provider),
+                        build_web_research_provider(
+                            settings.web_research,
+                            settings.llm,
+                            primary_llm_provider,
+                            http_client=llm_client,
+                        ),
                         ContentExtractor(fetcher),
                         settings.web_research,
                     ),
@@ -470,16 +476,39 @@ def build_llm_provider(
     http_client: httpx.AsyncClient,
     primary_provider: LLMProvider | None = None,
 ) -> LLMProvider:
-    """Build the preferred provider and its optional ordered fallback."""
+    """Build the preferred provider and its ordered fallback chain."""
     primary = primary_provider or _build_direct_llm_provider(settings.llm, http_client=http_client)
-    if settings.llm.fallback is None:
+    if not settings.llm.fallbacks:
         return primary
-    fallback = _build_direct_llm_provider(settings.llm.fallback, http_client=http_client)
-    return FailoverLLMProvider(primary, fallback)
+    fallbacks = [
+        _build_direct_llm_provider(provider_settings, http_client=http_client)
+        for provider_settings in settings.llm.fallbacks
+    ]
+    return FailoverLLMProvider(primary, fallbacks)
 
 
-def build_web_research_provider(primary_provider: LLMProvider) -> WebResearchProvider:
-    """Expose native discovery only from the configured primary Responses provider."""
+def build_web_research_provider(
+    web_research_settings: WebResearchSettings,
+    llm_settings: LLMProviderSettings,
+    primary_provider: LLMProvider,
+    *,
+    http_client: httpx.AsyncClient,
+) -> WebResearchProvider:
+    """Expose native discovery from the configured primary or Zhipu's search API."""
+    if web_research_settings.provider == "zhipu":
+        return ZhipuWebResearchProvider(
+            base_url=llm_settings.base_url,
+            api_key=llm_settings.api_key,
+            model=llm_settings.model,
+            timeout_seconds=llm_settings.timeout_seconds,
+            temperature=llm_settings.temperature,
+            top_p=llm_settings.top_p,
+            max_output_tokens=llm_settings.max_output_tokens,
+            max_retries=llm_settings.max_retries,
+            thinking=llm_settings.thinking,
+            search_recency_filter=web_research_settings.search_recency_filter,
+            http_client=http_client,
+        )
     if isinstance(primary_provider, OpenAIResponsesLLMProvider):
         return primary_provider
     return UnavailableWebResearchProvider()
@@ -502,6 +531,7 @@ def _build_direct_llm_provider(
             max_output_tokens=provider_settings.max_output_tokens,
             max_retries=provider_settings.max_retries,
             response_format=provider_settings.response_format,
+            thinking=provider_settings.thinking,
             http_client=http_client,
         )
     if provider_settings.provider == "openai_responses":

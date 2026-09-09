@@ -28,6 +28,7 @@ from dailycast.briefing.service import (
     BriefingRunInProgressError,
     BriefingService,
     _audit_generated_result,
+    latest_briefing_date,
     read_briefings_for_date,
 )
 from dailycast.briefing.webhook import WebhookNotifier
@@ -666,6 +667,79 @@ def test_briefing_run_persists_categories_but_pushes_one_compact_merged_message(
     assert "https://telecom-source.example.test/" in delivered
     assert "[第 5 条重要进展](https://ai-source.example.test/a5)" in delivered
     assert len(delivered.encode("utf-8")) <= RENDER_BYTE_BUDGET
+
+
+def test_briefing_dry_run_generates_full_output_without_any_delivery_side_effect(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A rehearsal produces the merged message but cannot reach the webhook or the 08:30 tick."""
+    now = datetime(2026, 9, 3, 0, 30, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    _seed_source(session_factory, "ai-source", category="ai")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate("telecom-source", f"t{index}", published_at=now - timedelta(hours=12))
+                for index in range(1, 6)
+            ],
+            "ai-source": [
+                _candidate("ai-source", f"a{index}", published_at=now - timedelta(hours=12))
+                for index in range(1, 6)
+            ],
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payloads(
+                [f"https://telecom-source.example.test/t{index}" for index in range(1, 6)],
+                "来源 telecom-source",
+            ),
+            "AI 动态日报": _llm_payloads(
+                [f"https://ai-source.example.test/a{index}" for index in range(1, 6)],
+                "来源 ai-source",
+            ),
+            "最终「昨日关注」": {"focus": "演练用的昨日关注总结。"},
+        }
+    )
+    notifier = RecordingNotifier()
+    alerts = _RecordedAlerts()
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory,
+        output_dir,
+        collector=collector,
+        llm=llm,
+        notifier=notifier,
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+
+    report = asyncio.run(service.dry_run())
+
+    statuses = {entry.category: entry.status for entry in report.categories}
+    assert statuses == {"telecom": "generated", "ai": "generated"}
+    assert report.merged_markdown is not None
+    assert "## 📡 通信" in report.merged_markdown
+    assert "## 🤖 AI" in report.merged_markdown
+    assert "演练用的昨日关注总结。" in report.merged_markdown
+    # Nothing may reach the webhook, and no operator alert may fire for a rehearsal.
+    assert notifier.pushed == []
+    assert alerts.events == []
+    # Output is quarantined below the dry-run directory the delivery path never reads.
+    assert all(
+        entry.file_path is not None and output_dir / "dry-run" in entry.file_path.parents
+        for entry in report.categories
+    )
+    assert (output_dir / "dry-run" / f"{report.date}-merged.md").is_file()
+    assert list(output_dir.glob("*.md")) == []
+    assert list(output_dir.glob("*.done")) == []
+    assert list(output_dir.glob("*-merged.prepared.json")) == []
+    # The scheduled 08:30 delivery tick must not send the rehearsal output.
+    delivery = asyncio.run(service.deliver_prepared())
+    assert all(entry.reason == "not_prepared" for entry in delivery.categories)
+    assert notifier.pushed == []
+    # The acceptance readout ignores rehearsal files.
+    assert latest_briefing_date(output_dir) is None
 
 
 def test_briefing_title_shows_the_delivery_day_not_the_collected_news_day(
@@ -1804,7 +1878,7 @@ def test_failover_uses_evidence_fallback_when_budget_prevents_second_attempt(
         session_factory,
         tmp_path / "briefings",
         collector=collector,
-        llm=FailoverLLMProvider(primary, fallback),
+        llm=FailoverLLMProvider(primary, [fallback]),
         notifier=None,
         budget_factory=_recording_budget_factory(budgets, max_calls=1),
     )
@@ -1830,7 +1904,7 @@ def test_failover_primary_success_reserves_exactly_once(
         session_factory,
         tmp_path / "briefings",
         collector=collector,
-        llm=FailoverLLMProvider(primary, fallback),
+        llm=FailoverLLMProvider(primary, [fallback]),
         notifier=None,
         budget_factory=_recording_budget_factory(budgets, max_calls=1),
     )
@@ -1857,7 +1931,7 @@ def test_failover_reserves_each_attempt_with_its_own_output_allowance(
         session_factory,
         tmp_path / "briefings",
         collector=collector,
-        llm=FailoverLLMProvider(primary, fallback),
+        llm=FailoverLLMProvider(primary, [fallback]),
         notifier=None,
         budget_factory=_recording_budget_factory(budgets, max_calls=2),
     )
@@ -1889,7 +1963,7 @@ def test_failover_double_failure_still_reserves_both_attempts_before_evidence_fa
         session_factory,
         tmp_path / "briefings",
         collector=collector,
-        llm=FailoverLLMProvider(primary, fallback),
+        llm=FailoverLLMProvider(primary, [fallback]),
         notifier=None,
         budget_factory=_recording_budget_factory(budgets, max_calls=2),
     )

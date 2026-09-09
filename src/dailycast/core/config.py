@@ -1,5 +1,6 @@
 """Pydantic Settings loader with YAML, .env, and environment overrides."""
 
+import logging
 import os
 from contextvars import ContextVar
 from pathlib import Path
@@ -19,6 +20,7 @@ from dailycast.news.source_windows import DEFAULT_SOURCE_MAX_AGE_HOURS
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "app.example.yaml"
 ZEABUR_CONFIG_PATH = PROJECT_ROOT / "config" / "zeabur.yaml"
+logger = logging.getLogger(__name__)
 _yaml_path_context: ContextVar[Path] = ContextVar(
     "dailycast_yaml_path", default=DEFAULT_CONFIG_PATH
 )
@@ -135,9 +137,18 @@ class WebResearchSettings(BaseModel):
     """Bound native web-search discovery for briefing-only sources."""
 
     enabled: bool = False
+    # primary_responses reuses the Responses web_search tool when the primary
+    # provider supports it; zhipu drives BigModel's verbatim-URL /web_search API
+    # and filters the results with the primary GLM chat model.
+    provider: Literal["primary_responses", "zhipu"] = "primary_responses"
     max_candidates_per_source: int = Field(default=20, ge=1, le=80)
     max_search_calls_per_source: int = Field(default=1, ge=1, le=4)
     search_context_size: Literal["low", "medium", "high"] = "medium"
+    # Zhipu-style discovery only: upstream recency window for the search API.
+    # The briefing window itself stays enforced by local date verification.
+    search_recency_filter: Literal["oneDay", "oneWeek", "oneMonth", "oneYear", "noLimit"] = (
+        "oneWeek"
+    )
     max_article_chars: int = Field(default=12_000, ge=1_000, le=50_000)
 
 
@@ -171,6 +182,10 @@ class LLMProviderSettings(BaseModel):
     # and content. An external cap only truncates them to an empty answer.
     max_output_tokens: int | None = Field(default=None, ge=1)
     response_format: str = "json_schema"
+    # Optional Zhipu-style reasoning switch; null sends nothing and keeps the
+    # upstream default. "disabled" suits bounded editorial JSON steps where
+    # deep reasoning only adds latency and token burn, not output quality.
+    thinking: Literal["enabled", "disabled"] | None = None
 
     @field_validator("provider")
     @classmethod
@@ -184,12 +199,30 @@ class LLMProviderSettings(BaseModel):
 
 
 class LLMSettings(LLMProviderSettings):
-    """Preferred model endpoint plus an optional ordered provider fallback."""
+    """Preferred model endpoint plus an ordered multi-provider fallback chain."""
 
     provider: str = "openai_responses"
     model: str = "gpt-5.6-terra"
-    fallback: LLMProviderSettings | None = None
+    # Tried in order after each provider-level failure of the providers before
+    # it; every entry keeps its own wire protocol, response mode, and key.
+    fallbacks: list[LLMProviderSettings] = []
     budget: LLMBudgetSettings = Field(default_factory=LLMBudgetSettings)
+
+    @field_validator("fallbacks", mode="before")
+    @classmethod
+    def coerce_indexed_fallback_env_vars(cls, value: object) -> object:
+        """Turn the numeric-key dict from indexed env vars into an ordered list.
+
+        Environment sources collect DAILYCAST_LLM__FALLBACKS__<index>__FIELD
+        pairs as a dict; YAML already provides a real list and passes through.
+        """
+        if (
+            isinstance(value, dict)
+            and value
+            and all(isinstance(key, str) and key.isdigit() for key in value)
+        ):
+            return [value[key] for key in sorted(value, key=str)]
+        return value
 
 
 class EditorialSettings(BaseModel):
@@ -461,6 +494,33 @@ def _resolve_yaml_path(config_path: Path | None, env_file: Path | None) -> Path:
     return path if path.is_absolute() else (Path.cwd() / path).resolve()
 
 
+_DEPRECATED_FALLBACK_ENV_VARS = (
+    "DAILYCAST_LLM__FALLBACK__PROVIDER",
+    "DAILYCAST_LLM__FALLBACK__BASE_URL",
+    "DAILYCAST_LLM__FALLBACK__MODEL",
+    "DAILYCAST_LLM__FALLBACK__API_KEY",
+    "DAILYCAST_LLM__FALLBACK__RESPONSE_FORMAT",
+)
+
+
+def _warn_deprecated_fallback_env_vars(logger: Any) -> None:
+    """Surface the singular-fallback variable rename instead of silently dropping keys.
+
+    Deployments upgraded from the old interface keep their real provider key in
+    DAILYCAST_LLM__FALLBACK__API_KEY; without this notice the fallback chain
+    loses the endpoint with no error anywhere.
+    """
+    found = sorted(name for name in _DEPRECATED_FALLBACK_ENV_VARS if name in os.environ)
+    if not found:
+        return
+    logger.warning(
+        "deprecated LLM fallback environment variables detected and ignored: %s. "
+        "Rename them to the indexed interface, e.g. DAILYCAST_LLM__FALLBACKS__0__API_KEY "
+        "(see README 'ordered LLM configuration').",
+        ", ".join(found),
+    )
+
+
 def load_settings(*, config_path: Path | None = None, env_file: Path | None = None) -> Settings:
     """Load settings with environment values overriding .env and YAML values."""
     yaml_path = _resolve_yaml_path(config_path, env_file)
@@ -468,7 +528,7 @@ def load_settings(*, config_path: Path | None = None, env_file: Path | None = No
     resolved_env_file = env_file or (Path.cwd() / ".env")
     env_token = _env_file_context.set(resolved_env_file)
     try:
-        return Settings(_env_file=resolved_env_file)
+        settings = Settings(_env_file=resolved_env_file)
     except ConfigurationError:
         raise
     except ValueError as error:
@@ -477,3 +537,5 @@ def load_settings(*, config_path: Path | None = None, env_file: Path | None = No
     finally:
         _env_file_context.reset(env_token)
         _yaml_path_context.reset(token)
+    _warn_deprecated_fallback_env_vars(logger)
+    return settings

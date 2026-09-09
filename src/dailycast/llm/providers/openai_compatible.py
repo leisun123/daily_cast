@@ -57,6 +57,7 @@ class OpenAICompatibleLLMProvider:
         max_retries: int = 2,
         response_format: str = "json_schema",
         top_p: float | None = None,
+        thinking: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if (
@@ -65,6 +66,9 @@ class OpenAICompatibleLLMProvider:
             or max_retries < 0
         ):
             msg = "LLM provider timeout, token limit, and retry count must be valid"
+            raise ValueError(msg)
+        if thinking is not None and thinking not in {"enabled", "disabled"}:
+            msg = "LLM provider thinking must be enabled, disabled, or null"
             raise ValueError(msg)
         self._endpoint, self._endpoint_identity_hash = self._endpoint_details(base_url)
         self._api_key = api_key
@@ -75,6 +79,7 @@ class OpenAICompatibleLLMProvider:
         self._max_retries = max_retries
         self._response_format = response_format
         self._top_p = top_p
+        self._thinking = thinking
         self._client = http_client or httpx.AsyncClient()
 
     def generation_config_hash(self, model_options: Mapping[str, JSONValue]) -> str:
@@ -90,6 +95,7 @@ class OpenAICompatibleLLMProvider:
                 _JSON_OBJECT_CONTRACT_VERSION if response_format == "json_object" else None
             ),
             "temperature": options.pop("temperature", self._temperature),
+            "thinking_or_null": self._thinking,
             "top_p_or_null": options.pop("top_p", self._top_p),
         }
         return sha256_text(_canonical_json(payload))
@@ -165,6 +171,8 @@ class OpenAICompatibleLLMProvider:
         top_p = options.pop("top_p", self._top_p)
         if top_p is not None:
             payload["top_p"] = top_p
+        if self._thinking is not None:
+            payload["thinking"] = {"type": self._thinking}
         payload["response_format"] = self._response_format_payload(response_mode, response_schema)
         payload.update(options)
         response = await self._post(payload)

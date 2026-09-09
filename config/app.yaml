@@ -37,26 +37,36 @@ scheduler:
 task_execution:
   deadline_seconds: 1800
 
-# The OpenAI Responses model is preferred. Provider-level failures route once
-# to the configured DeepSeek fallback. Both keys deliberately stay out of YAML.
+# The primary model is Zhipu BigModel GLM through its OpenAI-compatible chat
+# completions endpoint; Zhipu exposes no Responses API route. json_object mode
+# is used because Zhipu accepts but does not enforce wire-level json_schema.
+# Provider-level failures walk the ordered fallback chain below. Every key
+# deliberately stays out of YAML.
 llm:
-  provider: openai_responses
-  base_url: https://api.openai.com/v1
-  model: gpt-5.6-terra
+  provider: openai_compatible
+  base_url: https://open.bigmodel.cn/api/coding/paas/v4
+  model: glm-5.3-flash
   temperature: 0.1
   top_p: null
-  timeout_seconds: 30
+  # glm-5.3-flash burns thousands of reasoning tokens per editorial JSON call
+  # (measured 50s/2564tok vs 8.9s/341tok with thinking off, same schema-valid
+  # output); disabled keeps the daily batch pipeline fast without quality loss.
+  thinking: disabled
+  timeout_seconds: 120
   max_retries: 2
-  response_format: json_schema
-  fallback:
-    provider: openai_compatible
-    base_url: https://api.deepseek.com
-    model: deepseek-chat
-    temperature: 0.1
-    top_p: null
-    timeout_seconds: 120
-    max_retries: 2
-    response_format: json_schema
+  response_format: json_object
+  # Ordered fallback chain: each entry is tried once, in order, after a
+  # provider-level failure of everything before it. The DeepSeek entry needs a
+  # real DAILYCAST_LLM__FALLBACKS__0__API_KEY in .env to be usable.
+  fallbacks:
+    - provider: openai_compatible
+      base_url: https://api.deepseek.com
+      model: deepseek-chat
+      temperature: 0.1
+      top_p: null
+      timeout_seconds: 120
+      max_retries: 2
+      response_format: json_object
   budget:
     max_calls: 12
     max_input_tokens: 60000
@@ -169,11 +179,13 @@ briefing:
   # wecom_markdown_v2 | wecom_markdown | generic_json ({"text": ...}, Slack-style targets)
   webhook_format: wecom_markdown_v2
 
-# This local deployment has a Responses gateway with native web search. The two
-# research sources stay briefing-only, and their discovered links are still
-# independently fetched and date-verified before they can be selected.
+# The primary GLM model has no Responses API, so briefing web research runs as
+# a two-step Zhipu flow: the verbatim-URL /web_search API discovers real links
+# and the model filters them. Discovered links are still independently fetched
+# and date-verified before they can be selected.
 web_research:
   enabled: true
+  provider: zhipu
   max_candidates_per_source: 60
   max_search_calls_per_source: 4
   search_context_size: medium

@@ -49,15 +49,18 @@ llm:
   timeout_seconds: 30
   max_retries: 2
   response_format: json_schema
-  fallback:
-    provider: openai_compatible
-    base_url: https://api.deepseek.com
-    model: deepseek-chat
-    temperature: 0.1
-    top_p: null
-    timeout_seconds: 120
-    max_retries: 2
-    response_format: json_object
+  # Ordered fallback chain: each entry is tried once, in order, after a
+  # provider-level failure of everything before it. Keys stay in the
+  # environment (DAILYCAST_LLM__FALLBACKS__<index>__API_KEY), never in YAML.
+  fallbacks:
+    - provider: openai_compatible
+      base_url: https://api.deepseek.com
+      model: deepseek-chat
+      temperature: 0.1
+      top_p: null
+      timeout_seconds: 120
+      max_retries: 2
+      response_format: json_object
   budget:
     max_calls: 12
     max_input_tokens: 60000

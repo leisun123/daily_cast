@@ -19,18 +19,19 @@ scheduler:
   enabled: true
   cron_expression: "0 6 * * *"
 
-# DeepSeek's OpenAI-compatible Chat Completions endpoint accepts JSON mode,
-# rather than the OpenAI-specific json_schema response format.
+# The deployment primary model and each fallback entry accept JSON mode,
+# rather than the OpenAI-specific json_schema response format, unless their
+# provider documents native json_schema support.
 llm:
   response_format: json_object
   timeout_seconds: 120
   # The output budget belongs to the model; no external cap is set for the
-  # primary or its fallback.
+  # primary or any fallback in the chain.
   max_output_tokens: null
-  fallback:
-    response_format: json_object
-    max_output_tokens: null
-    timeout_seconds: 300
+  fallbacks:
+    - response_format: json_object
+      max_output_tokens: null
+      timeout_seconds: 300
   # A seven-section Chinese episode plus semantic review and metadata can reserve
   # more than the general 60k default before provider calls are made.
   budget:
