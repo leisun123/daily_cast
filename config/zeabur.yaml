@@ -68,6 +68,9 @@ monitoring:
 # link-verified locally before a briefing may use it.
 web_research:
   enabled: true
+  # The deployment primary is the Zhipu GLM endpoint, so discovery runs through
+  # BigModel's verbatim-URL search API instead of a Responses web_search tool.
+  provider: zhipu
   max_candidates_per_source: 60
   max_search_calls_per_source: 4
   search_context_size: medium
