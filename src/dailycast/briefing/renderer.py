@@ -90,11 +90,14 @@ def render_merged_briefing(
         # Keep heading and quote as sibling blocks: some WeCom clients render
         # bold markers literally when they are nested inside a quote.
         lines.extend(["", "## 昨日关注", f"> {focus.strip()}"])
-    number = 0
     for heading, items in sections:
         section_lines = ["", f"## {heading}"]
         if _fits(lines, section_lines):
             lines.extend(section_lines)
+        # Numbering restarts at 1 per section: the WeCom markdown renderer only
+        # recognizes ordered lists whose first item is "1." and collapses later
+        # sections that continue a previous number run into one plain paragraph.
+        number = 0
         for item, url in items:
             theme = item.theme.strip()
             theme_prefix = f"**{theme}｜** " if theme else ""

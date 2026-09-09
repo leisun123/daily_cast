@@ -104,7 +104,40 @@ def test_merged_renderer_keeps_the_model_selected_theme_before_each_headline() -
 
     assert markdown.startswith("# 【行业观察日报】2026年08月25日 周二\n")
     assert "1. **5G-A 场景｜** [头条一句话](https://news.example.test/telecom)" in markdown
-    assert "2. **国产模型｜** [头条一句话](https://news.example.test/ai)" in markdown
+    # Numbering restarts per section: WeCom's markdown renderer only recognizes
+    # ordered lists whose first item is "1." and collapses continuations.
+    assert "1. **国产模型｜** [头条一句话](https://news.example.test/ai)" in markdown
+    assert "2. **国产模型｜** [头条一句话](https://news.example.test/ai)" not in markdown
+
+
+def test_merged_renderer_restarts_item_numbering_in_every_section() -> None:
+    """Each section's list starts at 1 so WeCom renders every item as a list row."""
+    telecom_items = [_item(f"https://news.example.test/telecom-{index}") for index in range(1, 3)]
+    ai_item = _item("https://news.example.test/ai-1")
+
+    markdown = render_merged_briefing(
+        date(2026, 8, 25),
+        [
+            (
+                "通信",
+                "📡 通信",
+                BriefingResult(overview="运营商动态。", items=telecom_items),
+                [_evidence(source_url=item.source_url) for item in telecom_items],
+            ),
+            (
+                "AI",
+                "🤖 AI",
+                BriefingResult(overview="AI 动态。", items=[ai_item]),
+                [_evidence(source_url=ai_item.source_url)],
+            ),
+        ],
+    )
+
+    assert "1. [头条一句话](https://news.example.test/telecom-1)" in markdown
+    assert "2. [头条一句话](https://news.example.test/telecom-2)" in markdown
+    ai_section = markdown.split("## 🤖 AI", 1)[1]
+    assert ai_section.lstrip().startswith("1. [头条一句话](https://news.example.test/ai-1)")
+    assert "3. [头条一句话](https://news.example.test/ai-1)" not in markdown
 
 
 def test_merged_renderer_uses_a_natural_yesterday_focus_sentence() -> None:
@@ -230,7 +263,8 @@ def test_merged_renderer_keeps_six_items_per_category_in_one_message() -> None:
 
     assert markdown.count("https://telecom.example.test/") == 6
     assert markdown.count("https://ai.example.test/") == 6
-    assert "12. " in markdown
+    # Twelve items across two sections, each section numbered 1-6 for WeCom lists.
+    assert markdown.count("\n6. ") == 2
     assert len(markdown.encode("utf-8")) <= RENDER_BYTE_BUDGET
 
 
