@@ -82,4 +82,35 @@ def test_public_only_manual_trigger_requires_configured_bearer_token(
     assert missing.status_code == 401
     assert invalid.status_code == 401
     assert accepted.status_code == 202
+
+
+def test_public_only_briefing_dry_run_requires_configured_bearer_token(
+    app_config_path: Path, monkeypatch
+) -> None:
+    """The dry-run route stays reachable on public deployments but stays token-guarded."""
+    config = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
+    config["app"]["public_only"] = True
+    app_config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    token = "test-public-manual-trigger-token-123456"
+    monkeypatch.setenv("DAILYCAST_APP__MANUAL_TRIGGER_TOKEN", token)
+    factory = upgraded_session_factory(app_config_path)
+    try:
+        with TestClient(create_app(config_path=app_config_path)) as client:
+            missing = client.post("/briefing/dry-run")
+            invalid = client.post(
+                "/briefing/dry-run",
+                headers={"Authorization": "Bearer not-the-configured-token"},
+            )
+            # Briefing is disabled in this minimal config, so a valid token
+            # proves the route was reached and answered from the handler.
+            valid = client.post(
+                "/briefing/dry-run", headers={"Authorization": f"Bearer {token}"}
+            )
+    finally:
+        factory.kw["bind"].dispose()
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+    assert valid.status_code == 409
+    assert valid.json() == {"detail": "briefing is not enabled"}
     assert accepted.json()["task_id"]

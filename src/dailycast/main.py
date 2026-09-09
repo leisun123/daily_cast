@@ -477,6 +477,7 @@ def _is_public_deployment_path(path: str) -> bool:
         "/cover.png",
         PUBLIC_MANUAL_GENERATE_PATH,
         "/briefing/generate",
+        "/briefing/dry-run",
         "/briefing/test-push",
         "/briefing/latest",
     } or path.startswith("/media/episodes/")
