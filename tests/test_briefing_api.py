@@ -45,12 +45,14 @@ def test_briefing_endpoints_are_wired_when_enabled(app_config_path: Path, tmp_pa
     with TestClient(create_app(config_path=app_config_path)) as client:
         generate_response = client.post("/briefing/generate")
         latest_response = client.get("/briefing/latest")
+        dry_run_readout = client.get("/briefing/dry-run")
         runtime = client.app.state.runtime
 
     assert generate_response.status_code == 202
     assert generate_response.json() == {"status": "accepted"}
     # The only configured source is unreachable, so nothing can have been generated yet.
     assert latest_response.status_code == 404
+    assert dry_run_readout.status_code == 404
     assert runtime.briefing_service is not None
 
 
@@ -132,12 +134,15 @@ def test_briefing_generate_conflicts_when_disabled(app_config_path: Path) -> Non
     with TestClient(create_app(config_path=app_config_path)) as client:
         generate_response = client.post("/briefing/generate")
         dry_run_response = client.post("/briefing/dry-run")
+        dry_run_readout = client.get("/briefing/dry-run")
         push_response = client.post("/briefing/test-push")
         latest_response = client.get("/briefing/latest")
 
     assert generate_response.status_code == 409
     assert dry_run_response.status_code == 409
     assert dry_run_response.json() == {"detail": "briefing is not enabled"}
+    assert dry_run_readout.status_code == 409
+    assert dry_run_readout.json() == {"detail": "briefing is not enabled"}
     assert push_response.status_code == 409
     assert push_response.json() == {"detail": "briefing is not enabled"}
     assert latest_response.status_code == 404
@@ -192,6 +197,7 @@ def test_briefing_generate_returns_409_while_a_run_is_in_progress(
         try:
             response = client.post("/briefing/generate")
             dry_run_response = client.post("/briefing/dry-run")
+            dry_run_readout = client.get("/briefing/dry-run")
         finally:
             service._run_reserved = False
 
@@ -199,6 +205,8 @@ def test_briefing_generate_returns_409_while_a_run_is_in_progress(
     assert response.json() == {"detail": "briefing run already in progress"}
     assert dry_run_response.status_code == 409
     assert dry_run_response.json() == {"detail": "briefing run already in progress"}
+    # The GET readout only reports finished runs; an in-progress run has none yet.
+    assert dry_run_readout.status_code == 404
 
 
 def test_briefing_generate_accepts_the_force_parameter(

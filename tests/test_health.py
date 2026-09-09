@@ -103,9 +103,7 @@ def test_public_only_briefing_dry_run_requires_configured_bearer_token(
             )
             # Briefing is disabled in this minimal config, so a valid token
             # proves the route was reached and answered from the handler.
-            valid = client.post(
-                "/briefing/dry-run", headers={"Authorization": f"Bearer {token}"}
-            )
+            valid = client.post("/briefing/dry-run", headers={"Authorization": f"Bearer {token}"})
     finally:
         factory.kw["bind"].dispose()
 

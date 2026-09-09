@@ -216,28 +216,93 @@ class BriefingService:
         finally:
             self._run_reserved = False
 
+    def create_dry_run_task(self) -> asyncio.Task[BriefingDryRunReport]:
+        """Start one background dry run, failing fast when another run is in progress.
+
+        The synchronous endpoint variant cannot survive production gateway
+        timeouts (a full generation outlives the proxied connection), so the
+        result is persisted as a JSON report below the dry-run directory for
+        the GET readout instead of being returned inline.
+        """
+        self._try_reserve_run()
+        try:
+            return asyncio.create_task(self._dry_run_reserved_body())
+        except Exception:
+            self._run_reserved = False
+            raise
+
+    async def _dry_run_reserved_body(self) -> BriefingDryRunReport:
+        """Execute the dry run in the reserved slot, persist the report, release the slot."""
+        try:
+            report = await self.dry_run_body()
+            self._write_dry_run_report(report)
+            return report
+        finally:
+            self._run_reserved = False
+
+    def _write_dry_run_report(self, report: BriefingDryRunReport) -> Path:
+        """Persist one machine-readable dry-run outcome for the acceptance readout."""
+        payload = {
+            "date": report.date,
+            "dry_run": True,
+            "finished_at": self._clock.now()
+            .astimezone(self._timezone)
+            .isoformat(timespec="seconds"),
+            "merged_markdown": report.merged_markdown,
+            "categories": [
+                {
+                    "category": entry.category,
+                    "status": entry.status,
+                    "article_count": entry.article_count,
+                    "file_path": str(entry.file_path) if entry.file_path else None,
+                    "push_status": entry.push_status,
+                    "error": entry.error,
+                    "reason": entry.reason,
+                }
+                for entry in report.categories
+            ],
+        }
+        target = self._dry_run_dir() / f"{report.date}-report.json"
+        _atomic_write(target, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        return target
+
+    def latest_dry_run_report(self) -> dict[str, object] | None:
+        """Return the most recent persisted dry-run report, if any."""
+        reports = sorted(self._dry_run_dir().glob("*-report.json"))
+        if not reports:
+            return None
+        try:
+            payload = json.loads(reports[-1].read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
     async def dry_run(self) -> BriefingDryRunReport:
-        """Generate one full briefing and return it without any delivery side effect.
+        """Generate one full briefing and return it without any delivery side effect."""
+        self._try_reserve_run()
+        try:
+            return await self.dry_run_body()
+        finally:
+            self._run_reserved = False
+
+    async def dry_run_body(self) -> BriefingDryRunReport:
+        """Dry-run core without slot management; callers own the run-slot lifecycle.
 
         Unlike ``prepare`` this never writes the marker that the 08:30 delivery
         tick consumes, so a rehearsal can never leak into the scheduled send;
         output files land below a ``dry-run`` subdirectory the acceptance
         readout ignores, and operator alerts stay silent.
         """
-        self._try_reserve_run()
-        try:
-            prepared = await self._prepare_once(force=True, dry_run=True)
-            merged_path = self._dry_run_dir() / f"{prepared.briefing_date.isoformat()}-merged.md"
-            merged_markdown: str | None = None
-            with contextlib.suppress(FileNotFoundError):
-                merged_markdown = merged_path.read_text(encoding="utf-8")
-            return BriefingDryRunReport(
-                date=prepared.briefing_date.isoformat(),
-                categories=prepared.report.categories,
-                merged_markdown=merged_markdown,
-            )
-        finally:
-            self._run_reserved = False
+        prepared = await self._prepare_once(force=True, dry_run=True)
+        merged_path = self._dry_run_dir() / f"{prepared.briefing_date.isoformat()}-merged.md"
+        merged_markdown: str | None = None
+        with contextlib.suppress(FileNotFoundError):
+            merged_markdown = merged_path.read_text(encoding="utf-8")
+        return BriefingDryRunReport(
+            date=prepared.briefing_date.isoformat(),
+            categories=prepared.report.categories,
+            merged_markdown=merged_markdown,
+        )
 
     async def deliver_prepared(self) -> BriefingRunReport:
         """Post only the report prepared for this delivery day; never generate at 08:30."""
