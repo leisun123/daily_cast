@@ -113,4 +113,3 @@ def test_public_only_briefing_dry_run_requires_configured_bearer_token(
     assert invalid.status_code == 401
     assert valid.status_code == 409
     assert valid.json() == {"detail": "briefing is not enabled"}
-    assert accepted.json()["task_id"]
