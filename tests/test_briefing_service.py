@@ -303,6 +303,47 @@ def _llm_payload(source_url: str, source_name: str) -> dict[str, object]:
     }
 
 
+def test_category_generation_survives_unknown_item_fields_from_the_model(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A decorative extra key (seen in production as theme_detail) must not degrade a category."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    _seed_source(session_factory, "ai-source", category="ai")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [_candidate("telecom-source", "t1")],
+            "ai-source": [_candidate("ai-source", "a1")],
+        }
+    )
+    telecom_payload = _llm_payload("https://telecom-source.example.test/t1", "来源 telecom-source")
+    assert isinstance(telecom_payload["items"], list)
+    telecom_payload["items"][0]["theme_detail"] = ""  # type: ignore[index]
+    telecom_payload["items"][0]["theme"] = "算力网络"  # type: ignore[index]
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": telecom_payload,
+            "AI 动态日报": _llm_payload("https://ai-source.example.test/a1", "来源 ai-source"),
+            "最终「昨日关注」": {"focus": "总结。"},
+        }
+    )
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+    )
+
+    report = asyncio.run(service.prepare())
+
+    statuses = {entry.category: entry.status for entry in report.categories}
+    assert statuses["telecom"] == "generated"
+    assert statuses["ai"] == "generated"
+    markdown = (tmp_path / "briefings" / f"{report.date}-merged.md").read_text(encoding="utf-8")
+    assert "降级" not in markdown
+    assert "算力网络" in markdown
+
+
 def _llm_payloads(source_urls: Sequence[str], source_name: str) -> dict[str, object]:
     """Return one detailed evidence-backed entry for every supplied article URL."""
     return {
