@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import ipaddress
 import json
@@ -135,6 +136,30 @@ class StrictUrlSafetyValidator:
     @staticmethod
     def _raise(code: str, summary: str, retryable: bool) -> NoReturn:
         raise SourceFetchError(SourceError(code=code, summary=summary, retryable=retryable))
+
+
+class HostFetchThrottle:
+    """Bound page fetches globally and per hostname.
+
+    Different sites may be polled in parallel, but one site never sees more
+    than ``per_host_limit`` simultaneous fetches: small news sites (C114,
+    ministry portals) throttle or drop bursts from a single client, which
+    otherwise silently empties the candidate pool. One instance is shared by
+    every fetch call site in the process; it must be used from one event loop.
+    """
+
+    def __init__(self, global_limit: int = 5, per_host_limit: int = 1) -> None:
+        self._global = asyncio.Semaphore(global_limit)
+        self._per_host_limit = per_host_limit
+        self._per_host: dict[str, asyncio.Semaphore] = {}
+
+    @contextlib.asynccontextmanager
+    async def slot(self, url: str):
+        """Acquire the per-host slot first, then the global slot."""
+        host = (urlsplit(url).hostname or "").lower()
+        semaphore = self._per_host.setdefault(host, asyncio.Semaphore(self._per_host_limit))
+        async with semaphore, self._global:
+            yield
 
 
 class SafeHttpFetcher:

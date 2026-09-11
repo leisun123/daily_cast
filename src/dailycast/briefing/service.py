@@ -52,7 +52,12 @@ from dailycast.llm.contracts import LLMProvider
 from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.news.service import NewsProcessor
 from dailycast.sources.contracts import CollectionWindow
-from dailycast.sources.extraction import ContentExtractor, ExtractedArticle, FetchPolicy
+from dailycast.sources.extraction import (
+    ContentExtractor,
+    ExtractedArticle,
+    FetchPolicy,
+    HostFetchThrottle,
+)
 from dailycast.sources.service import (
     ArticleService,
     ExtractionTarget,
@@ -71,10 +76,6 @@ ALREADY_COMPLETED = "already_completed"
 ALREADY_PREPARED = "already_prepared"
 NO_ELIGIBLE_ARTICLES = "no_eligible_articles"
 NOT_PREPARED = "not_prepared"
-# Bound concurrent page fetches inside one preparation run: enough parallelism
-# to keep slow sources from serializing the batch, low enough to stay polite
-# to the polled sites and to keep SQLite writes serialized afterwards.
-_EXTRACT_CONCURRENCY = 5
 
 
 class BriefingRunInProgressError(RuntimeError):
@@ -172,6 +173,7 @@ class BriefingService:
         self._collection_service = collection_service
         self._article_service = article_service
         self._extractor = extractor
+        self._fetch_throttle = HostFetchThrottle(global_limit=5, per_host_limit=1)
         self._news_processor = news_processor
         self._llm_provider = llm_provider
         self._notifier = notifier
@@ -551,12 +553,11 @@ class BriefingService:
         serially after every page has landed, keeping SQLite writes serialized.
         """
         targets = self._article_service.extraction_targets(article_ids)
-        semaphore = asyncio.Semaphore(_EXTRACT_CONCURRENCY)
 
         async def extract(
             target: ExtractionTarget,
         ) -> tuple[ExtractionTarget, ExtractedArticle]:
-            async with semaphore:
+            async with self._fetch_throttle.slot(target.url):
                 extracted = await self._extractor.extract(
                     target.url,
                     FetchPolicy(timeout_seconds=target.timeout_seconds),
@@ -588,12 +589,11 @@ class BriefingService:
             for target in self._article_service.verification_targets(article_ids)
             if target.article_id not in fetched_this_run
         ]
-        semaphore = asyncio.Semaphore(_EXTRACT_CONCURRENCY)
 
         async def verify(
             target: ExtractionTarget,
         ) -> tuple[ExtractionTarget, ExtractedArticle]:
-            async with semaphore:
+            async with self._fetch_throttle.slot(target.url):
                 extracted = await self._extractor.extract(
                     target.url,
                     FetchPolicy(timeout_seconds=target.timeout_seconds),

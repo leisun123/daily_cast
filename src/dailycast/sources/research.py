@@ -32,7 +32,12 @@ from dailycast.sources.contracts import (
     CollectionWindow,
     SourceError,
 )
-from dailycast.sources.extraction import ContentExtractor, ExtractedArticle, FetchPolicy
+from dailycast.sources.extraction import (
+    ContentExtractor,
+    ExtractedArticle,
+    FetchPolicy,
+    HostFetchThrottle,
+)
 
 _DISCOVERY_HOSTS = frozenset(
     {
@@ -50,7 +55,6 @@ _BRIEFING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _JAPANESE_KANA = re.compile(r"[\u3040-\u30ff]")
 _LATIN_LETTER = re.compile(r"[A-Za-z]")
-_VERIFY_CONCURRENCY = 5
 _RESEARCH_FACETS: dict[Literal["telecom", "ai"], tuple[str, ...]] = {
     "telecom": (
         "常州市及所属辖区的中国移动、中国电信、中国联通经营、基站、网络建设、政策和项目动态",
@@ -122,6 +126,7 @@ class ResearchCollector:
     ) -> None:
         self._provider = provider
         self._extractor = extractor
+        self._fetch_throttle = HostFetchThrottle(global_limit=5, per_host_limit=1)
         self._settings = settings
 
     async def collect(self, source: Source, window: CollectionWindow) -> CollectionResult:
@@ -222,12 +227,10 @@ class ResearchCollector:
                 continue
             fetch_targets.append((facet, discovered_candidate, structured))
 
-        semaphore = asyncio.Semaphore(_VERIFY_CONCURRENCY)
-
         async def fetch_candidate(
             discovered_candidate: WebResearchCandidate,
         ) -> ExtractedArticle:
-            async with semaphore:
+            async with self._fetch_throttle.slot(discovered_candidate.url):
                 return await self._extractor.extract(
                     discovered_candidate.url,
                     FetchPolicy(timeout_seconds=float(source.request_timeout_seconds or 20)),
