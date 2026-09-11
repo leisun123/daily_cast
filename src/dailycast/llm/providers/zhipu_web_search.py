@@ -123,14 +123,17 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         options = self._semantic_options(model_options)
         options.pop("response_format", None)
         context_size = options.pop("search_context_size", "medium")
-        if context_size not in _SEARCH_RESULT_COUNTS:
+        result_count = (
+            _SEARCH_RESULT_COUNTS.get(context_size) if isinstance(context_size, str) else None
+        )
+        if result_count is None:
             msg = "web research search_context_size must be low, medium, or high"
             raise ValueError(msg)
         fallback_queries = _search_queries(options.pop("search_queries", None), messages)
         queries = await self._generate_search_queries(messages, options)
         if not queries:
             queries = fallback_queries
-        items = await self._collect_search_items(queries, _SEARCH_RESULT_COUNTS[context_size])
+        items = await self._collect_search_items(queries, result_count)
         if not items:
             return StructuredResult(
                 content={"candidates": []},

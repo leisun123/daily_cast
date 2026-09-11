@@ -1622,6 +1622,163 @@ def test_briefing_run_rejects_stale_date_found_during_body_extraction(
     assert llm.operations == []
 
 
+class RecordingExtractor(ContentExtractor):
+    """Extract successfully while recording every requested URL."""
+
+    def __init__(self, content: str, *, published_at: datetime | None = None) -> None:
+        self._content = content
+        self._published_at = published_at or (datetime.now(UTC) - timedelta(hours=2))
+        self.requested_urls: list[str] = []
+
+    async def extract(self, url: str, policy: FetchPolicy) -> ExtractedArticle:
+        """Record the URL and answer with a canned successful extraction."""
+        del policy
+        self.requested_urls.append(url)
+        return ExtractedArticle(
+            requested_url=url,
+            final_url=url,
+            content_text=self._content,
+            http_status=200,
+            fetched_at=datetime.now(UTC),
+            published_at=self._published_at,
+        )
+
+
+def test_verify_skips_articles_fetched_earlier_in_the_same_run(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A page fetched during extraction is proven reachable; verify must not refetch it."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    _seed_source(session_factory, "ai-source", category="ai")
+    # No body on the feed candidate: extraction must fetch, and those successes
+    # must stay eligible without a second verification GET.
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate(
+                    "telecom-source",
+                    f"t{index}",
+                    content_text="",
+                    published_at=None,
+                )
+                for index in range(1, 3)
+            ],
+            "ai-source": [
+                _candidate("ai-source", f"a{index}", content_text="", published_at=None)
+                for index in range(1, 3)
+            ],
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payloads(
+                [f"https://telecom-source.example.test/t{index}" for index in range(1, 3)],
+                "来源 telecom-source",
+            ),
+            "AI 动态日报": _llm_payloads(
+                [f"https://ai-source.example.test/a{index}" for index in range(1, 3)],
+                "来源 ai-source",
+            ),
+            "最终「昨日关注」": {"focus": "总结。"},
+        }
+    )
+    extractor = RecordingExtractor("抓取的正文内容。" * 10)
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        extractor=extractor,
+    )
+
+    report = asyncio.run(service.prepare())
+
+    assert {entry.status for entry in report.categories} == {"generated"}
+    # Every candidate URL was fetched exactly once: extraction proves the page
+    # is reachable, so the verification pass only refetches articles whose
+    # extraction did not happen in this run (none here).
+    assert sorted(extractor.requested_urls) == sorted(
+        [
+            "https://telecom-source.example.test/t1",
+            "https://telecom-source.example.test/t2",
+            "https://ai-source.example.test/a1",
+            "https://ai-source.example.test/a2",
+        ]
+    )
+
+
+def test_extract_failure_is_not_refetched_by_verify(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A settled extract failure must not trigger a second full fetch of the same URL."""
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    _seed_source(session_factory, "ai-source", category="ai")
+    good_url = "https://telecom-source.example.test/t1"
+    bad_url = "https://telecom-source.example.test/t2"
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate("telecom-source", "t1", content_text="", published_at=None),
+                _candidate("telecom-source", "t2", content_text="", published_at=None),
+            ],
+            "ai-source": [_candidate("ai-source", "a1")],
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payloads([good_url], "来源 telecom-source"),
+            "AI 动态日报": _llm_payloads(["https://ai-source.example.test/a1"], "来源 ai-source"),
+            "最终「昨日关注」": {"focus": "总结。"},
+        }
+    )
+
+    class SelectiveFailureExtractor(ContentExtractor):
+        def __init__(self) -> None:
+            self.requested_urls: list[str] = []
+
+        async def extract(self, url: str, policy: FetchPolicy) -> ExtractedArticle:
+            del policy
+            self.requested_urls.append(url)
+            if url == bad_url:
+                return ExtractedArticle(
+                    requested_url=url,
+                    final_url=None,
+                    content_text=None,
+                    http_status=None,
+                    fetched_at=None,
+                    error=SourceError(
+                        code="HTTP_STATUS",
+                        summary="source returned HTTP 403",
+                        retryable=False,
+                    ),
+                )
+            return ExtractedArticle(
+                requested_url=url,
+                final_url=url,
+                content_text="抓取的正文内容。" * 10,
+                http_status=200,
+                fetched_at=datetime.now(UTC),
+                published_at=datetime.now(UTC) - timedelta(hours=2),
+            )
+
+    extractor = SelectiveFailureExtractor()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        extractor=extractor,
+    )
+
+    report = asyncio.run(service.prepare())
+
+    assert {entry.status for entry in report.categories} == {"generated"}
+    assert extractor.requested_urls.count(bad_url) == 1
+    assert extractor.requested_urls.count(good_url) == 1
+
+
 def test_briefing_run_rejects_article_without_verified_publication_date(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:

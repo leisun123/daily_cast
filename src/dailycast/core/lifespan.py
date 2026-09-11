@@ -165,6 +165,7 @@ def build_lifespan(
         briefing_scheduler: BriefingScheduler | None = None
         publication_dispatcher: PublicationDispatcher | None = None
         llm_client: httpx.AsyncClient | None = None
+        fetch_client: httpx.AsyncClient | None = None
         if startup_revision_status is not None and startup_revision_status.is_current:
             created_source_count = seed_missing_sources(
                 session_factory,
@@ -173,7 +174,20 @@ def build_lifespan(
             logger.info(
                 "source_seed_completed", extra={"created_source_count": created_source_count}
             )
-            fetcher = SafeHttpFetcher()
+            # One shared HTTP client for every source fetch: connections are
+            # pooled across collectors, extract, and verify instead of paying
+            # a fresh TLS handshake per page. Per-request timeouts still come
+            # from each FetchPolicy; redirects stay manually followed so every
+            # hop keeps its SSRF safety check.
+            fetch_client = httpx.AsyncClient(
+                follow_redirects=False,
+                # Keep the same identification the per-request client used so
+                # shared-client fetches are not treated as an unknown bot.
+                headers={"User-Agent": "DailyCast/0.1 (+https://github.com/)"},
+                timeout=httpx.Timeout(30.0),
+                limits=httpx.Limits(max_connections=20),
+            )
+            fetcher = SafeHttpFetcher(client=fetch_client)
             article_service = ArticleService(session_factory)
             processing_policy = ProcessingPolicy(
                 max_age_hours=settings.processing.max_age_hours,
@@ -376,6 +390,8 @@ def build_lifespan(
                 await executor.shutdown(grace_seconds=30)
             if llm_client is not None:
                 await llm_client.aclose()
+            if fetch_client is not None:
+                await fetch_client.aclose()
             engine.dispose()
             logger.info("application_stopped")
 

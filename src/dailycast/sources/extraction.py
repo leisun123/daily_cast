@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import ipaddress
 import json
 import re
 import socket
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from html.parser import HTMLParser
@@ -20,6 +21,8 @@ import httpx
 import trafilatura
 
 from dailycast.sources.contracts import ExtractedArticle, SourceError
+
+__all__ = ["ExtractedArticle", "HostFetchThrottle", "SafeHttpFetcher"]
 
 _CHALLENGE_MARKERS = (
     "just a moment",
@@ -135,6 +138,32 @@ class StrictUrlSafetyValidator:
     @staticmethod
     def _raise(code: str, summary: str, retryable: bool) -> NoReturn:
         raise SourceFetchError(SourceError(code=code, summary=summary, retryable=retryable))
+
+
+class HostFetchThrottle:
+    """Bound page fetches globally and per hostname.
+
+    Different sites may be polled in parallel, but one site never sees more
+    than ``per_host_limit`` simultaneous fetches: small news sites (C114,
+    ministry portals) throttle or drop bursts from a single client, which
+    otherwise silently empties the candidate pool. BriefingService and
+    ResearchCollector currently hold separate instances; pass one shared
+    instance if those phases ever run concurrently. Use from a single event
+    loop only.
+    """
+
+    def __init__(self, global_limit: int = 5, per_host_limit: int = 1) -> None:
+        self._global = asyncio.Semaphore(global_limit)
+        self._per_host_limit = per_host_limit
+        self._per_host: dict[str, asyncio.Semaphore] = {}
+
+    @contextlib.asynccontextmanager
+    async def slot(self, url: str) -> AsyncIterator[None]:
+        """Acquire the per-host slot first, then the global slot."""
+        host = (urlsplit(url).hostname or "").lower()
+        semaphore = self._per_host.setdefault(host, asyncio.Semaphore(self._per_host_limit))
+        async with semaphore, self._global:
+            yield
 
 
 class SafeHttpFetcher:

@@ -177,9 +177,14 @@ class ArticleService:
         targets: list[ExtractionTarget] = []
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
-            articles = ArticleRepository(unit.session)
-            sources = SourceRepository(unit.session)
-            for article in articles.list_by_ids(article_ids):
+            articles = ArticleRepository(unit.session).list_by_ids(article_ids)
+            source_map = {
+                source.id: source
+                for source in SourceRepository(unit.session).list_by_ids(
+                    tuple({article.source_id for article in articles})
+                )
+            }
+            for article in articles:
                 if article.content_text:
                     continue
                 if article.status not in {
@@ -187,7 +192,7 @@ class ArticleService:
                     ArticleStatus.EXTRACTION_FAILED,
                 }:
                     continue
-                source = sources.get(article.source_id)
+                source = source_map.get(article.source_id)
                 if source is None:
                     continue
                 targets.append(
@@ -206,10 +211,15 @@ class ArticleService:
         targets: list[ExtractionTarget] = []
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
-            articles = ArticleRepository(unit.session)
-            sources = SourceRepository(unit.session)
-            for article in articles.list_by_ids(article_ids):
-                source = sources.get(article.source_id)
+            articles = ArticleRepository(unit.session).list_by_ids(article_ids)
+            source_map = {
+                source.id: source
+                for source in SourceRepository(unit.session).list_by_ids(
+                    tuple({article.source_id for article in articles})
+                )
+            }
+            for article in articles:
+                source = source_map.get(article.source_id)
                 if source is None:
                     continue
                 targets.append(
