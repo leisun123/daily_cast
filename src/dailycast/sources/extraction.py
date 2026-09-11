@@ -146,8 +146,10 @@ class HostFetchThrottle:
     Different sites may be polled in parallel, but one site never sees more
     than ``per_host_limit`` simultaneous fetches: small news sites (C114,
     ministry portals) throttle or drop bursts from a single client, which
-    otherwise silently empties the candidate pool. One instance is shared by
-    every fetch call site in the process; it must be used from one event loop.
+    otherwise silently empties the candidate pool. BriefingService and
+    ResearchCollector currently hold separate instances; pass one shared
+    instance if those phases ever run concurrently. Use from a single event
+    loop only.
     """
 
     def __init__(self, global_limit: int = 5, per_host_limit: int = 1) -> None:

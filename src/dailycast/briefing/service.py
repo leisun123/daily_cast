@@ -145,6 +145,14 @@ class _PreparedRun:
     should_deliver: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _ExtractionBatch:
+    """Which article pages this prepare run already fetched and with what outcome."""
+
+    succeeded: frozenset[int]
+    attempted: frozenset[int]
+
+
 class BriefingService:
     """Generate independently selected category briefs and one merged WeCom delivery."""
 
@@ -396,9 +404,9 @@ class BriefingService:
         if not sources:
             logger.warning("briefing found no enabled sources tagged with briefing_category")
         collection = await self._collection_service.collect_sources(sources, window)
-        extracted_this_run = await self._extract_missing_bodies(collection.article_ids)
+        extraction = await self._extract_missing_bodies(collection.article_ids)
         verified_article_ids = await self._verify_reader_links(
-            collection.article_ids, fetched_this_run=extracted_this_run
+            collection.article_ids, extraction=extraction
         )
         minimum_freshness_hours = ceil((now - window.start).total_seconds() / 3600)
         filtered = self._news_processor.filter(
@@ -545,8 +553,10 @@ class BriefingService:
                 and (self._briefing_source_ids is None or source.id in self._briefing_source_ids)
             )
 
-    async def _extract_missing_bodies(self, article_ids: tuple[int, ...]) -> set[int]:
-        """Extract candidates concurrently; return ids whose page was fetched this run.
+    async def _extract_missing_bodies(
+        self, article_ids: tuple[int, ...]
+    ) -> _ExtractionBatch:
+        """Extract candidates concurrently; record which pages this run already settled.
 
         The fetches share one bounded semaphore and run without holding any
         database transaction; the per-article persistence replay happens
@@ -565,29 +575,32 @@ class BriefingService:
             return target, extracted
 
         results = await asyncio.gather(*(extract(target) for target in targets))
-        fetched_this_run: set[int] = set()
+        succeeded: set[int] = set()
+        attempted: set[int] = set()
         for target, extracted in results:
+            attempted.add(target.article_id)
             if extracted.error is None:
                 self._article_service.apply_extraction(target.article_id, extracted)
-                fetched_this_run.add(target.article_id)
+                succeeded.add(target.article_id)
             else:
                 self._article_service.record_extraction_failure(target.article_id, extracted)
-        return fetched_this_run
+        return _ExtractionBatch(succeeded=frozenset(succeeded), attempted=frozenset(attempted))
 
     async def _verify_reader_links(
-        self, article_ids: tuple[int, ...], *, fetched_this_run: set[int]
+        self, article_ids: tuple[int, ...], *, extraction: _ExtractionBatch
     ) -> tuple[int, ...]:
         """Keep only source pages that can be opened from the delivery environment.
 
-        Pages fetched successfully earlier in this same run are already proven
-        reachable, so re-fetching them would only double the network cost; the
-        verification pass re-checks the remaining articles, whose saved content
-        predates this run and may sit behind a page that has since gone away.
+        A successful extract in this same run already proves the page is
+        reachable, so those article ids stay verified without a second fetch.
+        A failed extract is also settled: re-GETting the same URL would only
+        burn another timeout. Remaining articles (saved content predates this
+        run) are re-checked so a page that has since gone away is dropped.
         """
         targets = [
             target
             for target in self._article_service.verification_targets(article_ids)
-            if target.article_id not in fetched_this_run
+            if target.article_id not in extraction.attempted
         ]
 
         async def verify(
@@ -601,7 +614,7 @@ class BriefingService:
             return target, extracted
 
         results = await asyncio.gather(*(verify(target) for target in targets))
-        verified: list[int] = []
+        verified: list[int] = sorted(extraction.succeeded)
         for target, extracted in results:
             if extracted.error is None:
                 verified.append(target.article_id)

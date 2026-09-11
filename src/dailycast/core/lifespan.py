@@ -181,6 +181,9 @@ def build_lifespan(
             # hop keeps its SSRF safety check.
             fetch_client = httpx.AsyncClient(
                 follow_redirects=False,
+                # Keep the same identification the per-request client used so
+                # shared-client fetches are not treated as an unknown bot.
+                headers={"User-Agent": "DailyCast/0.1 (+https://github.com/)"},
                 timeout=httpx.Timeout(30.0),
                 limits=httpx.Limits(max_connections=20),
             )
