@@ -52,9 +52,10 @@ from dailycast.llm.contracts import LLMProvider
 from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.news.service import NewsProcessor
 from dailycast.sources.contracts import CollectionWindow
-from dailycast.sources.extraction import ContentExtractor, FetchPolicy
+from dailycast.sources.extraction import ContentExtractor, ExtractedArticle, FetchPolicy
 from dailycast.sources.service import (
     ArticleService,
+    ExtractionTarget,
     SourceCollectionService,
     briefing_category_for_source,
 )
@@ -70,6 +71,10 @@ ALREADY_COMPLETED = "already_completed"
 ALREADY_PREPARED = "already_prepared"
 NO_ELIGIBLE_ARTICLES = "no_eligible_articles"
 NOT_PREPARED = "not_prepared"
+# Bound concurrent page fetches inside one preparation run: enough parallelism
+# to keep slow sources from serializing the batch, low enough to stay polite
+# to the polled sites and to keep SQLite writes serialized afterwards.
+_EXTRACT_CONCURRENCY = 5
 
 
 class BriefingRunInProgressError(RuntimeError):
@@ -389,8 +394,10 @@ class BriefingService:
         if not sources:
             logger.warning("briefing found no enabled sources tagged with briefing_category")
         collection = await self._collection_service.collect_sources(sources, window)
-        await self._extract_missing_bodies(collection.article_ids)
-        verified_article_ids = await self._verify_reader_links(collection.article_ids)
+        extracted_this_run = await self._extract_missing_bodies(collection.article_ids)
+        verified_article_ids = await self._verify_reader_links(
+            collection.article_ids, fetched_this_run=extracted_this_run
+        )
         minimum_freshness_hours = ceil((now - window.start).total_seconds() / 3600)
         filtered = self._news_processor.filter(
             verified_article_ids,
@@ -400,18 +407,25 @@ class BriefingService:
         evidence_by_category = self._build_evidence(deduplicated.primary_article_ids, window)
         reports: list[BriefingCategoryReport] = []
         pending_deliveries: list[_PendingBriefingDelivery] = []
-        for category in CATEGORY_TITLES:
-            evidence = evidence_by_category.get(category, ())
-            category_report, pending_delivery = await self._run_category(
-                category,
-                briefing_date,
-                evidence,
-                provider,
-                marker_date=run_date,
-                issue_date=run_date,
-                force=force or dry_run,
-                dry_run=dry_run,
+        # The two category pools are independent, so their selection and prose
+        # generation run concurrently; gather preserves CATEGORY_TITLES order
+        # and each category keeps its own fallback-on-failure path.
+        category_results = await asyncio.gather(
+            *(
+                self._run_category(
+                    category,
+                    briefing_date,
+                    evidence_by_category.get(category, ()),
+                    provider,
+                    marker_date=run_date,
+                    issue_date=run_date,
+                    force=force or dry_run,
+                    dry_run=dry_run,
+                )
+                for category in CATEGORY_TITLES
             )
+        )
+        for category_report, pending_delivery in category_results:
             reports.append(category_report)
             if pending_delivery is not None:
                 pending_deliveries.append(pending_delivery)
@@ -529,26 +543,66 @@ class BriefingService:
                 and (self._briefing_source_ids is None or source.id in self._briefing_source_ids)
             )
 
-    async def _extract_missing_bodies(self, article_ids: tuple[int, ...]) -> None:
-        """Extract each candidate separately so one bad page does not stop the run."""
-        for target in self._article_service.extraction_targets(article_ids):
-            extracted = await self._extractor.extract(
-                target.url,
-                FetchPolicy(timeout_seconds=target.timeout_seconds),
-            )
+    async def _extract_missing_bodies(self, article_ids: tuple[int, ...]) -> set[int]:
+        """Extract candidates concurrently; return ids whose page was fetched this run.
+
+        The fetches share one bounded semaphore and run without holding any
+        database transaction; the per-article persistence replay happens
+        serially after every page has landed, keeping SQLite writes serialized.
+        """
+        targets = self._article_service.extraction_targets(article_ids)
+        semaphore = asyncio.Semaphore(_EXTRACT_CONCURRENCY)
+
+        async def extract(
+            target: ExtractionTarget,
+        ) -> tuple[ExtractionTarget, ExtractedArticle]:
+            async with semaphore:
+                extracted = await self._extractor.extract(
+                    target.url,
+                    FetchPolicy(timeout_seconds=target.timeout_seconds),
+                )
+            return target, extracted
+
+        results = await asyncio.gather(*(extract(target) for target in targets))
+        fetched_this_run: set[int] = set()
+        for target, extracted in results:
             if extracted.error is None:
                 self._article_service.apply_extraction(target.article_id, extracted)
+                fetched_this_run.add(target.article_id)
             else:
                 self._article_service.record_extraction_failure(target.article_id, extracted)
+        return fetched_this_run
 
-    async def _verify_reader_links(self, article_ids: tuple[int, ...]) -> tuple[int, ...]:
-        """Keep only source pages that can be opened from the delivery environment."""
+    async def _verify_reader_links(
+        self, article_ids: tuple[int, ...], *, fetched_this_run: set[int]
+    ) -> tuple[int, ...]:
+        """Keep only source pages that can be opened from the delivery environment.
+
+        Pages fetched successfully earlier in this same run are already proven
+        reachable, so re-fetching them would only double the network cost; the
+        verification pass re-checks the remaining articles, whose saved content
+        predates this run and may sit behind a page that has since gone away.
+        """
+        targets = [
+            target
+            for target in self._article_service.verification_targets(article_ids)
+            if target.article_id not in fetched_this_run
+        ]
+        semaphore = asyncio.Semaphore(_EXTRACT_CONCURRENCY)
+
+        async def verify(
+            target: ExtractionTarget,
+        ) -> tuple[ExtractionTarget, ExtractedArticle]:
+            async with semaphore:
+                extracted = await self._extractor.extract(
+                    target.url,
+                    FetchPolicy(timeout_seconds=target.timeout_seconds),
+                )
+            return target, extracted
+
+        results = await asyncio.gather(*(verify(target) for target in targets))
         verified: list[int] = []
-        for target in self._article_service.verification_targets(article_ids):
-            extracted = await self._extractor.extract(
-                target.url,
-                FetchPolicy(timeout_seconds=target.timeout_seconds),
-            )
+        for target, extracted in results:
             if extracted.error is None:
                 verified.append(target.article_id)
                 continue
@@ -566,12 +620,21 @@ class BriefingService:
     ) -> dict[str, tuple[RankedBriefingEvidence, ...]]:
         """Build in-window, publisher-balanced candidates for LLM editorial selection."""
         grouped: dict[str, list[BriefingSelectionCandidate]] = {}
+        inferred_dropped: dict[str, int] = {}
         with UnitOfWork(self._session_factory) as unit:
             assert unit.session is not None
             for article in ArticleRepository(unit.session).list_by_ids(eligible_article_ids):
                 if not article.content_text:
                     continue
                 if article.published_at_inferred or not window.includes(article.published_at):
+                    # Candidates whose date could not be trusted (inferred
+                    # rather than verified) are excluded by policy; counting
+                    # them per source makes "the source is here but the daily
+                    # report is empty" diagnosable afterwards.
+                    if article.published_at_inferred:
+                        inferred_dropped[article.source_id] = (
+                            inferred_dropped.get(article.source_id, 0) + 1
+                        )
                     continue
                 category = briefing_category_for_source(article.source)
                 if category is None or category not in CATEGORY_TITLES:
@@ -591,6 +654,11 @@ class BriefingService:
                     evidence=evidence,
                 )
                 grouped.setdefault(category, []).append(candidate)
+        if inferred_dropped:
+            logger.warning(
+                "briefing dropped candidates with inferred publish dates",
+                extra={"dropped_by_source": inferred_dropped},
+            )
         return {
             category: select_evidence(
                 category,

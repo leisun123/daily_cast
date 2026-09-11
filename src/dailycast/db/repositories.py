@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import and_, delete, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from dailycast.db.models import (
     Article,
@@ -54,6 +55,13 @@ class SourceRepository:
     def get(self, source_id: str) -> Source | None:
         """Return a source by its stable configuration slug."""
         return self._session.get(Source, source_id)
+
+    def list_by_ids(self, source_ids: Sequence[str]) -> list[Source]:
+        """Return the sources named by id, keeping deterministic id order."""
+        if not source_ids:
+            return []
+        statement = select(Source).where(Source.id.in_(source_ids)).order_by(Source.id)
+        return list(self._session.scalars(statement))
 
     def list(self) -> list[Source]:
         """List sources in deterministic priority and identifier order."""
@@ -116,10 +124,19 @@ class ArticleRepository:
         return self._session.get(Article, article_id)
 
     def list_by_ids(self, article_ids: tuple[int, ...]) -> list[Article]:
-        """Return a deterministic subset for a pipeline checkpoint without scanning history."""
+        """Return a deterministic subset for a pipeline checkpoint without scanning history.
+
+        Sources are eager-loaded because every downstream consumer reads the
+        relationship; lazy-loading it would emit one query per article.
+        """
         if not article_ids:
             return []
-        statement = select(Article).where(Article.id.in_(article_ids)).order_by(Article.id)
+        statement = (
+            select(Article)
+            .where(Article.id.in_(article_ids))
+            .options(selectinload(Article.source))
+            .order_by(Article.id)
+        )
         return list(self._session.scalars(statement))
 
     def update(self, article: Article, **changes: Any) -> Article:

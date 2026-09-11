@@ -32,7 +32,7 @@ from dailycast.sources.contracts import (
     CollectionWindow,
     SourceError,
 )
-from dailycast.sources.extraction import ContentExtractor, FetchPolicy
+from dailycast.sources.extraction import ContentExtractor, ExtractedArticle, FetchPolicy
 
 _DISCOVERY_HOSTS = frozenset(
     {
@@ -50,6 +50,7 @@ _BRIEFING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _JAPANESE_KANA = re.compile(r"[\u3040-\u30ff]")
 _LATIN_LETTER = re.compile(r"[A-Za-z]")
+_VERIFY_CONCURRENCY = 5
 _RESEARCH_FACETS: dict[Literal["telecom", "ai"], tuple[str, ...]] = {
     "telecom": (
         "常州市及所属辖区的中国移动、中国电信、中国联通经营、基站、网络建设、政策和项目动态",
@@ -208,6 +209,10 @@ class ResearchCollector:
             source.max_items_per_run or 50,
             self._settings.max_candidates_per_source,
         )
+        # Fetch candidate pages concurrently with a bounded semaphore; results
+        # are processed in the interleaved order below so downstream behavior
+        # stays deterministic.
+        fetch_targets: list[tuple[str, WebResearchCandidate, StructuredResult]] = []
         for facet, discovered_candidate, structured in _interleave_discovered_records(
             discovered_records
         )[:candidate_limit]:
@@ -215,10 +220,28 @@ class ResearchCollector:
             if url_error is not None:
                 errors.append(url_error)
                 continue
-            extracted = await self._extractor.extract(
-                discovered_candidate.url,
-                FetchPolicy(timeout_seconds=float(source.request_timeout_seconds or 20)),
+            fetch_targets.append((facet, discovered_candidate, structured))
+
+        semaphore = asyncio.Semaphore(_VERIFY_CONCURRENCY)
+
+        async def fetch_candidate(
+            discovered_candidate: WebResearchCandidate,
+        ) -> ExtractedArticle:
+            async with semaphore:
+                return await self._extractor.extract(
+                    discovered_candidate.url,
+                    FetchPolicy(timeout_seconds=float(source.request_timeout_seconds or 20)),
+                )
+
+        extractions = await asyncio.gather(
+            *(
+                fetch_candidate(discovered_candidate)
+                for _facet, discovered_candidate, _structured in fetch_targets
             )
+        )
+        for (facet, discovered_candidate, structured), extracted in zip(
+            fetch_targets, extractions, strict=True
+        ):
             if extracted.error is not None:
                 errors.append(extracted.error)
                 continue
