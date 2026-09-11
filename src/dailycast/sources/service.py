@@ -181,7 +181,7 @@ class ArticleService:
             source_map = {
                 source.id: source
                 for source in SourceRepository(unit.session).list_by_ids(
-                    {article.source_id for article in articles}
+                    tuple({article.source_id for article in articles})
                 )
             }
             for article in articles:
@@ -215,7 +215,7 @@ class ArticleService:
             source_map = {
                 source.id: source
                 for source in SourceRepository(unit.session).list_by_ids(
-                    {article.source_id for article in articles}
+                    tuple({article.source_id for article in articles})
                 )
             }
             for article in articles:

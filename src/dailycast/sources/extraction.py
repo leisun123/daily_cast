@@ -9,7 +9,7 @@ import ipaddress
 import json
 import re
 import socket
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from html.parser import HTMLParser
@@ -21,6 +21,8 @@ import httpx
 import trafilatura
 
 from dailycast.sources.contracts import ExtractedArticle, SourceError
+
+__all__ = ["ExtractedArticle", "HostFetchThrottle", "SafeHttpFetcher"]
 
 _CHALLENGE_MARKERS = (
     "just a moment",
@@ -154,7 +156,7 @@ class HostFetchThrottle:
         self._per_host: dict[str, asyncio.Semaphore] = {}
 
     @contextlib.asynccontextmanager
-    async def slot(self, url: str):
+    async def slot(self, url: str) -> AsyncIterator[None]:
         """Acquire the per-host slot first, then the global slot."""
         host = (urlsplit(url).hostname or "").lower()
         semaphore = self._per_host.setdefault(host, asyncio.Semaphore(self._per_host_limit))

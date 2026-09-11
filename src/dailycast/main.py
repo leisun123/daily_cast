@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -18,7 +18,6 @@ from starlette.responses import Response
 
 from dailycast.briefing.service import (
     BriefingRunInProgressError,
-    BriefingRunReport,
     latest_briefing_date,
     read_briefings_for_date,
 )
@@ -463,7 +462,7 @@ def create_app(*, config_path: Path | None = None) -> FastAPI:
 app = create_app()
 
 
-def _log_briefing_task_result(task: asyncio.Task[BriefingRunReport]) -> None:
+def _log_briefing_task_result(task: asyncio.Task[Any]) -> None:
     """Surface a failed background briefing run instead of losing the exception."""
     if task.cancelled():
         return
