@@ -15,7 +15,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.renderer import RENDER_BYTE_BUDGET
-from dailycast.briefing.schemas import BriefingEvidence, BriefingItem, BriefingResult
+from dailycast.briefing.schemas import (
+    MAX_BRIEFING_ITEMS,
+    BriefingEvidence,
+    BriefingItem,
+    BriefingResult,
+)
 from dailycast.briefing.selection import (
     BriefingSelectionPolicy,
     RankedBriefingEvidence,
@@ -804,6 +809,96 @@ def test_background_dry_run_persists_a_machine_readable_report(
     assert list(output_dir.glob("*-merged.prepared.json")) == []
 
 
+def test_prepare_regenerates_a_thin_prepared_edition_then_skips_once_full(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The next preparation tick rebuilds a below-target edition, then skips when full."""
+    now = datetime(2026, 9, 10, 23, 45, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    _seed_source(session_factory, "ai-source", category="ai")
+    output_dir = tmp_path / "briefings"
+
+    def build(collector: FakeRSSCollector, llm: FakeBriefingLLM) -> BriefingService:
+        return _build_service(
+            session_factory,
+            output_dir,
+            collector=collector,
+            llm=llm,
+            notifier=RecordingNotifier(),
+            clock=FixedClock(now),
+        )
+
+    thin_llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payloads(
+                [f"https://telecom-source.example.test/t{index}" for index in range(1, 3)],
+                "来源 telecom-source",
+            ),
+            "AI 动态日报": _llm_payloads(
+                [f"https://ai-source.example.test/a{index}" for index in range(1, 3)],
+                "来源 ai-source",
+            ),
+            "最终「昨日关注」": {"focus": "薄版总结。"},
+        }
+    )
+    thin_collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate("telecom-source", f"t{index}", published_at=now - timedelta(hours=12))
+                for index in range(1, 3)
+            ],
+            "ai-source": [
+                _candidate("ai-source", f"a{index}", published_at=now - timedelta(hours=12))
+                for index in range(1, 3)
+            ],
+        }
+    )
+    first_report = asyncio.run(build(thin_collector, thin_llm).prepare())
+    assert {entry.status for entry in first_report.categories} == {"generated"}
+    marker_path = output_dir / "2026-09-11-merged.prepared.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["item_counts"] == {"telecom": 2, "ai": 2}
+
+    full_llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payloads(
+                [f"https://telecom-source.example.test/t{index}" for index in range(1, 7)],
+                "来源 telecom-source",
+            ),
+            "AI 动态日报": _llm_payloads(
+                [f"https://ai-source.example.test/a{index}" for index in range(1, 7)],
+                "来源 ai-source",
+            ),
+            "最终「昨日关注」": {"focus": "补充后的总结。"},
+        }
+    )
+    full_collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate("telecom-source", f"t{index}", published_at=now - timedelta(hours=12))
+                for index in range(1, 7)
+            ],
+            "ai-source": [
+                _candidate("ai-source", f"a{index}", published_at=now - timedelta(hours=12))
+                for index in range(1, 7)
+            ],
+        }
+    )
+    full_service = build(full_collector, full_llm)
+    second_report = asyncio.run(full_service.prepare())
+    # The thin edition must be regenerated, not skipped: statuses say "generated".
+    assert {entry.status for entry in second_report.categories} == {"generated"}
+    assert all(entry.reason is None for entry in second_report.categories)
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["item_counts"] == {"telecom": 6, "ai": 6}
+
+    collections_after_top_up = len(full_collector.collected_source_ids)
+    third_report = asyncio.run(full_service.prepare())
+    # A full undelivered edition is left alone: no third collection pass.
+    assert all(entry.reason == ALREADY_PREPARED for entry in third_report.categories)
+    assert len(full_collector.collected_source_ids) == collections_after_top_up
+
+
 def test_briefing_title_shows_the_delivery_day_not_the_collected_news_day(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
@@ -1089,11 +1184,8 @@ def test_briefing_push_failure_reports_the_delivery_error(
     report = asyncio.run(service.run())
 
     assert report.date == "2026-08-27"
-    assert alerts.events == [
-        ("简报条目不足（通信行业日报）", "合格候选仅 1 条，最终入选 1 条，低于目标 6 条"),
-        ("简报条目不足（AI 动态日报）", "合格候选仅 1 条，最终入选 1 条，低于目标 6 条"),
-        ("企业微信发送", "webhook down"),
-    ]
+    # The full pool raises no shortfall alert; only the failed webhook does.
+    assert alerts.events == [("企业微信发送", "webhook down")]
 
 
 def test_item_shortfall_alerts_report_a_thin_candidate_pool(
@@ -1577,22 +1669,37 @@ def _two_category_setup(
     *,
     now: datetime | None = None,
 ) -> tuple[FakeRSSCollector, FakeBriefingLLM]:
-    """Seed one telecom and one ai source with matching canned LLM payloads."""
+    """Seed one telecom and one ai source with matching canned LLM payloads.
+
+    Each category carries MAX_BRIEFING_ITEMS candidates so a prepared edition
+    counts as full and the next preparation tick skips it, matching production
+    where the retry tick only rebuilds below-target editions.
+    """
     published_at = None if now is None else now - timedelta(hours=12)
     _seed_source(session_factory, "telecom-source", category="telecom")
     _seed_source(session_factory, "ai-source", category="ai")
     collector = FakeRSSCollector(
         {
-            "telecom-source": [_candidate("telecom-source", "t1", published_at=published_at)],
-            "ai-source": [_candidate("ai-source", "a1", published_at=published_at)],
+            "telecom-source": [
+                _candidate("telecom-source", f"t{index}", published_at=published_at)
+                for index in range(1, MAX_BRIEFING_ITEMS + 1)
+            ],
+            "ai-source": [
+                _candidate("ai-source", f"a{index}", published_at=published_at)
+                for index in range(1, MAX_BRIEFING_ITEMS + 1)
+            ],
         }
     )
     llm = FakeBriefingLLM(
         {
-            "通信行业日报": _llm_payload(
-                "https://telecom-source.example.test/t1", "来源 telecom-source"
+            "通信行业日报": _llm_payloads(
+                [f"https://telecom-source.example.test/t{index}" for index in range(1, 7)],
+                "来源 telecom-source",
             ),
-            "AI 动态日报": _llm_payload("https://ai-source.example.test/a1", "来源 ai-source"),
+            "AI 动态日报": _llm_payloads(
+                [f"https://ai-source.example.test/a{index}" for index in range(1, 7)],
+                "来源 ai-source",
+            ),
         }
     )
     return collector, llm

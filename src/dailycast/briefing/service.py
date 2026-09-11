@@ -123,6 +123,10 @@ class _PreparedBriefing:
     briefing_date: date
     categories: tuple[str, ...]
     markdown: str
+    # Selected item count per category, recorded so a later preparation tick
+    # can recognize a below-target edition and regenerate it. None for legacy
+    # markers written before this field existed; those keep the old semantics.
+    item_counts: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,24 +354,34 @@ class BriefingService:
             all_delivered = all(
                 self._marker_path(run_date, category).is_file() for category in existing.categories
             )
-            reason = ALREADY_COMPLETED if all_delivered else ALREADY_PREPARED
-            existing_report = BriefingRunReport(
-                date=briefing_date.isoformat(),
-                categories=tuple(
-                    BriefingCategoryReport(
-                        category=category,
-                        status="skipped",
-                        file_path=self._output_dir / f"{briefing_date.isoformat()}-{category}.md",
-                        reason=reason,
-                    )
-                    for category in existing.categories
-                ),
-            )
-            return _PreparedRun(
-                run_date=run_date,
-                briefing_date=briefing_date,
-                report=existing_report,
-                should_deliver=not all_delivered,
+            # A delivered edition stays done forever, and a full undelivered
+            # edition is kept. A below-target edition falls through to a fresh
+            # regeneration so the 08:15 retry tick can capture sources that
+            # published after the first preparation pass.
+            if all_delivered or self._prepared_is_full(existing):
+                reason = ALREADY_COMPLETED if all_delivered else ALREADY_PREPARED
+                existing_report = BriefingRunReport(
+                    date=briefing_date.isoformat(),
+                    categories=tuple(
+                        BriefingCategoryReport(
+                            category=category,
+                            status="skipped",
+                            file_path=self._output_dir
+                            / f"{briefing_date.isoformat()}-{category}.md",
+                            reason=reason,
+                        )
+                        for category in existing.categories
+                    ),
+                )
+                return _PreparedRun(
+                    run_date=run_date,
+                    briefing_date=briefing_date,
+                    report=existing_report,
+                    should_deliver=not all_delivered,
+                )
+            logger.info(
+                "prepared briefing is below the item target; regenerating to top up",
+                extra={"run_date": run_date.isoformat(), "item_counts": existing.item_counts},
             )
         budget = self._budget_factory()
         provider = _budgeted_provider(self._llm_provider, budget)
@@ -866,10 +880,27 @@ class BriefingService:
         payload = {
             "briefing_date": briefing_date.isoformat(),
             "categories": [delivery.category for delivery in deliveries],
+            "item_counts": {
+                delivery.category: len(delivery.result.items) for delivery in deliveries
+            },
         }
         _atomic_write(
             self._prepared_marker_path(run_date),
             f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}\n",
+        )
+
+    def _prepared_is_full(self, prepared: _PreparedBriefing) -> bool:
+        """Return whether every prepared category already reached the item target.
+
+        Legacy markers without recorded counts count as full: the historical
+        skip-at-08:15 semantics stay intact for content written before this
+        field existed.
+        """
+        if prepared.item_counts is None:
+            return True
+        return all(
+            prepared.item_counts.get(category, 0) >= MAX_BRIEFING_ITEMS
+            for category in prepared.categories
         )
 
     def _load_prepared_briefing(
@@ -883,6 +914,12 @@ class BriefingService:
             categories = tuple(str(category) for category in payload["categories"])
         except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError, KeyError):
             return None
+        raw_counts = payload.get("item_counts")
+        item_counts: dict[str, int] | None = None
+        if isinstance(raw_counts, dict) and all(
+            isinstance(key, str) and isinstance(value, int) for key, value in raw_counts.items()
+        ):
+            item_counts = dict(raw_counts)
         if (
             recorded_date != briefing_date
             or not categories
@@ -901,6 +938,7 @@ class BriefingService:
             briefing_date=briefing_date,
             categories=categories,
             markdown=markdown,
+            item_counts=item_counts,
         )
 
     async def push_test(self) -> str:

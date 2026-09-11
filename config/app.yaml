@@ -165,7 +165,9 @@ briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
   # Prepare yesterday's report before the group-facing 08:30 delivery tick.
-  # The 08:15 retry is a no-op when the 07:55 preparation is already complete.
+  # The 08:15 retry regenerates the prepared edition when its selection is
+  # below the item target (e.g. sources that publish after the first pass);
+  # it is a no-op once every category reached the target.
   preparation_cron_expression: "55 7 * * mon-fri"
   preparation_retry_cron_expression: "15 8 * * mon-fri"
   cron_expression: "30 8 * * mon-fri"
