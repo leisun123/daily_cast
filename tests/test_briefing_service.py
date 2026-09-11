@@ -1728,9 +1728,7 @@ def test_extract_failure_is_not_refetched_by_verify(
     llm = FakeBriefingLLM(
         {
             "通信行业日报": _llm_payloads([good_url], "来源 telecom-source"),
-            "AI 动态日报": _llm_payloads(
-                ["https://ai-source.example.test/a1"], "来源 ai-source"
-            ),
+            "AI 动态日报": _llm_payloads(["https://ai-source.example.test/a1"], "来源 ai-source"),
             "最终「昨日关注」": {"focus": "总结。"},
         }
     )

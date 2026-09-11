@@ -553,9 +553,7 @@ class BriefingService:
                 and (self._briefing_source_ids is None or source.id in self._briefing_source_ids)
             )
 
-    async def _extract_missing_bodies(
-        self, article_ids: tuple[int, ...]
-    ) -> _ExtractionBatch:
+    async def _extract_missing_bodies(self, article_ids: tuple[int, ...]) -> _ExtractionBatch:
         """Extract candidates concurrently; record which pages this run already settled.
 
         The fetches share one bounded semaphore and run without holding any
