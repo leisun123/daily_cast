@@ -329,10 +329,40 @@ def test_briefing_item_removes_an_ascii_repeated_theme_prefix_from_its_headline(
     assert item.headline == "腾讯发布并开源 Hy4 Preview"
 
 
-def test_briefing_result_rejects_extra_fields() -> None:
-    """Extra keys hint at a schema drift between prompt and provider output."""
-    with pytest.raises(ValueError):
-        BriefingResult.model_validate({"overview": "概览。", "items": [], "unexpected": 1})
+def test_briefing_result_ignores_unknown_llm_fields_instead_of_failing() -> None:
+    """json_object providers may invent decorative keys; they must not discard the item."""
+    result = BriefingResult.model_validate(
+        {
+            "overview": "今天该类目整体平稳。",
+            "editor_note": "模型自己加的说明",
+            "items": [
+                {
+                    "headline": "一句话头条",
+                    "theme": "算力投资",
+                    "theme_detail": "",
+                    "summary": "第一句摘要。第二句摘要。",
+                    "why_it_matters": "这件事会影响团队接下来一周的产品与采购判断。",
+                    "source_name": "C114",
+                    "source_url": "https://news.example.test/a",
+                    "priority_score": 9,
+                }
+            ],
+        }
+    )
+
+    assert result.overview == "今天该类目整体平稳。"
+    assert len(result.items) == 1
+    assert result.items[0].theme == "算力投资"
+    assert result.items[0].source_url == "https://news.example.test/a"
+    assert not hasattr(result.items[0], "theme_detail")
+
+
+def test_briefing_result_accepts_unknown_top_level_fields() -> None:
+    """Unknown top-level keys are dropped so a provider flourish cannot degrade delivery."""
+    result = BriefingResult.model_validate({"overview": "概览。", "items": [], "unexpected": 1})
+
+    assert result.overview == "概览。"
+    assert result.items == []
 
 
 def test_briefing_result_rejects_more_than_six_items() -> None:

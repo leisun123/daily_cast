@@ -40,9 +40,14 @@ class BriefingEvidence:
 
 
 class BriefingItem(BaseModel):
-    """One briefing entry whose link must trace back to collected evidence."""
+    """One briefing entry whose link must trace back to collected evidence.
 
-    model_config = ConfigDict(extra="forbid")
+    Unknown keys are ignored rather than rejected: providers in json_object
+    mode sometimes invent decorative fields (for example ``theme_detail``),
+    and dropping those keys must not discard an otherwise valid item.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     # Normal editorial headlines remain capped at 60 characters by the prompt
     # and final audit. The wider schema lets an explicitly degraded result keep
@@ -115,9 +120,13 @@ class BriefingItem(BaseModel):
 
 
 class BriefingResult(BaseModel):
-    """The LLM-written part of one category briefing before deterministic rendering."""
+    """The LLM-written part of one category briefing before deterministic rendering.
 
-    model_config = ConfigDict(extra="forbid")
+    Like :class:`BriefingItem`, unknown top-level keys are ignored so a model
+    flourish cannot force the whole category into the degraded title list.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     overview: str = Field(min_length=1, max_length=600)
     items: list[BriefingItem] = Field(max_length=MAX_BRIEFING_ITEMS)
@@ -133,7 +142,7 @@ class BriefingResult(BaseModel):
 class MergedBriefingFocus(BaseModel):
     """The one natural editorial lead shown above the merged title list."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     focus: str = Field(min_length=8, max_length=96)
 
