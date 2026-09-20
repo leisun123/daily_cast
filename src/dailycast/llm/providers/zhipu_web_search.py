@@ -1,18 +1,22 @@
 """Zhipu BigModel web-search discovery for OpenAI-compatible GLM deployments.
 
-Zhipu exposes no OpenAI Responses route, so the Responses web_search tool is
-unavailable. The companion ``/web_search`` endpoint returns verbatim article
-URLs instead; this provider searches first and then asks the model to filter
-those real results into the caller's candidate schema. URL fidelity comes from
-the search API, never from model transcription, and every selected link still
-goes through the caller's independent fetch-and-verify pipeline.
+Coding-plan keys cannot bill the REST ``/web_search`` route (HTTP 1113 when no
+cash/resource pack remains). They can use the plan-native MCP server
+``web_search_prime`` instead. This provider searches first and then asks the
+model to filter those real results into the caller's candidate schema. URL
+fidelity comes from the search backend, never from model transcription, and
+every selected link still goes through the caller's independent
+fetch-and-verify pipeline.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field
@@ -29,11 +33,15 @@ from dailycast.llm.providers.openai_compatible import (
     _with_json_object_contract,
 )
 
+logger = logging.getLogger(__name__)
+
 _SEARCH_RESULT_COUNTS = {"low": 5, "medium": 10, "high": 20}
 _SEARCH_RECENCY_FILTERS = frozenset({"oneDay", "oneWeek", "oneMonth", "oneYear", "noLimit"})
 _MAX_SEARCH_QUERIES = 3
 _SEARCH_ITEM_CONTENT_CHARS = 220
 _CHAT_COMPLETIONS_SUFFIX = "/chat/completions"
+_DEFAULT_MCP_SEARCH_ENDPOINT = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+_MCP_TOOL_NAME = "web_search_prime"
 # Search endpoints rate-limit far more tightly than chat completions. Pace calls
 # and back off long enough for a minute-scale quota window to reopen.
 _SEARCH_CALL_INTERVAL_SECONDS = 0.6
@@ -59,7 +67,7 @@ class _GeneratedSearchQueries(BaseModel):
 
 
 class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
-    """Discover candidates through Zhipu's search API, then filter them with the model."""
+    """Discover candidates through Zhipu search (MCP or REST), then filter with the model."""
 
     provider_name = "zhipu_web_search"
 
@@ -80,6 +88,8 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         search_engine: str = "search_pro",
         search_recency_filter: str = "oneWeek",
         search_result_chars: int = 12_000,
+        search_transport: Literal["mcp", "rest"] = "mcp",
+        mcp_search_endpoint: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         super().__init__(
@@ -103,9 +113,17 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         if search_recency_filter not in _SEARCH_RECENCY_FILTERS:
             msg = "Zhipu web-research search_recency_filter is not a supported upstream value"
             raise ValueError(msg)
+        if search_transport not in {"mcp", "rest"}:
+            msg = "Zhipu web-research search_transport must be mcp or rest"
+            raise ValueError(msg)
         self._search_engine = search_engine
         self._search_recency_filter = search_recency_filter
         self._search_result_chars = search_result_chars
+        self._search_transport = search_transport
+        self._mcp_search_endpoint = (mcp_search_endpoint or _DEFAULT_MCP_SEARCH_ENDPOINT).strip()
+        if not self._mcp_search_endpoint:
+            msg = "Zhipu MCP search endpoint must be a non-empty URL"
+            raise ValueError(msg)
         self._search_endpoint = (
             f"{self._endpoint.removesuffix(_CHAT_COMPLETIONS_SUFFIX)}/web_search"
         )
@@ -235,7 +253,130 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         return items
 
     async def _web_search(self, query: str, count: int) -> list[_SearchItem]:
-        """Call the verbatim-URL search endpoint with rate-limit-aware retry backoff."""
+        """Dispatch to Coding Plan MCP or the REST /web_search endpoint."""
+        if self._search_transport == "mcp":
+            return await self._web_search_mcp(query, count)
+        return await self._web_search_rest(query, count)
+
+    async def _web_search_mcp(self, query: str, count: int) -> list[_SearchItem]:
+        """Call Coding Plan's web_search_prime MCP tool once for a verbatim query."""
+        if not self._api_key:
+            raise LLMProviderAuthenticationError()
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        session_id = await self._mcp_initialize(headers)
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+            await self._mcp_notify_initialized(headers)
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": _MCP_TOOL_NAME,
+                "arguments": {
+                    "search_query": query[:70],
+                    "search_recency_filter": self._search_recency_filter,
+                    "content_size": "medium",
+                    "location": "cn",
+                },
+            },
+        }
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = await self._client.post(
+                    self._mcp_search_endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=self._timeout_seconds,
+                )
+            except httpx.TimeoutException as error:
+                if attempt < self._max_retries:
+                    await asyncio.sleep(_search_retry_delay(attempt))
+                    continue
+                raise LLMProviderTimeoutError() from error
+            except httpx.RequestError as error:
+                if attempt < self._max_retries:
+                    await asyncio.sleep(_search_retry_delay(attempt))
+                    continue
+                raise LLMProviderError() from error
+            if response.status_code in {429, 500, 502, 503, 504} and attempt < self._max_retries:
+                await asyncio.sleep(_search_retry_delay(attempt))
+                continue
+            if response.status_code in {400, 422}:
+                raise LLMWebSearchUnsupportedError()
+            if response.status_code in {401, 403}:
+                raise LLMProviderAuthenticationError()
+            if response.is_error:
+                _log_zhipu_error_body("mcp_search", response)
+                raise LLMProviderError()
+            items = _parse_mcp_search_items(response)
+            return items[: max(1, count)]
+        raise LLMProviderError()
+
+    async def _mcp_initialize(self, headers: Mapping[str, str]) -> str | None:
+        """Open one MCP session and return its session id when the server provides one."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "dailycast-briefing", "version": "0.1.0"},
+            },
+        }
+        try:
+            response = await self._client.post(
+                self._mcp_search_endpoint,
+                headers=dict(headers),
+                json=payload,
+                timeout=self._timeout_seconds,
+            )
+        except httpx.TimeoutException as error:
+            raise LLMProviderTimeoutError() from error
+        except httpx.RequestError as error:
+            raise LLMProviderError() from error
+        if response.status_code in {401, 403}:
+            raise LLMProviderAuthenticationError()
+        if response.status_code in {400, 422}:
+            raise LLMWebSearchUnsupportedError()
+        if response.is_error:
+            _log_zhipu_error_body("mcp_initialize", response)
+            raise LLMProviderError()
+        body = _parse_mcp_jsonrpc(response)
+        if isinstance(body, dict) and "error" in body:
+            rpc_error = body.get("error")
+            message = rpc_error.get("message") if isinstance(rpc_error, dict) else str(rpc_error)
+            if message and "not found" in str(message).lower():
+                raise LLMWebSearchUnsupportedError()
+            logger.warning(
+                "zhipu mcp initialize returned a json-rpc error",
+                extra={"message": str(message)[:200]},
+            )
+        session_id = response.headers.get("Mcp-Session-Id") or response.headers.get(
+            "mcp-session-id"
+        )
+        return session_id or None
+
+    async def _mcp_notify_initialized(self, headers: Mapping[str, str]) -> None:
+        """Best-effort initialized notification required by streamable HTTP MCP."""
+        payload = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        try:
+            await self._client.post(
+                self._mcp_search_endpoint,
+                headers=dict(headers),
+                json=payload,
+                timeout=self._timeout_seconds,
+            )
+        except (httpx.TimeoutException, httpx.RequestError):
+            logger.debug("zhipu mcp initialized notification failed; continuing")
+
+    async def _web_search_rest(self, query: str, count: int) -> list[_SearchItem]:
+        """Call the verbatim-URL REST search endpoint with rate-limit-aware retry backoff."""
         headers = {"Authorization": f"Bearer {self._api_key}"}
         payload = {
             "search_engine": self._search_engine,
@@ -262,6 +403,7 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
                     continue
                 raise LLMProviderError() from error
             if response.status_code in {429, 500, 502, 503, 504} and attempt < self._max_retries:
+                _log_zhipu_error_body("rest_search", response)
                 await asyncio.sleep(_search_retry_delay(attempt))
                 continue
             if response.status_code in {400, 422}:
@@ -269,6 +411,7 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
             if response.status_code in {401, 403}:
                 raise LLMProviderAuthenticationError()
             if response.is_error:
+                _log_zhipu_error_body("rest_search", response)
                 raise LLMProviderError()
             return _parse_search_items(response)
         raise LLMProviderError()
@@ -277,6 +420,115 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
 def _search_retry_delay(attempt: int) -> float:
     """Grow waits across attempts so 429 can clear a real provider rate window."""
     return _SEARCH_RETRY_BASE_SECONDS + _SEARCH_RETRY_STEP_SECONDS * attempt
+
+
+def _log_zhipu_error_body(stage: str, response: httpx.Response) -> None:
+    """Record the provider business error code so 429 is diagnosable (e.g. 1113)."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"raw": response.text[:200]}
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    logger.warning(
+        "zhipu search backend error",
+        extra={
+            "stage": stage,
+            "http_status": response.status_code,
+            "error_code": code,
+            "error_message": message,
+        },
+    )
+
+
+def _parse_mcp_jsonrpc(response: httpx.Response) -> dict[str, Any]:
+    """Parse streamable-HTTP MCP payloads, including SSE `data:` frames."""
+    text = response.text
+    if "data:" in text:
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                candidate = line[5:].strip()
+                try:
+                    parsed = json.loads(candidate)
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+    try:
+        parsed = json.loads(text)
+    except ValueError as error:
+        raise LLMProviderError() from error
+    if not isinstance(parsed, dict):
+        raise LLMProviderError()
+    return parsed
+
+
+def _parse_mcp_search_items(response: httpx.Response) -> list[_SearchItem]:
+    """Map MCP web_search_prime tool output into the shared search-item shape."""
+    body = _parse_mcp_jsonrpc(response)
+    if "error" in body and "result" not in body:
+        error = body.get("error")
+        message = str(error.get("message")) if isinstance(error, dict) else str(error)
+        if "not found" in message.lower():
+            raise LLMWebSearchUnsupportedError()
+        raise LLMProviderError()
+    result = body.get("result")
+    if not isinstance(result, dict):
+        raise LLMProviderError()
+    content = result.get("content")
+    if not isinstance(content, list) or not content:
+        return []
+    first = content[0]
+    text = first.get("text") if isinstance(first, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return []
+    rows = _load_json_rows(text)
+    items: list[_SearchItem] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = row.get("title")
+        link = row.get("link")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        if not isinstance(link, str) or not link.strip():
+            continue
+        media = row.get("media")
+        publish_date = row.get("publish_date")
+        items.append(
+            _SearchItem(
+                title=title.strip(),
+                link=link.strip(),
+                media=media.strip() if isinstance(media, str) and media.strip() else "未知",
+                publish_date=publish_date.strip() if isinstance(publish_date, str) else "",
+                snippet=_bounded_snippet(row.get("content")),
+            )
+        )
+    return items
+
+
+def _load_json_rows(text: str) -> list[object]:
+    """Decode MCP tool text that may itself be a JSON string of result rows."""
+    payload: object = text
+    for _ in range(2):
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                return []
+            continue
+        break
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        rows = payload.get("search_result")
+        if isinstance(rows, list):
+            return rows
+        candidates = payload.get("candidates")
+        if isinstance(candidates, list):
+            return candidates
+    return []
 
 
 def _parse_search_items(response: httpx.Response) -> list[_SearchItem]:

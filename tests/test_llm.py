@@ -1023,6 +1023,7 @@ def test_zhipu_web_research_searches_then_filters_verbatim_urls() -> None:
                 model="glm-5.3-flash",
                 timeout_seconds=2,
                 temperature=0.1,
+                search_transport="rest",
                 http_client=client,
             )
             return await provider.generate_web_research(
@@ -1091,6 +1092,7 @@ def test_zhipu_web_research_maps_unsupported_search_to_source_error_type() -> No
                 timeout_seconds=2,
                 temperature=0.1,
                 max_retries=0,
+                search_transport="rest",
                 http_client=client,
             )
             with pytest.raises(LLMWebSearchUnsupportedError):
@@ -1134,6 +1136,7 @@ def test_zhipu_web_research_returns_empty_candidates_without_search_hits() -> No
                 model="glm-5.3-flash",
                 timeout_seconds=2,
                 temperature=0.1,
+                search_transport="rest",
                 http_client=client,
             )
             return await provider.generate_web_research(
@@ -1173,6 +1176,7 @@ def test_zhipu_web_search_backoff_is_rate_limit_aware() -> None:
                 timeout_seconds=2,
                 temperature=0.1,
                 max_retries=2,
+                search_transport="rest",
                 http_client=client,
             )
             original_sleep = asyncio.sleep
@@ -1209,6 +1213,7 @@ def test_zhipu_web_research_uses_explicit_facet_queries_without_query_generation
                 model="glm-5.3-flash",
                 timeout_seconds=2,
                 temperature=0.1,
+                search_transport="rest",
                 http_client=client,
             )
             return await provider.generate_web_research(
@@ -1229,6 +1234,126 @@ def test_zhipu_web_research_uses_explicit_facet_queries_without_query_generation
         "江苏省运营商动态",
     ]
     assert not any(request.url.path.endswith("/chat/completions") for request in requests)
+
+
+def test_zhipu_web_research_mcp_transport_uses_coding_plan_tool() -> None:
+    """Coding-plan keys search through MCP web_search_prime, not REST /web_search."""
+    requests: list[httpx.Request] = []
+    mcp_endpoint = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/web_search"):
+            raise AssertionError("REST web_search must not be used in mcp transport")
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps(
+                                    {
+                                        "candidates": [
+                                            {
+                                                "title": "运营商动态",
+                                                "url": "https://news.example.cn/a.html",
+                                                "publisher": "C114",
+                                                "finding": "动态摘要",
+                                                "published_at_hint": "2026-09-20",
+                                            }
+                                        ]
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                    ],
+                    "id": "filter",
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                },
+            )
+        payload = json.loads(request.content)
+        method = payload.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                headers={"Mcp-Session-Id": "session-1", "Content-Type": "text/event-stream"},
+                content=(
+                    b"id:1\nevent:message\n"
+                    b'data:{"jsonrpc":"2.0","id":1,"result":{'
+                    b'"protocolVersion":"2024-11-05","capabilities":{},'
+                    b'"serverInfo":{"name":"mcp-web-search-prime","version":"0.0.1"}}}\n\n'
+                ),
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        if method == "tools/call":
+            rows = [
+                {
+                    "title": "运营商动态",
+                    "link": "https://news.example.cn/a.html",
+                    "content": "今日运营商发布重要公告。",
+                    "refer": "ref_1",
+                }
+            ]
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=(
+                    "id:2\nevent:message\n"
+                    "data:"
+                    + json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": json.dumps(rows, ensure_ascii=False),
+                                    }
+                                ]
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                ).encode(),
+            )
+        raise AssertionError(f"unexpected method {method}")
+
+    async def scenario() -> StructuredResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = ZhipuWebResearchProvider(
+                base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                api_key="test-key",
+                model="glm-5.3-flash",
+                timeout_seconds=2,
+                temperature=0.1,
+                search_transport="mcp",
+                mcp_search_endpoint=mcp_endpoint,
+                http_client=client,
+            )
+            return await provider.generate_web_research(
+                (LLMMessage(role="user", content="主题：通信行业新闻"),),
+                ScoreOutput,
+                {"search_queries": ["通信行业动态"]},
+            )
+
+    result = asyncio.run(scenario())
+    assert result.content["candidates"][0]["url"] == "https://news.example.cn/a.html"
+    tools_calls = [
+        json.loads(request.content)
+        for request in requests
+        if request.url.path.endswith("/mcp")
+        and json.loads(request.content).get("method") == "tools/call"
+    ]
+    assert len(tools_calls) == 1
+    assert tools_calls[0]["params"]["name"] == "web_search_prime"
+    assert tools_calls[0]["params"]["arguments"]["search_query"] == "通信行业动态"
 
 
 def test_openai_responses_provider_rejects_missing_output_text() -> None:

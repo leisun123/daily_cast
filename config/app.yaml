@@ -193,6 +193,9 @@ briefing:
 web_research:
   enabled: true
   provider: zhipu
+  # Coding Plan MCP path; REST /web_search on coding base URL returns 1113.
+  search_transport: mcp
+  mcp_search_endpoint: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
   max_candidates_per_source: 40
   # Serial facets + explicit queries: keep search volume low enough for Zhipu.
   max_search_calls_per_source: 2

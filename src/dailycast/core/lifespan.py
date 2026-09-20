@@ -532,6 +532,8 @@ def build_web_research_provider(
             max_retries=llm_settings.max_retries,
             thinking=llm_settings.thinking,
             search_recency_filter=web_research_settings.search_recency_filter,
+            search_transport=web_research_settings.search_transport,
+            mcp_search_endpoint=web_research_settings.mcp_search_endpoint,
             http_client=http_client,
         )
     if isinstance(primary_provider, OpenAIResponsesLLMProvider):

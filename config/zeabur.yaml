@@ -76,11 +76,12 @@ monitoring:
 # link-verified locally before a briefing may use it.
 web_research:
   enabled: true
-  # The deployment primary is the Zhipu GLM endpoint, so discovery runs through
-  # BigModel's verbatim-URL search API instead of a Responses web_search tool.
-  # Two facets per source keep the search quota under control; facets are
-  # collected serially, which is fine inside the long prepare window.
+  # Coding-plan keys must use the plan MCP for discovery. REST /web_search on
+  # the coding base URL returns 1113 (no cash/resource pack). Two facets per
+  # source, collected serially, stay inside the prepare window.
   provider: zhipu
+  search_transport: mcp
+  mcp_search_endpoint: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
   max_candidates_per_source: 40
   max_search_calls_per_source: 2
   search_context_size: medium

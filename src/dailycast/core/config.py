@@ -140,9 +140,12 @@ class WebResearchSettings(BaseModel):
 
     enabled: bool = False
     # primary_responses reuses the Responses web_search tool when the primary
-    # provider supports it; zhipu drives BigModel's verbatim-URL /web_search API
-    # and filters the results with the primary GLM chat model.
+    # provider supports it; zhipu drives BigModel discovery. Coding-plan keys
+    # must use the plan MCP (`mcp`); the REST /web_search route bills as
+    # standard API and returns 1113 when no cash/resource pack remains.
     provider: Literal["primary_responses", "zhipu"] = "primary_responses"
+    search_transport: Literal["mcp", "rest"] = "mcp"
+    mcp_search_endpoint: str = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
     max_candidates_per_source: int = Field(default=20, ge=1, le=80)
     max_search_calls_per_source: int = Field(default=1, ge=1, le=4)
     search_context_size: Literal["low", "medium", "high"] = "medium"
