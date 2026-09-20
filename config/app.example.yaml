@@ -188,9 +188,14 @@ monitoring:
 
 # Native OpenAI web-search discovery is disabled in local development unless
 # explicitly enabled. It is used only by the briefing-specific web_research
-# source kind, never by the default podcast source pool.
+# source kind, never by the default podcast source pool. Coding Plan keys
+# should keep search_transport=mcp; REST /web_search on the coding base URL
+# bills as standard API and returns 1113 without a cash/resource pack.
 web_research:
   enabled: false
+  provider: zhipu
+  search_transport: mcp
+  mcp_search_endpoint: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
   max_candidates_per_source: 20
   max_search_calls_per_source: 1
   search_context_size: medium

@@ -6,15 +6,14 @@ import logging
 import os
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.service import BriefingRunInProgressError, BriefingRunReport
-from dailycast.core.workdays import IsWorkingDay, WeekdayWorkdayCalendar
+from dailycast.core.workdays import IsWorkingDay, WeekdayWorkdayCalendar, local_today
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +136,7 @@ class BriefingScheduler:
         """Skip scheduled ticks on non-working days; manual API runs stay unrestricted."""
         if not self._skip_non_working_days:
             return True
-        today = self._local_today()
+        today = local_today(self._timezone, self._now() if self._now is not None else None)
         if self._is_working_day(today):
             return True
         logger.info(
@@ -145,12 +144,6 @@ class BriefingScheduler:
             extra={"date": today.isoformat(), "timezone": self._timezone},
         )
         return False
-
-    def _local_today(self) -> date:
-        """Return the application-local calendar date for this schedule tick."""
-        tz = ZoneInfo(self._timezone)
-        moment = self._now() if self._now is not None else datetime.now(tz)
-        return moment.astimezone(tz).date()
 
     async def _run_preflight(self) -> None:
         """Best-effort provider probe; a broken probe must never block preparation."""

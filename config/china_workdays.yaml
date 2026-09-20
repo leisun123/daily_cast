@@ -1,7 +1,8 @@
 # Chinese statutory working-day calendar used by briefing scheduling.
 # holidays: non-working statutory days (even when they fall Mon-Fri).
 # makeup_workdays: statutory working days that fall on weekends (调休补班).
-# Years missing from this file fall back to Mon-Fri.
+# Years missing from this file fall back to Mon-Fri. Extend before each new
+# year is published (e.g. add 2027 once the State Council calendar is out).
 years:
   "2025":
     holidays:

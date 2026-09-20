@@ -30,6 +30,8 @@ public/*
 *.part
 # Local deployment configuration derived from app.example.yaml; secrets stay in .env.
 config/app.yaml
+# Accidental uv output; this project is Poetry-managed via poetry.lock.
+uv.lock
 # Editor and operating-system metadata.
 .idea/
 .vscode/

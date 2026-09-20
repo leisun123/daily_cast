@@ -1356,6 +1356,147 @@ def test_zhipu_web_research_mcp_transport_uses_coding_plan_tool() -> None:
     assert tools_calls[0]["params"]["arguments"]["search_query"] == "通信行业动态"
 
 
+def _mcp_sse_frame(payload: dict[str, object], *, frame_id: int) -> bytes:
+    return (
+        f"id:{frame_id}\nevent:message\ndata:{json.dumps(payload, ensure_ascii=False)}\n\n"
+    ).encode()
+
+
+def test_zhipu_mcp_parser_skips_notification_frames_before_the_result() -> None:
+    """SSE notifications before the JSON-RPC result must not be treated as the reply."""
+    from dailycast.llm.providers.zhipu_web_search import _parse_mcp_search_items
+
+    rows = [{"title": "动态", "link": "https://news.example.cn/b.html", "content": "正文"}]
+    response = httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        content=(
+            _mcp_sse_frame(
+                {"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info"}},
+                frame_id=1,
+            )
+            + _mcp_sse_frame({"jsonrpc": "2.0", "method": "notifications/progress"}, frame_id=2)
+            + _mcp_sse_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "result": {"content": [{"type": "text", "text": json.dumps(rows)}]},
+                },
+                frame_id=3,
+            )
+        ),
+    )
+
+    items = _parse_mcp_search_items(response, request_id=7)
+    assert [item.link for item in items] == ["https://news.example.cn/b.html"]
+
+
+def test_zhipu_mcp_search_reuses_one_session_across_queries() -> None:
+    """Subsequent facet searches must not re-handshake MCP initialize each time."""
+    requests: list[httpx.Request] = []
+    mcp_endpoint = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps({"candidates": []}, ensure_ascii=False),
+                            },
+                        }
+                    ],
+                    "id": "filter-empty",
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                },
+            )
+        payload = json.loads(request.content)
+        method = payload.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                headers={"Mcp-Session-Id": "session-reuse", "Content-Type": "text/event-stream"},
+                content=_mcp_sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id"),
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "serverInfo": {"name": "mcp-web-search-prime", "version": "0.0.1"},
+                        },
+                    },
+                    frame_id=1,
+                ),
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        if method == "tools/call":
+            rows = [
+                {
+                    "title": f"结果{payload['params']['arguments']['search_query']}",
+                    "link": "https://news.example.cn/reuse.html",
+                    "content": "摘要",
+                }
+            ]
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=_mcp_sse_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id"),
+                        "result": {
+                            "content": [
+                                {"type": "text", "text": json.dumps(rows, ensure_ascii=False)}
+                            ]
+                        },
+                    },
+                    frame_id=2,
+                ),
+            )
+        raise AssertionError(f"unexpected method {method}")
+
+    async def scenario() -> StructuredResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = ZhipuWebResearchProvider(
+                base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                api_key="test-key",
+                model="glm-5.3-flash",
+                timeout_seconds=2,
+                temperature=0.1,
+                search_transport="mcp",
+                mcp_search_endpoint=mcp_endpoint,
+                http_client=client,
+            )
+            return await provider.generate_web_research(
+                (LLMMessage(role="user", content="主题：通信行业新闻"),),
+                ScoreOutput,
+                {
+                    "search_queries": ["常州运营商", "江苏运营商"],
+                    "search_context_size": "high",
+                },
+            )
+
+    result = asyncio.run(scenario())
+    assert result.content == {"candidates": []}
+    methods = [json.loads(request.content).get("method") for request in requests]
+    assert methods.count("initialize") == 1
+    assert methods.count("notifications/initialized") == 1
+    assert methods.count("tools/call") == 2
+    tool_calls = [
+        json.loads(request.content)
+        for request in requests
+        if json.loads(request.content).get("method") == "tools/call"
+    ]
+    assert [call["params"]["arguments"]["content_size"] for call in tool_calls] == ["high", "high"]
+
+
 def test_openai_responses_provider_rejects_missing_output_text() -> None:
     """A nominal success response cannot bypass local structured-output validation."""
 

@@ -42,6 +42,9 @@ _SEARCH_ITEM_CONTENT_CHARS = 220
 _CHAT_COMPLETIONS_SUFFIX = "/chat/completions"
 _DEFAULT_MCP_SEARCH_ENDPOINT = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
 _MCP_TOOL_NAME = "web_search_prime"
+# MCP tool has no result-count argument; map search_context_size onto its
+# content_size knob and still truncate locally to the configured count.
+_MCP_CONTENT_SIZE_BY_CONTEXT = {"low": "medium", "medium": "medium", "high": "high"}
 # Search endpoints rate-limit far more tightly than chat completions. Pace calls
 # and back off long enough for a minute-scale quota window to reopen.
 _SEARCH_CALL_INTERVAL_SECONDS = 0.6
@@ -127,6 +130,10 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         self._search_endpoint = (
             f"{self._endpoint.removesuffix(_CHAT_COMPLETIONS_SUFFIX)}/web_search"
         )
+        self._mcp_session_id: str | None = None
+        self._mcp_session_established = False
+        self._mcp_request_id = 1
+        self._mcp_content_size = _MCP_CONTENT_SIZE_BY_CONTEXT["medium"]
 
     async def generate_web_research(
         self,
@@ -152,6 +159,9 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         if result_count is None:
             msg = "web research search_context_size must be low, medium, or high"
             raise ValueError(msg)
+        self._mcp_content_size = _MCP_CONTENT_SIZE_BY_CONTEXT.get(
+            context_size if isinstance(context_size, str) else "medium", "medium"
+        )
         fallback_queries = _search_queries(options.pop("search_queries", None), messages)
         # Explicit collector facets are the preferred discovery shape: the search
         # API should see those queries verbatim. Generating extra chat queries on
@@ -262,25 +272,25 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         """Call Coding Plan's web_search_prime MCP tool once for a verbatim query."""
         if not self._api_key:
             raise LLMProviderAuthenticationError()
-        headers = {
+        base_headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
-        session_id = await self._mcp_initialize(headers)
-        if session_id:
-            headers["Mcp-Session-Id"] = session_id
-            await self._mcp_notify_initialized(headers)
+        headers = await self._ensure_mcp_session(base_headers)
+        request_id = self._next_mcp_request_id()
         payload = {
             "jsonrpc": "2.0",
-            "id": 3,
+            "id": request_id,
             "method": "tools/call",
             "params": {
                 "name": _MCP_TOOL_NAME,
                 "arguments": {
                     "search_query": query[:70],
                     "search_recency_filter": self._search_recency_filter,
-                    "content_size": "medium",
+                    # MCP has no result-count argument; content_size only affects
+                    # snippet depth. Local truncation still honors the count.
+                    "content_size": self._mcp_content_size,
                     "location": "cn",
                 },
             },
@@ -303,25 +313,60 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
                     await asyncio.sleep(_search_retry_delay(attempt))
                     continue
                 raise LLMProviderError() from error
+            if response.status_code in {404, 408} and attempt < self._max_retries:
+                # Expired MCP session: rebuild once, then retry the tool call.
+                self._reset_mcp_session()
+                headers = await self._ensure_mcp_session(base_headers)
+                await asyncio.sleep(_search_retry_delay(attempt))
+                continue
             if response.status_code in {429, 500, 502, 503, 504} and attempt < self._max_retries:
                 await asyncio.sleep(_search_retry_delay(attempt))
                 continue
             if response.status_code in {400, 422}:
                 raise LLMWebSearchUnsupportedError()
             if response.status_code in {401, 403}:
+                self._reset_mcp_session()
                 raise LLMProviderAuthenticationError()
             if response.is_error:
                 _log_zhipu_error_body("mcp_search", response)
+                if response.status_code in {404, 408}:
+                    self._reset_mcp_session()
                 raise LLMProviderError()
-            items = _parse_mcp_search_items(response)
+            items = _parse_mcp_search_items(response, request_id=request_id)
             return items[: max(1, count)]
         raise LLMProviderError()
 
+    def _next_mcp_request_id(self) -> int:
+        """Return a monotonically increasing JSON-RPC id for MCP calls."""
+        self._mcp_request_id += 1
+        return self._mcp_request_id
+
+    def _reset_mcp_session(self) -> None:
+        """Drop a cached MCP session so the next call re-handshakes."""
+        self._mcp_session_id = None
+        self._mcp_session_established = False
+
+    async def _ensure_mcp_session(self, base_headers: Mapping[str, str]) -> dict[str, str]:
+        """Reuse one MCP session across searches; re-handshake only when needed."""
+        headers = dict(base_headers)
+        if self._mcp_session_established:
+            if self._mcp_session_id:
+                headers["Mcp-Session-Id"] = self._mcp_session_id
+            return headers
+        session_id = await self._mcp_initialize(base_headers)
+        if session_id:
+            await self._mcp_notify_initialized({**base_headers, "Mcp-Session-Id": session_id})
+            self._mcp_session_id = session_id
+            headers["Mcp-Session-Id"] = session_id
+        self._mcp_session_established = True
+        return headers
+
     async def _mcp_initialize(self, headers: Mapping[str, str]) -> str | None:
         """Open one MCP session and return its session id when the server provides one."""
+        request_id = self._next_mcp_request_id()
         payload = {
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": request_id,
             "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
@@ -347,7 +392,7 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         if response.is_error:
             _log_zhipu_error_body("mcp_initialize", response)
             raise LLMProviderError()
-        body = _parse_mcp_jsonrpc(response)
+        body = _parse_mcp_jsonrpc(response, request_id=request_id)
         if isinstance(body, dict) and "error" in body:
             rpc_error = body.get("error")
             message = rpc_error.get("message") if isinstance(rpc_error, dict) else str(rpc_error)
@@ -442,31 +487,51 @@ def _log_zhipu_error_body(stage: str, response: httpx.Response) -> None:
     )
 
 
-def _parse_mcp_jsonrpc(response: httpx.Response) -> dict[str, Any]:
-    """Parse streamable-HTTP MCP payloads, including SSE `data:` frames."""
+def _parse_mcp_jsonrpc(
+    response: httpx.Response, *, request_id: int | None = None
+) -> dict[str, Any]:
+    """Parse streamable-HTTP MCP payloads, preferring the JSON-RPC response frame.
+
+    SSE streams may interleave notification frames before the final response.
+    Select a frame that carries ``result``/``error`` (and matches ``request_id``
+    when provided) instead of the first dict-shaped ``data:`` line.
+    """
     text = response.text
+    frames: list[dict[str, Any]] = []
     if "data:" in text:
         for line in text.splitlines():
-            if line.startswith("data:"):
-                candidate = line[5:].strip()
-                try:
-                    parsed = json.loads(candidate)
-                except ValueError:
-                    continue
-                if isinstance(parsed, dict):
-                    return parsed
-    try:
-        parsed = json.loads(text)
-    except ValueError as error:
-        raise LLMProviderError() from error
-    if not isinstance(parsed, dict):
-        raise LLMProviderError()
-    return parsed
+            if not line.startswith("data:"):
+                continue
+            candidate = line[5:].strip()
+            try:
+                parsed = json.loads(candidate)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                frames.append(parsed)
+    if not frames:
+        try:
+            parsed = json.loads(text)
+        except ValueError as error:
+            raise LLMProviderError() from error
+        if not isinstance(parsed, dict):
+            raise LLMProviderError()
+        return parsed
+    response_frames = [frame for frame in frames if "result" in frame or "error" in frame]
+    if request_id is not None:
+        matched = [frame for frame in response_frames if frame.get("id") == request_id]
+        if matched:
+            return matched[-1]
+    if response_frames:
+        return response_frames[-1]
+    return frames[-1]
 
 
-def _parse_mcp_search_items(response: httpx.Response) -> list[_SearchItem]:
+def _parse_mcp_search_items(
+    response: httpx.Response, *, request_id: int | None = None
+) -> list[_SearchItem]:
     """Map MCP web_search_prime tool output into the shared search-item shape."""
-    body = _parse_mcp_jsonrpc(response)
+    body = _parse_mcp_jsonrpc(response, request_id=request_id)
     if "error" in body and "result" not in body:
         error = body.get("error")
         message = str(error.get("message")) if isinstance(error, dict) else str(error)

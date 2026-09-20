@@ -1,8 +1,24 @@
 """Shared fixtures for Sprint 0 infrastructure tests."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep host ALL_PROXY/HTTP(S)_PROXY from breaking httpx tests without socksio."""
+    for name in (
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
