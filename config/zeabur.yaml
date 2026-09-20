@@ -48,9 +48,17 @@ briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
   selection_policy_path: ./config/briefing.selection.yaml
-  preparation_cron_expression: "55 7 * * mon-fri"
-  preparation_retry_cron_expression: "15 8 * * mon-fri"
-  cron_expression: "30 8 * * mon-fri"
+  # The telecom + AI text briefing is fully prepared before 08:30 Asia/Shanghai.
+  # The 08:30 tick only posts the atomically saved message; it never starts
+  # collection, link verification, or model generation. Cron ticks every
+  # calendar day; non-working days are filtered by config/china_workdays.yaml.
+  # The webhook URL is a Zeabur password variable; the service refuses to
+  # start without it.
+  preparation_cron_expression: "55 7 * * *"
+  preparation_retry_cron_expression: "15 8 * * *"
+  cron_expression: "30 8 * * *"
+  skip_non_working_days: true
+  workday_calendar_path: ./config/china_workdays.yaml
   max_items_per_category: 6
   # Inject DAILYCAST_BRIEFING__RSSHUB_BASE_URL as a Zeabur variable to enable
   # configured rsshub:// sources. Use a controlled or self-hosted instance.

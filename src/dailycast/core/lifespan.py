@@ -23,6 +23,7 @@ from dailycast.briefing.service import BriefingService
 from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.config import LLMProviderSettings, Settings, WebResearchSettings, load_settings
 from dailycast.core.logging import configure_logging
+from dailycast.core.workdays import load_workday_calendar
 from dailycast.db.models import SourceKind, TaskType, TriggerType
 from dailycast.db.revision import RevisionStatus, inspect_revision
 from dailycast.db.session import create_session_factory, create_sqlite_engine
@@ -412,6 +413,11 @@ def _build_briefing_runtime(
         settings.resolve_path(settings.briefing.selection_policy_path)
     )
     source_config_path = settings.resolve_path(settings.briefing.sources_config_path)
+    workday_calendar = load_workday_calendar(
+        settings.resolve_path(settings.briefing.workday_calendar_path)
+        if settings.briefing.skip_non_working_days
+        else None
+    )
     source_sync = sync_configured_sources(session_factory, source_config_path)
     logger.info(
         "briefing_source_sync_completed",
@@ -464,6 +470,7 @@ def _build_briefing_runtime(
         briefing_source_ids=load_configured_source_ids(source_config_path),
         selection_policy=selection_policy,
         timezone=settings.app.timezone,
+        is_working_day=workday_calendar.is_working_day,
     )
     briefing_scheduler = BriefingScheduler(
         briefing_service.prepare,
@@ -474,6 +481,8 @@ def _build_briefing_runtime(
         timezone=settings.app.timezone,
         alert=alert,
         preflight=preflight,
+        is_working_day=workday_calendar.is_working_day,
+        skip_non_working_days=settings.briefing.skip_non_working_days,
     )
     try:
         briefing_scheduler.start()

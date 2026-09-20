@@ -44,6 +44,11 @@ from dailycast.briefing.selection import (
 )
 from dailycast.briefing.webhook import WebhookNotifier
 from dailycast.core.time import Clock
+from dailycast.core.workdays import (
+    IsWorkingDay,
+    WeekdayWorkdayCalendar,
+    collection_days_back,
+)
 from dailycast.db.models import LLMOperation, Source
 from dailycast.db.repositories import ArticleRepository, SourceRepository
 from dailycast.db.transactions import UnitOfWork
@@ -176,6 +181,7 @@ class BriefingService:
         selection_policy: BriefingSelectionPolicy,
         timezone: str = "Asia/Shanghai",
         clock: Clock | None = None,
+        is_working_day: IsWorkingDay | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._collection_service = collection_service
@@ -195,6 +201,7 @@ class BriefingService:
         self._selection_policy = selection_policy
         self._timezone = ZoneInfo(timezone)
         self._clock = clock or Clock()
+        self._is_working_day = is_working_day or WeekdayWorkdayCalendar().is_working_day
         self._run_reserved = False
 
     @property
@@ -534,10 +541,11 @@ class BriefingService:
         return BriefingRunReport(date=briefing_date.isoformat(), categories=reports)
 
     def _collection_window(self, now: datetime) -> CollectionWindow:
-        """Use the previous Shanghai calendar day, or Friday-Sunday on Monday."""
+        """Cover every calendar day since the previous working day's edition."""
         local_now = now.astimezone(self._timezone)
         end_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        days_back = 3 if local_now.weekday() == 0 else 1
+        run_date = end_local.date()
+        days_back = collection_days_back(run_date, self._is_working_day)
         start_local = end_local - timedelta(days=days_back)
         return CollectionWindow(start=start_local.astimezone(UTC), end=end_local.astimezone(UTC))
 
@@ -669,6 +677,18 @@ class BriefingService:
             logger.warning(
                 "briefing dropped candidates with inferred publish dates",
                 extra={"dropped_by_source": inferred_dropped},
+            )
+        pool_stats = {category: len(candidates) for category, candidates in grouped.items()}
+        if pool_stats:
+            logger.info(
+                "briefing evidence pool sizes",
+                extra={
+                    "pool_stats": pool_stats,
+                    "eligible_article_count": len(eligible_article_ids),
+                    "inferred_dropped": inferred_dropped,
+                    "window_start": window.start.isoformat(),
+                    "window_end": window.end.isoformat(),
+                },
             )
         return {
             category: select_evidence(
@@ -1044,23 +1064,29 @@ class BriefingService:
         reports: list[BriefingCategoryReport],
         deliveries: list[_PendingBriefingDelivery],
     ) -> None:
-        """Report every category whose evidence pool or delivered items fall below target.
+        """Record thin candidate pools or selections in logs only.
 
-        A thin candidate pool signals dead or failing sources; a thin selection
-        below an adequate pool signals an editorial bar worth reviewing. Either
-        way the delivered message will visibly list fewer items than promised,
-        so operators hear about it the same morning instead of finding out
-        after several short editions.
+        WeCom alerts stay reserved for operational failures (collection crash,
+        webhook down, missing prepared message). A short edition is an editorial
+        signal worth reviewing in logs, not a group-page at 08:44.
         """
-        if self._alert is None:
-            return
         selected_counts = {delivery.category: len(delivery.result.items) for delivery in deliveries}
         for report in reports:
             summary = self._shortfall_summary(report, selected_counts.get(report.category))
             if summary is None:
                 continue
-            await self._alert_message(
-                f"简报条目不足（{CATEGORY_TITLES[report.category]}）", RuntimeError(summary)
+            logger.warning(
+                "briefing item shortfall",
+                extra={
+                    "category": report.category,
+                    "summary": summary,
+                    "status": report.status,
+                    "reason": report.reason,
+                    "error": report.error,
+                    "article_count": report.article_count,
+                    "selected_count": selected_counts.get(report.category),
+                    "target_count": MAX_BRIEFING_ITEMS,
+                },
             )
 
     @staticmethod

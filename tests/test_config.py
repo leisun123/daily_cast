@@ -182,9 +182,10 @@ def test_zeabur_runtime_config_keeps_fixed_production_settings_out_of_environmen
     assert settings.llm.response_format == "json_object"
     assert settings.llm.timeout_seconds == 120
     assert settings.llm.budget.max_input_tokens == 100_000
-    assert settings.briefing.preparation_cron_expression == "55 7 * * mon-fri"
-    assert settings.briefing.preparation_retry_cron_expression == "15 8 * * mon-fri"
-    assert settings.briefing.cron_expression == "30 8 * * mon-fri"
+    assert settings.briefing.preparation_cron_expression == "55 7 * * *"
+    assert settings.briefing.preparation_retry_cron_expression == "15 8 * * *"
+    assert settings.briefing.cron_expression == "30 8 * * *"
+    assert settings.briefing.skip_non_working_days is True
     assert settings.monitoring.webhook_url == "https://qyapi.example.test/alert-hook"
     assert settings.monitoring.webhook_format == "wecom_markdown_v2"
     # The output budget belongs to the model: neither provider carries an

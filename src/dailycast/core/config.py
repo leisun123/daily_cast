@@ -98,11 +98,13 @@ class BriefingSettings(BaseModel):
     enabled: bool = False
     sources_config_path: Path = Path("config/briefing.sources.yaml")
     selection_policy_path: Path = Path("config/briefing.selection.yaml")
-    # Generation finishes before the user-facing delivery time. The retry is
-    # intentionally earlier than 08:30 so delivery never begins collection.
-    preparation_cron_expression: str = "55 7 * * mon-fri"
-    preparation_retry_cron_expression: str = "15 8 * * mon-fri"
-    cron_expression: str = "30 8 * * mon-fri"
+    # Cron ticks every calendar day; non-working days (weekends + statutory
+    # holidays, including makeup workdays) are filtered by the China calendar.
+    preparation_cron_expression: str = "55 7 * * *"
+    preparation_retry_cron_expression: str = "15 8 * * *"
+    cron_expression: str = "30 8 * * *"
+    skip_non_working_days: bool = True
+    workday_calendar_path: Path = Path("config/china_workdays.yaml")
     window_hours: int = Field(default=24, ge=1, le=168)
     max_items_per_category: int = Field(default=6, ge=1, le=6)
     max_evidence_chars_per_article: int = Field(default=800, ge=1, le=8000)

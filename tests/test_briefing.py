@@ -748,7 +748,9 @@ def test_briefing_settings_default_to_disabled() -> None:
     assert settings.webhook_enabled is False
     assert settings.webhook_format == "wecom_markdown"
     assert settings.window_hours == 24
-    assert settings.cron_expression == "30 8 * * mon-fri"
+    assert settings.cron_expression == "30 8 * * *"
+    assert settings.skip_non_working_days is True
+    assert settings.workday_calendar_path == Path("config/china_workdays.yaml")
     assert settings.rsshub_base_url is None
 
 

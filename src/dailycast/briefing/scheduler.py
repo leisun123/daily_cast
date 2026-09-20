@@ -6,12 +6,15 @@ import logging
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.service import BriefingRunInProgressError, BriefingRunReport
+from dailycast.core.workdays import IsWorkingDay, WeekdayWorkdayCalendar
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,9 @@ class BriefingScheduler:
         timezone: str,
         alert: BriefingAlert | None = None,
         preflight: Callable[[], Awaitable[None]] | None = None,
+        is_working_day: IsWorkingDay | None = None,
+        skip_non_working_days: bool = True,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self._prepare = prepare
         self._deliver = deliver
@@ -39,6 +45,9 @@ class BriefingScheduler:
         self._timezone = timezone
         self._alert = alert
         self._preflight = preflight
+        self._is_working_day = is_working_day or WeekdayWorkdayCalendar().is_working_day
+        self._skip_non_working_days = skip_non_working_days
+        self._now = now
         self._scheduler: AsyncIOScheduler | None = None
 
     def start(self) -> None:
@@ -101,6 +110,8 @@ class BriefingScheduler:
 
     async def trigger_prepare(self) -> None:
         """Probe providers, then prepare one briefing, keeping a failed tick isolated."""
+        if not self._should_run_today():
+            return
         await self._run_preflight()
         try:
             await self._prepare()
@@ -112,6 +123,8 @@ class BriefingScheduler:
 
     async def trigger_delivery(self) -> None:
         """Deliver the already-persisted briefing without any collection or LLM work."""
+        if not self._should_run_today():
+            return
         try:
             await self._deliver()
         except BriefingRunInProgressError:
@@ -119,6 +132,25 @@ class BriefingScheduler:
         except Exception as error:
             await self._alert_message("企业微信发送", error)
             logger.exception("scheduled briefing delivery failed")
+
+    def _should_run_today(self) -> bool:
+        """Skip scheduled ticks on non-working days; manual API runs stay unrestricted."""
+        if not self._skip_non_working_days:
+            return True
+        today = self._local_today()
+        if self._is_working_day(today):
+            return True
+        logger.info(
+            "scheduled briefing tick skipped: non-working day",
+            extra={"date": today.isoformat(), "timezone": self._timezone},
+        )
+        return False
+
+    def _local_today(self) -> date:
+        """Return the application-local calendar date for this schedule tick."""
+        tz = ZoneInfo(self._timezone)
+        moment = self._now() if self._now is not None else datetime.now(tz)
+        return moment.astimezone(tz).date()
 
     async def _run_preflight(self) -> None:
         """Best-effort provider probe; a broken probe must never block preparation."""

@@ -13,6 +13,7 @@ from editorial_test_support import upgraded_session_factory
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
+from dailycast.briefing import service as service_module
 from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.renderer import RENDER_BYTE_BUDGET
 from dailycast.briefing.schemas import (
@@ -601,6 +602,7 @@ def _build_service(
     selection_policy: BriefingSelectionPolicy | None = None,
     clock: Clock | None = None,
     alert: BriefingAlert | None = None,
+    is_working_day: Callable[[date], bool] | None = None,
 ) -> BriefingService:
     article_service = ArticleService(factory, clock=clock)
     collection_service = SourceCollectionService(
@@ -626,6 +628,7 @@ def _build_service(
         selection_policy=selection_policy
         or load_selection_policy(PROJECT_ROOT / "config" / "briefing.selection.yaml"),
         clock=clock,
+        is_working_day=is_working_day,
     )
 
 
@@ -1198,10 +1201,11 @@ def test_briefing_model_fallback_reports_the_generation_error(
     report = asyncio.run(service.prepare())
 
     assert report.date == "2026-08-27"
+    # Item shortfalls are logged, not pushed to the monitoring WeCom robot.
+    # Generation degradation still alerts because operators must know the
+    # edition fell back to a title list.
     assert alerts.events == [
         ("消息生成（通信行业日报）已降级为标题列表，日报仍将按时发送", "llm unavailable"),
-        ("简报条目不足（通信行业日报）", "合格候选仅 1 条，最终入选 1 条，低于目标 6 条"),
-        ("简报条目不足（AI 动态日报）", "无合格候选，板块整体缺失（目标 6 条）"),
     ]
 
 
@@ -1229,10 +1233,10 @@ def test_briefing_push_failure_reports_the_delivery_error(
     assert alerts.events == [("企业微信发送", "webhook down")]
 
 
-def test_item_shortfall_alerts_report_a_thin_candidate_pool(
-    session_factory: sessionmaker[Session], tmp_path: Path
+def test_item_shortfalls_are_logged_without_a_wecom_alert(
+    session_factory: sessionmaker[Session], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pool below target is reported with both the candidate and selection counts."""
+    """A thin candidate pool is recorded in logs and does not page the group bot."""
     now = datetime(2026, 8, 27, 16, 30, tzinfo=UTC)
     telecom_urls = []
     for index in range(1, 4):
@@ -1269,13 +1273,19 @@ def test_item_shortfall_alerts_report_a_thin_candidate_pool(
         alert=alerts.alertmsg,
         clock=FixedClock(now),
     )
+    logged: list[str] = []
+    original_warning = service_module.logger.warning
+
+    def capture_warning(message: str, *args: object, **kwargs: object) -> None:
+        logged.append(message)
+        original_warning(message, *args, **kwargs)
+
+    monkeypatch.setattr(service_module.logger, "warning", capture_warning)
 
     asyncio.run(service.prepare())
 
-    assert alerts.events == [
-        ("简报条目不足（通信行业日报）", "合格候选仅 3 条，最终入选 3 条，低于目标 6 条"),
-        ("简报条目不足（AI 动态日报）", "合格候选仅 1 条，最终入选 1 条，低于目标 6 条"),
-    ]
+    assert alerts.events == []
+    assert logged.count("briefing item shortfall") == 2
 
 
 def test_healthy_categories_raise_no_shortfall_alert(
@@ -1593,6 +1603,56 @@ def test_briefing_run_on_monday_includes_friday_through_sunday(
         end=datetime(2026, 8, 23, 16, tzinfo=UTC),
     )
     assert report.date == "2026-08-23"
+    assert telecom.status == "generated"
+
+
+def test_briefing_run_on_makeup_sunday_covers_friday_and_saturday(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A 调休 Sunday looks back through Friday and Saturday, not only Saturday."""
+    now = datetime(2026, 9, 20, 0, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate(
+                    "telecom-source",
+                    "friday-network",
+                    # Friday 10:00 Asia/Shanghai == Friday 02:00 UTC.
+                    published_at=datetime(2026, 9, 18, 2, 0, tzinfo=UTC),
+                )
+            ]
+        }
+    )
+    llm = FakeBriefingLLM(
+        {
+            "通信行业日报": _llm_payload(
+                "https://telecom-source.example.test/friday-network", "来源 telecom-source"
+            )
+        }
+    )
+
+    def is_working_day(day: date) -> bool:
+        return day.isoformat() == "2026-09-20" or day.weekday() < 5
+
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=None,
+        clock=FixedClock(now),
+        is_working_day=is_working_day,
+    )
+
+    report = asyncio.run(service.run())
+
+    telecom = next(item for item in report.categories if item.category == "telecom")
+    assert collector.collection_windows[0] == CollectionWindow(
+        start=datetime(2026, 9, 17, 16, tzinfo=UTC),
+        end=datetime(2026, 9, 19, 16, tzinfo=UTC),
+    )
+    assert report.date == "2026-09-19"
     assert telecom.status == "generated"
 
 

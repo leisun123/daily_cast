@@ -165,12 +165,17 @@ briefing:
   enabled: true
   sources_config_path: ./config/briefing.sources.yaml
   # Prepare yesterday's report before the group-facing 08:30 delivery tick.
-  # The 08:15 retry regenerates the prepared edition when its selection is
-  # below the item target (e.g. sources that publish after the first pass);
-  # it is a no-op once every category reached the target.
-  preparation_cron_expression: "55 7 * * mon-fri"
-  preparation_retry_cron_expression: "15 8 * * mon-fri"
-  cron_expression: "30 8 * * mon-fri"
+  # Cron ticks every calendar day; non-working days are skipped via
+  # config/china_workdays.yaml (weekends + statutory holidays, while makeup
+  # workdays such as 调休 still send). The 08:15 retry regenerates the prepared
+  # edition when its selection is below the item target (e.g. sources that
+  # publish after the first pass); it is a no-op once every category reached
+  # the target.
+  preparation_cron_expression: "55 7 * * *"
+  preparation_retry_cron_expression: "15 8 * * *"
+  cron_expression: "30 8 * * *"
+  skip_non_working_days: true
+  workday_calendar_path: ./config/china_workdays.yaml
   window_hours: 24
   max_items_per_category: 6
   max_evidence_chars_per_article: 800

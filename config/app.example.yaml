@@ -162,10 +162,14 @@ briefing:
   sources_config_path: ./config/briefing.sources.yaml
   selection_policy_path: ./config/briefing.selection.yaml
   # Prepare before the 08:30 delivery tick; the retry rebuilds the edition only
-  # when its selection is still below the item target.
-  preparation_cron_expression: "55 7 * * mon-fri"
-  preparation_retry_cron_expression: "15 8 * * mon-fri"
-  cron_expression: "30 8 * * mon-fri"
+  # when its selection is still below the item target. Cron runs every calendar
+  # day; skip_non_working_days filters weekends/holidays through
+  # config/china_workdays.yaml (makeup workdays still send).
+  preparation_cron_expression: "55 7 * * *"
+  preparation_retry_cron_expression: "15 8 * * *"
+  cron_expression: "30 8 * * *"
+  skip_non_working_days: true
+  workday_calendar_path: ./config/china_workdays.yaml
   window_hours: 24
   max_items_per_category: 6
   max_evidence_chars_per_article: 800
