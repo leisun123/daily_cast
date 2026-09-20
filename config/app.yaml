@@ -193,7 +193,8 @@ briefing:
 web_research:
   enabled: true
   provider: zhipu
-  max_candidates_per_source: 60
-  max_search_calls_per_source: 4
+  max_candidates_per_source: 40
+  # Serial facets + explicit queries: keep search volume low enough for Zhipu.
+  max_search_calls_per_source: 2
   search_context_size: medium
   max_article_chars: 12000

@@ -143,22 +143,26 @@ class ResearchCollector:
         successful_search_calls = 0
         seen_discovered_urls: set[str] = set()
         facets = _research_call_facets(options.topic, self._settings.max_search_calls_per_source)
-        search_results = await asyncio.gather(
-            *(
-                self._provider.generate_web_research(
-                    _research_messages(options, window, focus=facet),
-                    WebResearchCandidateSet,
-                    {
-                        "search_context_size": self._settings.search_context_size,
-                        # Zhipu-style discovery searches each facet verbatim
-                        # instead of deriving searches from the prompt itself.
-                        "search_queries": [facet],
-                    },
+        # Facets run one-by-one on purpose: briefing preparation starts long
+        # before delivery, and parallel /web_search bursts trip Zhipu's rate
+        # limit far more often than they save wall-clock time.
+        search_results: list[StructuredResult | BaseException] = []
+        for facet in facets:
+            try:
+                search_results.append(
+                    await self._provider.generate_web_research(
+                        _research_messages(options, window, focus=facet),
+                        WebResearchCandidateSet,
+                        {
+                            "search_context_size": self._settings.search_context_size,
+                            # Zhipu-style discovery searches each facet verbatim
+                            # instead of deriving searches from the prompt itself.
+                            "search_queries": [facet],
+                        },
+                    )
                 )
-                for facet in facets
-            ),
-            return_exceptions=True,
-        )
+            except Exception as error:  # noqa: BLE001 - isolated per facet below
+                search_results.append(error)
         for facet, search_result in zip(facets, search_results, strict=True):
             if isinstance(search_result, LLMWebSearchUnsupportedError):
                 return CollectionResult(
@@ -183,6 +187,15 @@ class ResearchCollector:
                     SourceError(
                         code="WEB_RESEARCH_REQUEST_FAILED",
                         summary="native web-search request failed",
+                        retryable=False,
+                    )
+                )
+                continue
+            if not isinstance(search_result, StructuredResult):
+                errors.append(
+                    SourceError(
+                        code="WEB_RESEARCH_RESPONSE_INVALID",
+                        summary="native web-search returned an invalid candidate set",
                         retryable=False,
                     )
                 )

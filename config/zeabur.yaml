@@ -78,9 +78,11 @@ web_research:
   enabled: true
   # The deployment primary is the Zhipu GLM endpoint, so discovery runs through
   # BigModel's verbatim-URL search API instead of a Responses web_search tool.
+  # Two facets per source keep the search quota under control; facets are
+  # collected serially, which is fine inside the long prepare window.
   provider: zhipu
-  max_candidates_per_source: 60
-  max_search_calls_per_source: 4
+  max_candidates_per_source: 40
+  max_search_calls_per_source: 2
   search_context_size: medium
   max_article_chars: 12000
 

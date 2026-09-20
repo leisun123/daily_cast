@@ -1039,11 +1039,12 @@ def test_zhipu_web_research_searches_then_filters_verbatim_urls() -> None:
     chat_requests = [r for r in requests if r.url.path.endswith("/chat/completions")]
     assert len(search_requests) == 1
     search_payload = json.loads(search_requests[0].content)
-    assert search_payload["search_query"] == "运营商 5G-A 最新动态"
+    # Explicit collector facets are searched verbatim; no extra query-generation call.
+    assert search_payload["search_query"] == "通信行业 5G-A 新闻"
     assert search_payload["search_engine"] == "search_pro"
     assert search_payload["count"] == 10
     assert search_payload["search_recency_filter"] == "oneWeek"
-    assert len(chat_requests) == 2
+    assert len(chat_requests) == 1
     filter_payload = json.loads(chat_requests[-1].content)
     assert filter_payload["response_format"] == {"type": "json_object"}
     system_message = filter_payload["messages"][0]["content"]
@@ -1148,9 +1149,86 @@ def test_zhipu_web_research_returns_empty_candidates_without_search_hits() -> No
         for request in requests
         if request.url.path.endswith("/chat/completions")
     ]
-    # Only the query-condensing call runs; the filter step is skipped entirely.
-    assert len(chat_payloads) == 1
-    assert any("搜索查询优化器" in m["content"] for m in chat_payloads[0]["messages"])
+    # Explicit facets skip query generation, and empty search hits skip filtering.
+    assert chat_payloads == []
+
+
+def test_zhipu_web_search_backoff_is_rate_limit_aware() -> None:
+    """429 waits grow on a seconds-scale schedule instead of sub-second retries."""
+    attempts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(429, json={"error": {"message": "rate limited"}})
+
+    async def scenario() -> None:
+        async def fake_sleep(delay: float) -> None:
+            attempts.append(delay)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = ZhipuWebResearchProvider(
+                base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                api_key="test-key",
+                model="glm-5.3-flash",
+                timeout_seconds=2,
+                temperature=0.1,
+                max_retries=2,
+                http_client=client,
+            )
+            original_sleep = asyncio.sleep
+            asyncio.sleep = fake_sleep  # type: ignore[assignment]
+            try:
+                with pytest.raises(LLMProviderError):
+                    await provider.generate_web_research(
+                        (LLMMessage(role="user", content="主题：通信行业新闻"),),
+                        ScoreOutput,
+                        {"search_queries": ["通信行业新闻"]},
+                    )
+            finally:
+                asyncio.sleep = original_sleep  # type: ignore[assignment]
+
+    asyncio.run(scenario())
+    assert attempts == [1.0, 3.0]
+
+
+def test_zhipu_web_research_uses_explicit_facet_queries_without_query_generation() -> None:
+    """Collector-supplied facets must not fan out into extra chat-generated searches."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/web_search"):
+            return httpx.Response(200, json={"search_result": []})
+        raise AssertionError(f"unexpected chat call for explicit facet: {request.url}")
+
+    async def scenario() -> StructuredResult:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = ZhipuWebResearchProvider(
+                base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+                api_key="test-key",
+                model="glm-5.3-flash",
+                timeout_seconds=2,
+                temperature=0.1,
+                http_client=client,
+            )
+            return await provider.generate_web_research(
+                (LLMMessage(role="user", content="主题：通信行业新闻"),),
+                ScoreOutput,
+                {"search_queries": ["常州市运营商动态", "江苏省运营商动态"]},
+            )
+
+    result = asyncio.run(scenario())
+    assert result.content == {"candidates": []}
+    search_payloads = [
+        json.loads(request.content)
+        for request in requests
+        if request.url.path.endswith("/web_search")
+    ]
+    assert [payload["search_query"] for payload in search_payloads] == [
+        "常州市运营商动态",
+        "江苏省运营商动态",
+    ]
+    assert not any(request.url.path.endswith("/chat/completions") for request in requests)
 
 
 def test_openai_responses_provider_rejects_missing_output_text() -> None:

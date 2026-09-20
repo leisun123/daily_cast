@@ -34,6 +34,11 @@ _SEARCH_RECENCY_FILTERS = frozenset({"oneDay", "oneWeek", "oneMonth", "oneYear",
 _MAX_SEARCH_QUERIES = 3
 _SEARCH_ITEM_CONTENT_CHARS = 220
 _CHAT_COMPLETIONS_SUFFIX = "/chat/completions"
+# Search endpoints rate-limit far more tightly than chat completions. Pace calls
+# and back off long enough for a minute-scale quota window to reopen.
+_SEARCH_CALL_INTERVAL_SECONDS = 0.6
+_SEARCH_RETRY_BASE_SECONDS = 1.0
+_SEARCH_RETRY_STEP_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,9 +135,16 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
             msg = "web research search_context_size must be low, medium, or high"
             raise ValueError(msg)
         fallback_queries = _search_queries(options.pop("search_queries", None), messages)
-        queries = await self._generate_search_queries(messages, options)
-        if not queries:
-            queries = fallback_queries
+        # Explicit collector facets are the preferred discovery shape: the search
+        # API should see those queries verbatim. Generating extra chat queries on
+        # top multiplies /web_search calls and trips Zhipu's search quota.
+        if fallback_queries:
+            queries = fallback_queries[:_MAX_SEARCH_QUERIES]
+        else:
+            generated = await self._generate_search_queries(messages, options)
+            queries = generated[:_MAX_SEARCH_QUERIES]
+            if not queries:
+                queries = fallback_queries
         items = await self._collect_search_items(queries, result_count)
         if not items:
             return StructuredResult(
@@ -208,10 +220,12 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         ]
 
     async def _collect_search_items(self, queries: Sequence[str], count: int) -> list[_SearchItem]:
-        """Run every bounded query and merge results with case-insensitive link deduplication."""
+        """Run queries one-by-one with pacing; merge results with case-insensitive deduplication."""
         items: list[_SearchItem] = []
         seen_links: set[str] = set()
-        for query in queries:
+        for index, query in enumerate(queries):
+            if index:
+                await asyncio.sleep(_SEARCH_CALL_INTERVAL_SECONDS)
             for item in await self._web_search(query, count):
                 link_key = item.link.casefold()
                 if link_key in seen_links:
@@ -221,7 +235,7 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
         return items
 
     async def _web_search(self, query: str, count: int) -> list[_SearchItem]:
-        """Call the verbatim-URL search endpoint with bounded retry for transient failures."""
+        """Call the verbatim-URL search endpoint with rate-limit-aware retry backoff."""
         headers = {"Authorization": f"Bearer {self._api_key}"}
         payload = {
             "search_engine": self._search_engine,
@@ -239,16 +253,16 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
                 )
             except httpx.TimeoutException as error:
                 if attempt < self._max_retries:
-                    await asyncio.sleep(0.1 * (attempt + 1))
+                    await asyncio.sleep(_search_retry_delay(attempt))
                     continue
                 raise LLMProviderTimeoutError() from error
             except httpx.RequestError as error:
                 if attempt < self._max_retries:
-                    await asyncio.sleep(0.1 * (attempt + 1))
+                    await asyncio.sleep(_search_retry_delay(attempt))
                     continue
                 raise LLMProviderError() from error
             if response.status_code in {429, 500, 502, 503, 504} and attempt < self._max_retries:
-                await asyncio.sleep(0.1 * (attempt + 1))
+                await asyncio.sleep(_search_retry_delay(attempt))
                 continue
             if response.status_code in {400, 422}:
                 raise LLMWebSearchUnsupportedError()
@@ -258,6 +272,11 @@ class ZhipuWebResearchProvider(OpenAICompatibleLLMProvider):
                 raise LLMProviderError()
             return _parse_search_items(response)
         raise LLMProviderError()
+
+
+def _search_retry_delay(attempt: int) -> float:
+    """Grow waits across attempts so 429 can clear a real provider rate window."""
+    return _SEARCH_RETRY_BASE_SECONDS + _SEARCH_RETRY_STEP_SECONDS * attempt
 
 
 def _parse_search_items(response: httpx.Response) -> list[_SearchItem]:
