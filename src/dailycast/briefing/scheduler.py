@@ -116,8 +116,9 @@ class BriefingScheduler:
             await self._prepare()
         except BriefingRunInProgressError:
             logger.info("scheduled briefing preparation skipped: a run is already in progress")
-        except Exception as error:
-            await self._alert_message("消息生成", error)
+        except Exception:
+            # Both preparation ticks are recoverable. Delivery evaluates the
+            # persisted final outcome and reports only terminal failures.
             logger.exception("scheduled briefing preparation failed")
 
     async def trigger_delivery(self) -> None:

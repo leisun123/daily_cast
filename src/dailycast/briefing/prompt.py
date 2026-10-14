@@ -105,8 +105,11 @@ def build_briefing_repair_messages(
     )
     repair_context = (
         "这是一次校验后的补选，不是重新生成整份日报。此前结果经过原文链接、重复事件和来源数量"
-        f"校验后还缺 {missing_count} 条。请只从下面的剩余候选中补选恰好 {missing_count} 条；"
+        f"校验后还缺 {missing_count} 条。请只从下面的剩余候选中补选最多 {missing_count} 条；"
         "不得重复已经保留的新闻，也不得改变已经保留的内容。\n"
+        "只返回符合要求的 JSON 对象，必须包含 overview 和 items。items 只包含本次补选，"
+        "不得重复返回已经保留的条目。如果剩余候选均不适合入选，items 返回空数组，"
+        "overview 简述无合适补选内容的原因；不得改为 answer 或解释文字，也不要硬凑条数。\n"
         f"已经保留：\n{accepted}\n\n"
     )
     return (

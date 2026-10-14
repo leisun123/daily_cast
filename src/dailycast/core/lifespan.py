@@ -448,7 +448,7 @@ def _build_briefing_runtime(
             "Sequence[PingableProvider]",
             getattr(llm_provider, "providers", (llm_provider,)),
         )
-        preflight = partial(preflight_providers, configured_providers, alert)
+        preflight = partial(preflight_providers, configured_providers)
     briefing_service = BriefingService(
         session_factory,
         collection_service,

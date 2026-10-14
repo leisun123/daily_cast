@@ -61,8 +61,8 @@ def test_alertmsg_never_raises_when_the_alert_robot_itself_is_down() -> None:
     asyncio.run(alertmsg("企业微信发送", RuntimeError("main webhook failed")))
 
 
-def test_provider_preflight_alerts_only_the_provider_that_cannot_answer() -> None:
-    """A healthy fallback does not hide an unavailable preferred provider from operators."""
+def test_provider_preflight_does_not_alert_before_actual_generation_and_retry() -> None:
+    """An unavailable preferred provider may recover or be covered by a healthy fallback."""
     alerts: list[tuple[str, str]] = []
     primary = _ProbeProvider("primary", error=RuntimeError("connection refused"))
     fallback = _ProbeProvider("fallback")
@@ -74,7 +74,7 @@ def test_provider_preflight_alerts_only_the_provider_that_cannot_answer() -> Non
 
     assert primary.calls == 1
     assert fallback.calls == 1
-    assert alerts == [("AI Provider 预检（primary）", "connection refused")]
+    assert alerts == []
 
 
 def test_provider_preflight_is_silent_when_every_provider_answers() -> None:
@@ -91,7 +91,7 @@ def test_provider_preflight_is_silent_when_every_provider_answers() -> None:
     assert alerts == []
 
 
-def test_provider_preflight_reports_a_hung_provider_instead_of_waiting() -> None:
+def test_provider_preflight_logs_a_hung_provider_without_pushing_an_early_alert() -> None:
     """One wedged endpoint cannot stall the 07:55 generation start."""
     alerts: list[tuple[str, str]] = []
 
@@ -106,7 +106,7 @@ def test_provider_preflight_reports_a_hung_provider_instead_of_waiting() -> None
         )
     )
 
-    assert alerts == [("AI Provider 预检（hung）", "TimeoutError")]
+    assert alerts == []
 
 
 class _ProbeProvider:
