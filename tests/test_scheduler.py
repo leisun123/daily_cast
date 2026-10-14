@@ -191,8 +191,8 @@ def test_briefing_scheduler_runs_on_makeup_workdays() -> None:
     assert actions == ["prepare", "deliver"]
 
 
-def test_briefing_scheduler_alerts_when_preparation_raises() -> None:
-    """A collection or generation exception reaches the independent alert path."""
+def test_briefing_scheduler_logs_preparation_failures_without_pushing_early_alerts() -> None:
+    """Preparation retries may recover, so only delivery can judge the final outcome."""
     alerts: list[tuple[str, str]] = []
 
     async def prepare() -> BriefingRunReport:
@@ -207,8 +207,9 @@ def test_briefing_scheduler_alerts_when_preparation_raises() -> None:
     scheduler = _briefing_scheduler(prepare, deliver, alert=alert)
 
     asyncio.run(scheduler.trigger_prepare())
+    asyncio.run(scheduler.trigger_prepare())
 
-    assert alerts == [("消息生成", "collection failed")]
+    assert alerts == []
 
 
 def test_briefing_scheduler_alerts_when_delivery_raises() -> None:

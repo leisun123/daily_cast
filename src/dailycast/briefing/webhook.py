@@ -87,6 +87,8 @@ class WebhookNotifier:
             body = response.json()
         except ValueError as error:
             raise WebhookPushError("webhook returned a non-JSON body") from error
+        if not isinstance(body, dict):
+            raise WebhookPushError("webhook returned a non-object JSON body")
         errcode = body.get("errcode")
         if errcode != 0:
             raise WebhookPushError(

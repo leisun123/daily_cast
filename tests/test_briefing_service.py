@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 from editorial_test_support import upgraded_session_factory
 from pydantic import BaseModel
@@ -155,7 +156,7 @@ class FakeBriefingLLM:
     ) -> StructuredResult:
         """Return the canned payload keyed by the category title in the user prompt."""
         del response_schema, model_options
-        user_content = messages[-1].content
+        user_content = "\n".join(message.content for message in messages if message.role == "user")
         if "最终「昨日关注」" in user_content:
             self.focus_prompts.append(user_content)
             focus = self._results_by_marker.get(
@@ -187,7 +188,9 @@ class FakeBriefingLLM:
 class SequencedBriefingLLM(FakeBriefingLLM):
     """Return successive category responses so selection repair is exercised end to end."""
 
-    def __init__(self, category_marker: str, payloads: Sequence[dict[str, object]]) -> None:
+    def __init__(
+        self, category_marker: str, payloads: Sequence[dict[str, object] | Exception]
+    ) -> None:
         super().__init__({})
         self._category_marker = category_marker
         self._payloads = list(payloads)
@@ -199,7 +202,7 @@ class SequencedBriefingLLM(FakeBriefingLLM):
         response_schema: type[BaseModel],
         model_options: Mapping[str, object],
     ) -> StructuredResult:
-        user_content = messages[-1].content
+        user_content = "\n".join(message.content for message in messages if message.role == "user")
         if "最终「昨日关注」" in user_content:
             return await super().generate_structured(
                 operation, messages, response_schema, model_options
@@ -208,8 +211,11 @@ class SequencedBriefingLLM(FakeBriefingLLM):
         self.user_prompts.append(user_content)
         if self._category_marker not in user_content or not self._payloads:
             raise AssertionError("no sequenced LLM result matched the briefing prompt")
+        payload = self._payloads.pop(0)
+        if isinstance(payload, Exception):
+            raise payload
         return StructuredResult(
-            content=self._payloads.pop(0),
+            content=payload,
             model=self.model,
             usage=LLMUsage(input_tokens=10, output_tokens=20),
             request_id="fake-briefing-sequence",
@@ -1175,16 +1181,17 @@ def test_briefing_run_uses_evidence_fallback_when_model_fails(
     assert len(notifier.pushed) == 1
 
 
-def test_briefing_model_fallback_reports_the_generation_error(
+def test_briefing_model_fallback_alerts_only_at_final_delivery_after_restart(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
-    """A title-list fallback remains deliverable but does not hide a model outage from operators."""
+    """Intermediate failures stay silent; persisted terminal degradation alerts once."""
     now = datetime(2026, 8, 27, 16, 30, tzinfo=UTC)
     _seed_source(session_factory, "telecom-source", category="telecom")
     alerts = _RecordedAlerts()
+    output_dir = tmp_path / "briefings"
     service = _build_service(
         session_factory,
-        tmp_path / "briefings",
+        output_dir,
         collector=FakeRSSCollector(
             {
                 "telecom-source": [
@@ -1201,12 +1208,184 @@ def test_briefing_model_fallback_reports_the_generation_error(
     report = asyncio.run(service.prepare())
 
     assert report.date == "2026-08-27"
-    # Item shortfalls are logged, not pushed to the monitoring WeCom robot.
-    # Generation degradation still alerts because operators must know the
-    # edition fell back to a title list.
-    assert alerts.events == [
-        ("消息生成（通信行业日报）已降级为标题列表，日报仍将按时发送", "llm unavailable"),
-    ]
+    assert alerts.events == []
+    asyncio.run(service.prepare())
+    assert alerts.events == []
+
+    restarted = _build_service(
+        session_factory,
+        output_dir,
+        collector=FakeRSSCollector({}),
+        llm=FakeBriefingLLM({}),
+        notifier=RecordingNotifier(),
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+    delivered = asyncio.run(restarted.deliver_prepared())
+    assert delivered.categories[0].push_status == "sent"
+    assert len(alerts.events) == 1
+    assert "通信行业日报" in alerts.events[0][1]
+    assert "llm unavailable" in alerts.events[0][1]
+    asyncio.run(restarted.deliver_prepared())
+    assert len(alerts.events) == 1
+
+
+@pytest.mark.parametrize("recovers", [True, False], ids=["recovers", "still-degraded"])
+@pytest.mark.parametrize("legacy_marker", [False, True], ids=["current-marker", "legacy-marker"])
+def test_full_degraded_edition_is_retried_and_only_the_final_result_can_alert(
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    recovers: bool,
+    legacy_marker: bool,
+) -> None:
+    """Six fallback titles must not skip retry, and a recovered edition must stay silent."""
+    now = datetime(2026, 10, 13, 23, 55, tzinfo=UTC)
+    collector, healthy_llm = _two_category_setup(session_factory, now=now)
+    failing_llm = FakeBriefingLLM(
+        {
+            "通信行业日报": LLMProviderError(),
+            "AI 动态日报": _llm_payloads(
+                [f"https://ai-source.example.test/a{index}" for index in range(1, 7)],
+                "来源 ai-source",
+            ),
+        }
+    )
+    output_dir = tmp_path / "briefings"
+    alerts = _RecordedAlerts()
+    notifier = RecordingNotifier()
+
+    def build(llm: LLMProvider, time: datetime) -> BriefingService:
+        return _build_service(
+            session_factory,
+            output_dir,
+            collector=collector,
+            llm=llm,
+            notifier=notifier,
+            alert=alerts.alertmsg,
+            clock=FixedClock(time),
+        )
+
+    asyncio.run(build(failing_llm, now).prepare())
+    assert alerts.events == []
+    if legacy_marker:
+        marker_path = output_dir / "2026-10-14-merged.prepared.json"
+        marker = json.loads(marker_path.read_text())
+        del marker["generation_errors"]
+        del marker["markdown"]
+        marker_path.write_text(json.dumps(marker))
+    retry = build(healthy_llm if recovers else failing_llm, now + timedelta(minutes=20))
+    retry_report = asyncio.run(retry.prepare())
+    assert {entry.status for entry in retry_report.categories} == {"generated"}
+    assert alerts.events == []
+
+    # A new service instance must make the same decision using durable state.
+    final_service = build(FakeBriefingLLM({}), now + timedelta(minutes=35))
+    asyncio.run(final_service.deliver_prepared())
+    assert ("降级版" in notifier.pushed[0]) is not recovers
+    if recovers:
+        assert alerts.events == []
+    else:
+        assert len(alerts.events) == 1
+        assert "通信行业日报" in alerts.events[0][1]
+    asyncio.run(final_service.deliver_prepared())
+    assert len(notifier.pushed) == 1
+    assert len(alerts.events) == (0 if recovers else 1)
+
+
+@pytest.mark.parametrize("recovers", [True, False], ids=["retry-succeeds", "retries-exhausted"])
+@pytest.mark.parametrize("malformed_body", [False, True], ids=["http-error", "invalid-json-shape"])
+def test_delivery_alerts_only_after_webhook_retries_are_exhausted(
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    recovers: bool,
+    malformed_body: bool,
+) -> None:
+    """A degraded edition plus a failed send produces one terminal delivery alert."""
+    now = datetime(2026, 10, 14, 0, 30, tzinfo=UTC)
+    collector, _ = _two_category_setup(session_factory, now=now)
+    alerts = _RecordedAlerts()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert alerts.events == []
+        requests.append(request)
+        if recovers and len(requests) == 2:
+            return httpx.Response(200, json={"errcode": 0})
+        if malformed_body:
+            return httpx.Response(200, json=[])
+        return httpx.Response(500)
+
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=FakeBriefingLLM(
+            {"通信行业日报": LLMProviderError(), "AI 动态日报": LLMProviderError()}
+        ),
+        notifier=WebhookNotifier(
+            "https://wecom.example.test/webhook",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        ),
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+
+    asyncio.run(service.prepare())
+    assert alerts.events == []
+    report = asyncio.run(service.deliver_prepared())
+    assert len(requests) == 2
+    assert {entry.push_status for entry in report.categories} == {"sent" if recovers else "failed"}
+    assert len(alerts.events) == 1
+    if recovers:
+        assert "消息生成" in alerts.events[0][0]
+        assert "通信行业日报" in alerts.events[0][1]
+        assert "AI 动态日报" in alerts.events[0][1]
+    else:
+        assert alerts.events[0][0] == "企业微信发送"
+
+
+@pytest.mark.parametrize("corrects", [True, False], ids=["corrected", "still-invalid"])
+def test_initial_briefing_schema_error_gets_one_bounded_correction(
+    session_factory: sessionmaker[Session], tmp_path: Path, corrects: bool
+) -> None:
+    """An explanation-shaped response can be corrected before the category is degraded."""
+    now = datetime(2026, 10, 14, 0, 0, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    # This case isolates telecom so the sequenced model's two replies have one owner.
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate("telecom-source", f"t{index}", published_at=now - timedelta(hours=12))
+                for index in range(1, 7)
+            ]
+        }
+    )
+    urls = [f"https://telecom-source.example.test/t{index}" for index in range(1, 7)]
+    llm = SequencedBriefingLLM(
+        "通信行业日报",
+        [
+            {"answer": "已生成日报。"},
+            _llm_payloads(urls, "来源 telecom-source") if corrects else {"answer": "仍无结构。"},
+        ],
+    )
+    notifier = RecordingNotifier()
+    alerts = _RecordedAlerts()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=collector,
+        llm=llm,
+        notifier=notifier,
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+
+    asyncio.run(service.run())
+
+    assert ("降级" in notifier.pushed[0]) is not corrects
+    assert all(url in notifier.pushed[0] for url in urls)
+    assert len(alerts.events) == (0 if corrects else 1)
+    assert len(llm.user_prompts) == 2
 
 
 def test_briefing_push_failure_reports_the_delivery_error(
@@ -1421,6 +1600,157 @@ def test_editorial_generation_repairs_invalid_items_with_a_second_llm_selection(
     assert "还缺 2 条" in llm.user_prompts[1]
 
 
+def test_editorial_topup_audits_and_bounds_a_repeated_full_edition_before_combining(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A six-item top-up repeating three accepted URLs must produce six valid items."""
+    now = datetime(2026, 10, 14, 0, 0, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    urls = [f"https://telecom-source.example.test/t{index}" for index in range(1, 7)]
+    alerts = _RecordedAlerts()
+    notifier = RecordingNotifier()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector(
+            {
+                "telecom-source": [
+                    _candidate(
+                        "telecom-source", f"t{index}", published_at=now - timedelta(hours=12)
+                    )
+                    for index in range(1, 7)
+                ]
+            }
+        ),
+        llm=SequencedBriefingLLM(
+            "通信行业日报",
+            [_llm_payloads(urls[:3], "初选来源"), _llm_payloads(urls, "补选来源")],
+        ),
+        notifier=notifier,
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+
+    asyncio.run(service.run())
+
+    assert "降级" not in notifier.pushed[0]
+    assert all(notifier.pushed[0].count(url) == 1 for url in urls)
+    assert alerts.events == []
+
+
+@pytest.mark.parametrize("previous_degraded", [False, True], ids=["healthy", "degraded"])
+def test_failed_prepared_marker_replacement_keeps_content_and_alert_state_together(
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous_degraded: bool,
+) -> None:
+    """A failed commit of retry state must leave the previous edition coherently deliverable."""
+    now = datetime(2026, 10, 13, 23, 55, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    urls = [f"https://telecom-source.example.test/t{index}" for index in range(1, 7)]
+    collector = FakeRSSCollector(
+        {
+            "telecom-source": [
+                _candidate("telecom-source", f"t{index}", published_at=now - timedelta(hours=12))
+                for index in range(1, 7)
+            ]
+        }
+    )
+    alerts = _RecordedAlerts()
+    notifier = RecordingNotifier()
+    output_dir = tmp_path / "briefings"
+
+    def build(payload: object) -> BriefingService:
+        return _build_service(
+            session_factory,
+            output_dir,
+            collector=collector,
+            llm=FakeBriefingLLM({"通信行业日报": payload}),
+            notifier=notifier,
+            alert=alerts.alertmsg,
+            clock=FixedClock(now),
+        )
+
+    first = build(LLMProviderError() if previous_degraded else _llm_payloads(urls[:3], "初选来源"))
+    report = asyncio.run(first.prepare())
+    previous_markdown = (output_dir / f"{report.date}-merged.md").read_text()
+    real_write = service_module._atomic_write
+
+    def fail_marker_write(path: Path, content: str) -> None:
+        if path.name.endswith("-merged.prepared.json"):
+            raise OSError("prepared marker unavailable")
+        real_write(path, content)
+
+    monkeypatch.setattr(service_module, "_atomic_write", fail_marker_write)
+    retry = build(_llm_payloads(urls, "重试来源") if previous_degraded else LLMProviderError())
+    with pytest.raises(OSError, match="prepared marker unavailable"):
+        asyncio.run(retry.prepare())
+    assert alerts.events == []
+
+    asyncio.run(build(LLMProviderError()).deliver_prepared())
+
+    assert notifier.pushed == [previous_markdown]
+    assert len(alerts.events) == (1 if previous_degraded else 0)
+
+
+@pytest.mark.parametrize("failure_target", ["category", "merged", "snapshot"])
+def test_manual_run_alerts_when_briefing_storage_fails(
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_target: str,
+) -> None:
+    """A terminal manual save failure must not disappear with deferred scheduled alerts."""
+    now = datetime(2026, 10, 14, 0, 0, tzinfo=UTC)
+    _seed_source(session_factory, "telecom-source", category="telecom")
+    alerts = _RecordedAlerts()
+    notifier = RecordingNotifier()
+    service = _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector(
+            {
+                "telecom-source": [
+                    _candidate("telecom-source", "t1", published_at=now - timedelta(hours=12))
+                ]
+            }
+        ),
+        llm=FakeBriefingLLM({"通信行业日报": LLMProviderError()}),
+        notifier=notifier,
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+
+    def fail_save(*args: object, **kwargs: object) -> Path:
+        raise OSError("briefing storage unavailable")
+
+    if failure_target == "category":
+        monkeypatch.setattr(service, "_write_markdown", fail_save)
+        report = asyncio.run(service.run())
+        assert (
+            next(entry for entry in report.categories if entry.category == "telecom").status
+            == "failed"
+        )
+    else:
+        real_write = service_module._atomic_write
+        suffix = "-merged.md" if failure_target == "merged" else "-merged.prepared.json"
+
+        def fail_final_write(path: Path, content: str) -> None:
+            if path.name.endswith(suffix):
+                raise OSError("briefing storage unavailable")
+            real_write(path, content)
+
+        monkeypatch.setattr(service_module, "_atomic_write", fail_final_write)
+        with pytest.raises(OSError, match="briefing storage unavailable"):
+            asyncio.run(service.run())
+    assert notifier.pushed == []
+    assert len(alerts.events) == 1
+    if failure_target == "category":
+        assert "通信行业日报" in alerts.events[0][1]
+    assert "briefing storage unavailable" in alerts.events[0][1]
+
+
 def test_editorial_generation_keeps_valid_partial_selection_when_repair_cannot_fill_six(
     session_factory: sessionmaker[Session], tmp_path: Path
 ) -> None:
@@ -1457,6 +1787,66 @@ def test_editorial_generation_keeps_valid_partial_selection_when_repair_cannot_f
     assert all(url in delivered for url in urls[:4])
     assert all(url not in delivered for url in urls[4:])
     assert "fabricated.example.test" not in delivered
+
+
+@pytest.mark.parametrize(
+    "repair_response",
+    [
+        {"answer": "经逐条核验，剩余候选不适合补选，日报保持原有3条。"},
+        LLMProviderError(),
+    ],
+    ids=["explanation-instead-of-schema", "provider-failure"],
+)
+@pytest.mark.parametrize("accepted_count", [0, 3], ids=["no-valid-items", "valid-partial"])
+def test_editorial_repair_failure_preserves_valid_items_without_false_degradation(
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    repair_response: dict[str, object] | Exception,
+    accepted_count: int,
+) -> None:
+    """An optional top-up failure cannot discard an already verified, written briefing."""
+    now = datetime(2026, 10, 14, 0, 0, tzinfo=UTC)
+    candidates_by_source: dict[str, list[ArticleCandidate]] = {}
+    urls: list[str] = []
+    for index in range(1, 7):
+        source_id = f"telecom-topup-error-{index}"
+        _seed_source(session_factory, source_id, category="telecom")
+        candidates_by_source[source_id] = [
+            _candidate(source_id, f"item-{index}", published_at=now - timedelta(hours=12))
+        ]
+        urls.append(f"https://{source_id}.example.test/item-{index}")
+    llm = SequencedBriefingLLM(
+        "通信行业日报",
+        [_llm_payloads(urls[:accepted_count], "初选来源"), repair_response],
+    )
+    alerts = _RecordedAlerts()
+    notifier = RecordingNotifier()
+    output_dir = tmp_path / "briefings"
+    service = _build_service(
+        session_factory,
+        output_dir,
+        collector=FakeRSSCollector(candidates_by_source),
+        llm=llm,
+        notifier=notifier,
+        alert=alerts.alertmsg,
+        clock=FixedClock(now),
+    )
+
+    report = asyncio.run(service.run())
+
+    delivered = notifier.pushed[0]
+    if accepted_count:
+        assert "降级" not in delivered
+        assert all(url in delivered for url in urls[:accepted_count])
+        assert all(url not in delivered for url in urls[accepted_count:])
+        assert alerts.events == []
+        category_markdown = (output_dir / f"{report.date}-telecom.md").read_text()
+        assert "相关主体公布最新进展" in category_markdown
+        assert "未生成新闻摘要" not in category_markdown
+    else:
+        assert "📡 通信（降级版）" in delivered
+        assert len(alerts.events) == 1
+        assert "已降级为标题列表" in " ".join(alerts.events[0])
 
 
 def test_briefing_run_skips_a_category_without_eligible_articles(

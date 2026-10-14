@@ -15,6 +15,7 @@ from math import ceil
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.alerts import BriefingAlert
@@ -53,7 +54,7 @@ from dailycast.db.models import LLMOperation, Source
 from dailycast.db.repositories import ArticleRepository, SourceRepository
 from dailycast.db.transactions import UnitOfWork
 from dailycast.llm.budget import BudgetController, BudgetReservingLLMProvider
-from dailycast.llm.contracts import LLMProvider
+from dailycast.llm.contracts import LLMMessage, LLMProvider
 from dailycast.llm.providers.failover import FailoverLLMProvider
 from dailycast.news.service import NewsProcessor
 from dailycast.sources.contracts import CollectionWindow
@@ -138,6 +139,7 @@ class _PreparedBriefing:
     # can recognize a below-target edition and regenerate it. None for legacy
     # markers written before this field existed; those keep the old semantics.
     item_counts: dict[str, int] | None = None
+    generation_errors: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,8 +349,21 @@ class BriefingService:
     async def _run_reserved_body(self, *, force: bool) -> BriefingRunReport:
         """Execute the manual prepare-and-deliver path and always release the slot."""
         try:
-            prepared = await self._prepare_once(force=force)
+            try:
+                prepared = await self._prepare_once(force=force)
+            except Exception as error:
+                await self._alert_message("消息生成（手动运行最终失败）", error)
+                raise
             if not prepared.should_deliver:
+                failures = [
+                    f"{CATEGORY_TITLES[report.category]}：{report.error or '日报生成或保存失败'}"
+                    for report in prepared.report.categories
+                    if report.status == "failed"
+                ]
+                if failures:
+                    await self._alert_message(
+                        "消息生成（手动运行最终失败）", RuntimeError("；".join(failures))
+                    )
                 return prepared.report
             return await self._deliver_prepared_once(
                 prepared.run_date,
@@ -461,7 +476,9 @@ class BriefingService:
             merged_path = output_dir / f"{briefing_date.isoformat()}-merged.md"
             _atomic_write(merged_path, merged_markdown)
             if not dry_run:
-                self._write_prepared_marker(run_date, briefing_date, pending_deliveries)
+                self._write_prepared_marker(
+                    run_date, briefing_date, pending_deliveries, reports, markdown=merged_markdown
+                )
         prepared_report = BriefingRunReport(
             date=briefing_date.isoformat(), categories=tuple(reports)
         )
@@ -517,6 +534,17 @@ class BriefingService:
                 _atomic_write(
                     self._marker_path(run_date, category),
                     f"{self._clock.now().isoformat()}\n",
+                )
+            if prepared.generation_errors:
+                details = "；".join(
+                    f"{CATEGORY_TITLES[category]}：{error}"
+                    for category, error in prepared.generation_errors.items()
+                )
+                categories = "、".join(
+                    CATEGORY_TITLES[category] for category in prepared.generation_errors
+                )
+                await self._alert_message(
+                    f"消息生成（最终重试后仍失败或降级：{categories}）", RuntimeError(details)
                 )
 
         if prepared_report is not None:
@@ -745,14 +773,11 @@ class BriefingService:
                 ),
                 None,
             )
+        generation_error: str | None = None
         try:
             result = await self._generate_result(category, evidence, provider)
         except Exception as error:
-            if not dry_run:
-                await self._alert_message(
-                    f"消息生成（{CATEGORY_TITLES[category]}）已降级为标题列表，日报仍将按时发送",
-                    error,
-                )
+            generation_error = f"{error.__class__.__name__}: {' '.join(str(error).split())[:240]}"
             logger.exception(
                 "briefing model generation failed; using evidence fallback",
                 extra={"category": category, "error": str(error)},
@@ -779,6 +804,7 @@ class BriefingService:
                 status="generated",
                 article_count=len(evidence),
                 file_path=file_path,
+                error=generation_error,
             ),
             _PendingBriefingDelivery(category=category, result=result, evidence=evidence),
         )
@@ -796,13 +822,7 @@ class BriefingService:
             category=category,
             editorial_selection=self._selection_policy.category(category).editorial_selection,
         )
-        structured = await provider.generate_structured(
-            operation=LLMOperation.GENERATE_BRIEFING,
-            messages=messages,
-            response_schema=BriefingResult,
-            model_options={},
-        )
-        result = BriefingResult.model_validate(structured.content)
+        result = await self._generate_validated_result(messages, provider)
         policy = self._selection_policy.category(category)
         audited = _audit_generated_result(
             result,
@@ -822,28 +842,38 @@ class BriefingService:
             entry for entry in evidence if entry.evidence.source_url not in accepted_urls
         )
         missing_count = target_count - len(audited.items)
-        repair_structured = await provider.generate_structured(
-            operation=LLMOperation.GENERATE_BRIEFING,
-            messages=build_briefing_repair_messages(
-                CATEGORY_TITLES[category],
-                category,
-                remaining,
-                audited.items,
-                missing_count=missing_count,
-            ),
-            response_schema=BriefingResult,
-            model_options={},
-        )
-        repair = BriefingResult.model_validate(repair_structured.content)
-        combined = BriefingResult(
-            overview=audited.overview,
-            items=[*audited.items, *repair.items],
-        )
-        repaired = _audit_generated_result(
-            combined,
-            evidence,
-            allow_evidence_backfill=False,
-        )
+        try:
+            repair = await self._generate_validated_result(
+                build_briefing_repair_messages(
+                    CATEGORY_TITLES[category],
+                    category,
+                    remaining,
+                    audited.items,
+                    missing_count=missing_count,
+                ),
+                provider,
+            )
+            repair = _audit_generated_result(repair, remaining, allow_evidence_backfill=False)
+            combined = BriefingResult(
+                overview=audited.overview,
+                items=[*audited.items, *repair.items[:missing_count]],
+            )
+            repaired = _audit_generated_result(combined, evidence, allow_evidence_backfill=False)
+        except Exception:
+            # Top-up is optional once there are verified, LLM-written items.
+            # With none, let the category's existing fallback and alert run.
+            if not audited.items:
+                raise
+            logger.warning(
+                "briefing editorial repair failed; retaining the verified LLM-written items",
+                extra={
+                    "category": category,
+                    "selected_count": len(audited.items),
+                    "target_count": target_count,
+                },
+                exc_info=True,
+            )
+            return audited
         if len(repaired.items) < target_count:
             logger.warning(
                 "briefing editorial selection remained below target after repair; "
@@ -855,6 +885,37 @@ class BriefingService:
                 },
             )
         return repaired
+
+    async def _generate_validated_result(
+        self, messages: tuple[LLMMessage, ...], provider: LLMProvider
+    ) -> BriefingResult:
+        """Allow one budgeted correction for a malformed JSON shape, never an unbounded retry."""
+        for attempt in range(2):
+            structured = await provider.generate_structured(
+                operation=LLMOperation.GENERATE_BRIEFING,
+                messages=messages,
+                response_schema=BriefingResult,
+                model_options={},
+            )
+            try:
+                return BriefingResult.model_validate(structured.content)
+            except ValidationError:
+                if attempt == 1:
+                    raise
+                logger.warning("briefing response schema invalid; requesting one correction")
+                messages = (
+                    *messages,
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            "上一次输出未符合约定结构。"
+                            "请重新返回一个符合 JSON Schema 的 JSON 对象，"
+                            "必须包含 overview 和 items；不要返回 answer、Markdown 或解释文字。"
+                            "如果没有合适的条目，items 返回空数组，overview 用完整句说明原因。"
+                        ),
+                    ),
+                )
+        raise AssertionError("unreachable briefing schema correction state")
 
     async def _generate_merged_focus(
         self,
@@ -974,14 +1035,30 @@ class BriefingService:
         run_date: date,
         briefing_date: date,
         deliveries: list[_PendingBriefingDelivery],
+        reports: list[BriefingCategoryReport],
+        *,
+        markdown: str,
     ) -> None:
-        """Record only a fully written combined message as ready for the 08:30 tick."""
+        """Commit the exact message and its status in one atomic delivery snapshot."""
+        degraded_categories = {
+            delivery.category for delivery in deliveries if delivery.result.degraded
+        }
+        generation_errors = {}
+        for report in reports:
+            if report.category in degraded_categories:
+                generation_errors[report.category] = "已降级为标题列表。" + (
+                    report.error or "模型未生成可用内容"
+                )
+            elif report.status == "failed":
+                generation_errors[report.category] = report.error or "日报生成或保存失败"
         payload = {
             "briefing_date": briefing_date.isoformat(),
             "categories": [delivery.category for delivery in deliveries],
             "item_counts": {
                 delivery.category: len(delivery.result.items) for delivery in deliveries
             },
+            "generation_errors": generation_errors,
+            "markdown": markdown,
         }
         _atomic_write(
             self._prepared_marker_path(run_date),
@@ -995,6 +1072,8 @@ class BriefingService:
         skip-at-08:15 semantics stay intact for content written before this
         field existed.
         """
+        if prepared.generation_errors:
+            return False
         if prepared.item_counts is None:
             return True
         return all(
@@ -1019,25 +1098,43 @@ class BriefingService:
             isinstance(key, str) and isinstance(value, int) for key, value in raw_counts.items()
         ):
             item_counts = dict(raw_counts)
+        generation_errors = payload.get("generation_errors", {})
+        if not isinstance(generation_errors, dict) or any(
+            category not in CATEGORY_TITLES or not isinstance(error, str)
+            for category, error in generation_errors.items()
+        ):
+            return None
         if (
             recorded_date != briefing_date
             or not categories
             or any(category not in CATEGORY_TITLES for category in categories)
         ):
             return None
-        merged_path = self._output_dir / f"{briefing_date.isoformat()}-merged.md"
-        try:
-            markdown = merged_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
+        if "markdown" in payload:
+            markdown = payload["markdown"]
+            if not isinstance(markdown, str):
+                return None
+        else:
+            # Legacy snapshots referenced the separately saved Markdown file.
+            merged_path = self._output_dir / f"{briefing_date.isoformat()}-merged.md"
+            try:
+                markdown = merged_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return None
         if not markdown.strip():
             return None
+        if "generation_errors" not in payload:
+            # Older markers did not record degradation, but their saved message did.
+            for category, heading in (("telecom", "📡 通信"), ("ai", "🤖 AI")):
+                if f"## {heading}（降级版）" in markdown:
+                    generation_errors[category] = "已降级为标题列表，详细错误请查看运行日志"
         return _PreparedBriefing(
             run_date=run_date,
             briefing_date=briefing_date,
             categories=categories,
             markdown=markdown,
             item_counts=item_counts,
+            generation_errors=generation_errors,
         )
 
     async def push_test(self) -> str:

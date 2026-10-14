@@ -693,6 +693,9 @@ HTMX 表单遇到业务错误时可返回相同错误码并渲染局部错误片
 - `web_research:` 是简报 P0 的可选发现能力：默认 `enabled=false`；Zeabur 测试配置显式开启。它使用当前 `openai_responses` primary provider 的原生 `web_search`，不需要 Anthropic key，也不会抓取 Google/Bing 搜索页。模型给出的 URL 只算候选，DailyCast 必须从自身服务器完成安全抓取、重定向、HTML 正文与页面发布日期验证后才会进入简报；两个 `web_research` source 只在 `config/briefing.sources.yaml` 中声明，因此不会进入 Podcast 来源池。
 - 所需环境能力仍是现有 `DAILYCAST_LLM__API_KEY`，但该 key 和当前 Responses 网关必须允许 native web search。若不支持，来源记录 `WEB_RESEARCH_UNSUPPORTED`；验证页/验证码页为 `ACCESS_CHALLENGE`；无可验证页面发布日期为 `MISSING_PUBLICATION_DATE`。这些都是来源级失败，不阻断其他 RSS 来源或另一类日报。
 - webhook 凭据只从环境变量注入：`DAILYCAST_BRIEFING__WEBHOOK_URL`；`webhook_enabled=true` 时必填，缺失则配置加载失败。
+- 异常告警以最终结果为准：07:55 准备、08:15 重试和 Provider 预检的失败只写日志；08:30 发送时，若最后保存的日报仍降级、存在生成/保存失败或没有可发送文件，才推送告警。重试恢复、条数不足、补选失败但已保留有效条目时不告警。降级状态随准备标记持久化，满 6 条的降级标题列表仍会重试；发送通道耗尽自身重试后才告警，同一次发送失败不叠加生成降级告警。手动运行以其最终发送步骤判断告警，dry-run 保持静默。
+- 模型输出不符合结构时，允许一次计入原有预算的结构修正；补选失败保留已经核验通过的模型内容，无合适补选内容时返回空 `items`，不硬凑条数。
+- 准备快照包含实际待发送的合并正文、条数及错误状态，并通过同一次原子写入保存；重试快照保存失败时继续使用上一份完整快照。补选先核验剩余候选链接、去除重复，再按缺少条数合并，避免重复或超量输出导致已生成内容被降级。
 - `config/app.yaml` 为启用示例（配合 `.env` 的 `DAILYCAST_CONFIG_PATH=config/app.yaml`）；默认 `config/app.example.yaml` 中 `briefing.enabled=false`，功能完全关闭。
 
 ### 13.1 手动触发简报生成
