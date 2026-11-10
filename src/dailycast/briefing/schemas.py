@@ -153,3 +153,28 @@ class MergedBriefingFocus(BaseModel):
         if not isinstance(value, str):
             return value
         return _require_no_ellipsis(value.strip())
+
+
+class AggregateScreenLabel(BaseModel):
+    """One model verdict on whether a candidate is a multi-story roundup.
+
+    Unknown keys are ignored like the briefing schemas: a provider flourish in
+    json_object mode must not invalidate otherwise valid screening output.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    index: int = Field(ge=1)
+    is_aggregate: bool
+    # Kept for auditability only; screening never lets model prose leak into
+    # the briefing, so an empty reason stays acceptable rather than discarding
+    # an otherwise usable verdict.
+    reason: str = Field(default="", max_length=200)
+
+
+class AggregateScreenResult(BaseModel):
+    """The bounded screening output for one editorial candidate pool."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    labels: list[AggregateScreenLabel] = Field(default_factory=list)

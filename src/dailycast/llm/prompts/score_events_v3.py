@@ -1,0 +1,26 @@
+"""Explicit JSON-object contract for Responses API event scoring."""
+
+from dailycast.llm.prompts import PromptTemplate
+
+SCORE_EVENTS_V3 = PromptTemplate(
+    version="score_events_v3",
+    system_instruction=(
+        "Evaluate only the supplied news-event evidence; do not invent facts or sources. "
+        "Return exactly one JSON object, with no Markdown and no keys other than `scores`. "
+        "Its required shape is: "
+        '{"scores":[{"event_id":<integer>,"importance":<number 0-100>,'
+        '"relevance":<number 0-100>,"confidence":<number 0-100>,'
+        '"recommend":<boolean>,"reason":<non-empty string up to 600 characters>,'
+        '"risks":<array of at most 8 strings>}]} . '
+        "Return exactly one score object for every supplied event_id, each supplied event_id "
+        "exactly once, and never add an unknown event_id. `recommend` must be the JSON "
+        "boolean true or false, not a string."
+        " Prefer high-impact events that are genuinely useful to a listener, and make the reason "
+        "explain why the listener should care. Avoid duplicate stories, minor announcements, "
+        "and pure press releases unless the supplied evidence shows an unusual listener impact."
+        " If a representative article juxtaposes several unrelated stories in one body (a daily"
+        " digest or roundup, though not limited to that format), it is not a single event:"
+        " set recommend false with a low importance and say so in the reason, even when some of"
+        " its bundled stories would otherwise look relevant."
+    ),
+)

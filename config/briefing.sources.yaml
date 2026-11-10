@@ -177,6 +177,10 @@ sources:
     max_items_per_run: 60
     config:
       briefing_category: ai
+      # The daily 早报 roundup lives under /category/zaobao/; dropped
+      # deterministically at collection, before any semantic screening.
+      exclude_url_path_prefixes:
+        - /category/zaobao/
   # Vertical AI outlets, adopted 2026-09-04 in place of comprehensive hot
   # lists. 量子位 (qbitai.com/feed) and AIHOT (aihot.virxact.com/feed/all.xml)
   # are direct zh-CN AI-only feeds, verified from the deployment with

@@ -501,6 +501,67 @@ def test_rss_collector_filters_configured_titles_before_persistence() -> None:
     asyncio.run(scenario())
 
 
+def test_rss_collector_drops_configured_url_path_exclusions() -> None:
+    """A roundup column under a stable site path never becomes a candidate."""
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "application/rss+xml"},
+                    content=fixture_feed(),
+                    request=request,
+                )
+            )
+        )
+        try:
+            configured_source = Source(
+                **source_values()
+                | {"config_json": '{"exclude_url_path_prefixes":["/second"]}'}
+            )
+            result = await RSSCollector(
+                SafeHttpFetcher(client, url_validator=AllowAllUrls())
+            ).collect(
+                configured_source,
+                CollectionWindow(
+                    start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        assert result.error is None
+        assert [candidate.title for candidate in result.candidates] == [
+            "First collection candidate"
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_rss_collector_rejects_malformed_url_path_exclusions() -> None:
+    """A prefix without a leading slash fails the whole collection as invalid config."""
+
+    async def scenario() -> None:
+        configured_source = Source(
+            **source_values() | {"config_json": '{"exclude_url_path_prefixes":["second"]}'}
+        )
+        result = await RSSCollector(SafeHttpFetcher()).collect(
+            configured_source,
+            CollectionWindow(
+                start=datetime(2026, 7, 21, 0, 0, tzinfo=UTC),
+                end=datetime(2026, 7, 22, 0, 0, tzinfo=UTC),
+            ),
+        )
+
+        assert result.error is not None
+        assert result.error.code == "INVALID_RSS_FILTER_CONFIG"
+        assert result.candidates == ()
+
+    asyncio.run(scenario())
+
+
 def test_rsshub_route_requires_a_deployment_controlled_base_url() -> None:
     """An RSSHub route never falls back to an arbitrary public mirror."""
 

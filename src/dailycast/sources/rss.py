@@ -45,6 +45,9 @@ class RSSCollector:
         title_keywords, filter_error = _title_filter(source)
         if filter_error is not None:
             return CollectionResult(source_id=source.id, error=filter_error)
+        excluded_prefixes, exclusion_error = _url_path_exclusions(source)
+        if exclusion_error is not None:
+            return CollectionResult(source_id=source.id, error=exclusion_error)
         feed_url, route_error = _resolve_feed_url(
             source.entry_url, self._rsshub_base_url, self._rsshub_access_key
         )
@@ -82,6 +85,8 @@ class RSSCollector:
                 continue
             assert candidate is not None
             if title_keywords and not _matches_title(candidate.title, title_keywords):
+                continue
+            if excluded_prefixes and _matches_excluded_path(candidate.url, excluded_prefixes):
                 continue
             if window.includes(candidate.published_at):
                 candidates.append(candidate)
@@ -197,6 +202,42 @@ def _matches_title(title: str, keywords: tuple[str, ...]) -> bool:
     """Keep configured topical matches while preserving the original feed order."""
     normalized_title = title.casefold()
     return any(keyword.casefold() in normalized_title for keyword in keywords)
+
+
+def _url_path_exclusions(source: Source) -> tuple[tuple[str, ...], SourceError | None]:
+    """Read optional URL path prefixes whose feed entries must never become candidates.
+
+    Roundup columns such as a feed's daily digest live under a stable site
+    path, so a configured exclusion drops them deterministically before any
+    model call; semantic roundup detection stays with the LLM editorial stages.
+    """
+    try:
+        raw = json.loads(source.config_json)
+        if not isinstance(raw, dict):
+            raise ValueError("source config must be an object")
+        prefixes = raw.get("exclude_url_path_prefixes")
+        if prefixes is None:
+            return (), None
+        if not isinstance(prefixes, list) or not all(isinstance(value, str) for value in prefixes):
+            raise ValueError("exclude_url_path_prefixes must be a list of strings")
+        cleaned = tuple(value.strip() for value in prefixes if value.strip())
+        if not cleaned:
+            raise ValueError("exclude_url_path_prefixes must not be empty")
+        if any(not value.startswith("/") for value in cleaned):
+            raise ValueError("exclude_url_path_prefixes must start with '/'")
+        return cleaned, None
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return (), SourceError(
+            code="INVALID_RSS_FILTER_CONFIG",
+            summary="RSS URL path exclusions must be non-empty strings starting with '/'",
+            retryable=False,
+        )
+
+
+def _matches_excluded_path(url: str, prefixes: tuple[str, ...]) -> bool:
+    """Drop candidate URLs whose path begins with any configured exclusion prefix."""
+    path = urlsplit(url).path
+    return any(path.startswith(prefix) for prefix in prefixes)
 
 
 def _url_without_secret_query(url: str) -> str:

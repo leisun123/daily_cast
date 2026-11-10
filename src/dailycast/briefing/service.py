@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dailycast.briefing.alerts import BriefingAlert
 from dailycast.briefing.prompt import (
+    build_aggregate_screen_messages,
     build_briefing_messages,
     build_briefing_repair_messages,
     build_merged_focus_messages,
@@ -31,6 +32,7 @@ from dailycast.briefing.renderer import (
 )
 from dailycast.briefing.schemas import (
     MAX_BRIEFING_ITEMS,
+    AggregateScreenResult,
     BriefingEvidence,
     BriefingItem,
     BriefingResult,
@@ -723,14 +725,22 @@ class BriefingService:
                 category,
                 candidates,
                 self._selection_policy,
-                limit=(
-                    self._selection_policy.category(category).editorial_candidate_limit
-                    if self._selection_policy.category(category).editorial_selection
-                    else self._max_items_per_category
-                ),
+                limit=self._editorial_pool_limit(category),
             )
             for category, candidates in grouped.items()
         }
+
+    def _editorial_pool_limit(self, category: str) -> int:
+        """Return the candidate-pool size, with screening surplus for editorial categories.
+
+        The extra slice feeds the aggregate pre-screen: rejecting a roundup
+        candidate frees its slot for later candidates instead of shrinking the
+        final editorial pool below its configured limit.
+        """
+        policy = self._selection_policy.category(category)
+        if not policy.editorial_selection:
+            return self._max_items_per_category
+        return policy.editorial_candidate_limit + policy.editorial_max_candidates_per_publisher
 
     async def _run_category(
         self,
@@ -773,6 +783,19 @@ class BriefingService:
                 ),
                 None,
             )
+        if self._selection_policy.category(category).editorial_selection:
+            evidence = await self._screen_aggregate_candidates(category, evidence, provider)
+            if not evidence:
+                logger.info(
+                    "briefing category skipped: every candidate screened out as roundup",
+                    extra={"category": category},
+                )
+                return (
+                    BriefingCategoryReport(
+                        category=category, status="skipped", reason=NO_ELIGIBLE_ARTICLES
+                    ),
+                    None,
+                )
         generation_error: str | None = None
         try:
             result = await self._generate_result(category, evidence, provider)
@@ -808,6 +831,53 @@ class BriefingService:
             ),
             _PendingBriefingDelivery(category=category, result=result, evidence=evidence),
         )
+
+    async def _screen_aggregate_candidates(
+        self,
+        category: str,
+        evidence: tuple[RankedBriefingEvidence, ...],
+        provider: LLMProvider,
+    ) -> tuple[RankedBriefingEvidence, ...]:
+        """Drop roundup-style candidates before editorial selection, refilling from surplus.
+
+        Screening failure degrades safely to the unfiltered head of the pool:
+        a missed roundup can still be caught by the editorial instruction, but
+        a screening outage must never sink the whole category into fallback.
+        """
+        limit = self._selection_policy.category(category).editorial_candidate_limit
+        if len(evidence) <= limit:
+            return evidence
+        messages = build_aggregate_screen_messages(evidence)
+        try:
+            structured = await provider.generate_structured(
+                operation=LLMOperation.GENERATE_BRIEFING,
+                messages=messages,
+                response_schema=AggregateScreenResult,
+                model_options={},
+            )
+            screen = AggregateScreenResult.model_validate(structured.content)
+        except Exception:
+            logger.exception(
+                "briefing aggregate screening failed; editorial selection sees all candidates",
+                extra={"category": category, "candidate_count": len(evidence)},
+            )
+            return evidence[:limit]
+        excluded = {
+            label.index - 1
+            for label in screen.labels
+            if label.is_aggregate and 1 <= label.index <= len(evidence)
+        }
+        if excluded:
+            logger.warning(
+                "briefing aggregate screening excluded candidates",
+                extra={
+                    "category": category,
+                    "excluded_count": len(excluded),
+                    "excluded_titles": [evidence[i].evidence.title[:80] for i in sorted(excluded)],
+                },
+            )
+        retained = tuple(item for index, item in enumerate(evidence) if index not in excluded)
+        return retained[:limit]
 
     async def _generate_result(
         self,

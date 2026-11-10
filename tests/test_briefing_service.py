@@ -2817,3 +2817,129 @@ def test_create_run_task_reserves_the_slot_within_one_event_loop_tick(
 
     asyncio.run(scenario())
     assert service.run_in_progress is False
+
+
+def _screening_evidence(index: int) -> RankedBriefingEvidence:
+    """Build one ranked editorial candidate whose identity is its title index."""
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    return RankedBriefingEvidence(
+        evidence=BriefingEvidence(
+            title=f"普通候选{index}",
+            source_name=f"来源{index}",
+            published_at=now - timedelta(hours=index),
+            excerpt=f"候选{index}的正文内容。" * 20,
+            source_url=f"https://source{index}.example.test/item",
+        ),
+        tier="LLM",
+        specificity=0,
+        reason="",
+        rule_id="editorial-llm",
+        source_id=f"source-{index}",
+        source_priority=50,
+        discovered_at=now,
+        article_id=index,
+    )
+
+
+def _screening_pool(count: int) -> tuple[RankedBriefingEvidence, ...]:
+    """Return a recency-ordered candidate pool shaped like `select_evidence` output."""
+    return tuple(_screening_evidence(index) for index in range(1, count + 1))
+
+
+def _screening_service(
+    session_factory: sessionmaker[Session], tmp_path: Path, llm: FakeBriefingLLM
+) -> BriefingService:
+    """Build a service whose collectors stay idle; only screening runs directly."""
+    return _build_service(
+        session_factory,
+        tmp_path / "briefings",
+        collector=FakeRSSCollector({}),
+        llm=llm,
+        notifier=None,
+    )
+
+
+_SCREEN_MARKER = "逐篇判断下列候选"
+
+
+def test_aggregate_screening_excludes_roundups_and_refills_from_surplus(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Rejected roundups free their slot so later candidates keep the pool at full size."""
+    llm = FakeBriefingLLM(
+        {
+            _SCREEN_MARKER: {
+                "labels": [
+                    {"index": 1, "is_aggregate": True, "reason": "并列多条不相关新闻"},
+                    {"index": 2, "is_aggregate": True, "reason": "并列多条不相关新闻"},
+                ]
+            }
+        }
+    )
+    service = _screening_service(session_factory, tmp_path, llm)
+
+    screened = asyncio.run(
+        service._screen_aggregate_candidates("telecom", _screening_pool(22), llm)
+    )
+
+    assert len(screened) == 20
+    titles = [item.evidence.title for item in screened]
+    assert "普通候选1" not in titles
+    assert "普通候选2" not in titles
+    # Surplus candidates 21 and 22 refill the slots freed by the exclusions.
+    assert titles[-1] == "普通候选22"
+    assert any("逐篇判断" in prompt for prompt in llm.user_prompts)
+
+
+def test_aggregate_screening_failure_degrades_to_pool_head(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A screening outage must never shrink or reorder the pool the editor sees."""
+    llm = FakeBriefingLLM({_SCREEN_MARKER: RuntimeError("screening provider down")})
+    service = _screening_service(session_factory, tmp_path, llm)
+
+    screened = asyncio.run(
+        service._screen_aggregate_candidates("telecom", _screening_pool(22), llm)
+    )
+
+    assert [item.evidence.title for item in screened] == [
+        f"普通候选{index}" for index in range(1, 21)
+    ]
+
+
+def test_aggregate_screening_ignores_out_of_range_labels(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """A model-invented candidate index must not crash screening or drop real candidates."""
+    llm = FakeBriefingLLM(
+        {
+            _SCREEN_MARKER: {
+                "labels": [
+                    {"index": 99, "is_aggregate": True, "reason": "编造序号"},
+                    {"index": 0, "is_aggregate": True, "reason": "非法序号"},
+                ]
+            }
+        }
+    )
+    service = _screening_service(session_factory, tmp_path, llm)
+
+    screened = asyncio.run(
+        service._screen_aggregate_candidates("telecom", _screening_pool(22), llm)
+    )
+
+    assert len(screened) == 20
+
+
+def test_aggregate_screening_skips_pools_within_limit(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Pools at or below the editorial limit stay cheap: no screening call at all."""
+    llm = FakeBriefingLLM({_SCREEN_MARKER: {"labels": []}})
+    service = _screening_service(session_factory, tmp_path, llm)
+
+    screened = asyncio.run(
+        service._screen_aggregate_candidates("telecom", _screening_pool(20), llm)
+    )
+
+    assert len(screened) == 20
+    assert llm.operations == []

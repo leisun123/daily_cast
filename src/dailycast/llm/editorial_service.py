@@ -32,7 +32,7 @@ from dailycast.llm.prompts.generate_outline_v2 import GENERATE_OUTLINE_V2
 from dailycast.llm.prompts.generate_script_v4 import GENERATE_SCRIPT_V4
 from dailycast.llm.prompts.review_script_v1 import REVIEW_SCRIPT_V1
 from dailycast.llm.prompts.revise_script_v1 import REVISE_SCRIPT_V1
-from dailycast.llm.prompts.score_events_v2 import SCORE_EVENTS_V2
+from dailycast.llm.prompts.score_events_v3 import SCORE_EVENTS_V3
 from dailycast.llm.schemas import (
     SCORE_EVENTS_V1_SCHEMA_VERSION,
     EventCard,
@@ -186,7 +186,7 @@ class AIEditorialService:
             operation=LLMOperation.SCORE_EVENTS,
             messages=messages,
             response_schema=ScoreEventsV1,
-            prompt_version=SCORE_EVENTS_V2.version,
+            prompt_version=SCORE_EVENTS_V3.version,
             schema_version=SCORE_EVENTS_V1_SCHEMA_VERSION,
             model_options=self._model_options,
             created_by_task_run_id=task_run_id,
@@ -443,7 +443,7 @@ class AIEditorialService:
                     risk_flags_json=_canonical_json(score.risks),
                     score_json=_canonical_json(score.model_dump(mode="json")),
                     llm_model=model,
-                    llm_prompt_version=SCORE_EVENTS_V2.version,
+                    llm_prompt_version=SCORE_EVENTS_V3.version,
                 )
 
 
@@ -451,7 +451,7 @@ def _score_messages(cards: Sequence[EventCard]) -> tuple[LLMMessage, ...]:
     """Create a bounded canonical EventCard payload with no full text or HTML."""
     payload = {"events": [card.model_dump(mode="json") for card in cards]}
     return (
-        LLMMessage(role="system", content=SCORE_EVENTS_V2.system_instruction),
+        LLMMessage(role="system", content=SCORE_EVENTS_V3.system_instruction),
         LLMMessage(role="user", content=_canonical_json(payload)),
     )
 

@@ -63,6 +63,7 @@ class _HTMLListOptions:
     timezone: ZoneInfo
     allowed_host: str
     include_title_keywords: tuple[str, ...] = ()
+    excluded_url_path_prefixes: tuple[str, ...] = ()
     allow_month_day_dates: bool = False
     date_context_tags: tuple[str, ...] = _DEFAULT_DATE_CONTEXT_TAGS
 
@@ -202,6 +203,16 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
         cleaned_path_prefixes = tuple(value.strip() for value in path_prefixes if value.strip())
         if any(not value.startswith("/") for value in cleaned_path_prefixes):
             raise ValueError("article_url_path_prefixes must start with '/'")
+        excluded_prefixes = raw.get("exclude_url_path_prefixes", [])
+        if not isinstance(excluded_prefixes, list) or not all(
+            isinstance(value, str) for value in excluded_prefixes
+        ):
+            raise ValueError("exclude_url_path_prefixes must be a list of strings")
+        cleaned_excluded_prefixes = tuple(
+            value.strip() for value in excluded_prefixes if value.strip()
+        )
+        if any(not value.startswith("/") for value in cleaned_excluded_prefixes):
+            raise ValueError("exclude_url_path_prefixes must start with '/'")
         if not isinstance(allow_month_day_dates, bool):
             raise ValueError("allow_month_day_dates must be a boolean")
         if not isinstance(context_tags, list) or not all(
@@ -226,6 +237,7 @@ def _parse_options(source: Source) -> tuple[_HTMLListOptions | None, SourceError
             _HTMLListOptions(
                 include_title_keywords=cleaned_keywords,
                 article_url_path_prefixes=cleaned_path_prefixes,
+                excluded_url_path_prefixes=cleaned_excluded_prefixes,
                 timezone=ZoneInfo(timezone_name),
                 allowed_host=entry_host.lower(),
                 allow_month_day_dates=allow_month_day_dates,
@@ -275,6 +287,10 @@ def _to_candidate(
             retryable=False,
         )
     if parsed_url.hostname.lower() != options.allowed_host:
+        return None, None
+    if any(
+        parsed_url.path.startswith(prefix) for prefix in options.excluded_url_path_prefixes
+    ):
         return None, None
     if options.article_url_path_prefixes and not any(
         parsed_url.path.startswith(prefix) for prefix in options.article_url_path_prefixes

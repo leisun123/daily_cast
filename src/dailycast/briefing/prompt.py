@@ -8,6 +8,50 @@ from dailycast.briefing.schemas import MAX_BRIEFING_ITEMS, BriefingItem, Briefin
 from dailycast.briefing.selection import RankedBriefingEvidence
 from dailycast.llm.contracts import LLMMessage
 
+_SCREEN_EXCERPT_CHARS = 800
+
+_AGGREGATE_SCREEN_SYSTEM = (
+    "你是新闻编辑室的审读员，只能依据给定的候选文章文本判断，不得使用任何外部知识。"
+    "对每一篇候选回答一个问题：它是不是“多条互不相关新闻的汇编”。"
+    "汇编的判定依据是内容结构：正文并列呈现了多个相互独立的事件，每个事件都有自己完整的"
+    "事实叙述（谁发生了什么），且这些事件之间不存在同一主体、同一进展线索或因果联系。"
+    "媒体早晚报、要闻速览、一周回顾是常见例子，但判断只看内容结构本身，"
+    "不看栏目名称、编号、分隔符或排版格式。"
+    "以下情况不是汇编：只报道单一事件的深度文章；围绕同一事件不同侧面的组合报道；"
+    "始终围绕同一主体的专题回顾。无法确定时判定为否。"
+)
+
+
+def build_aggregate_screen_messages(
+    candidates: Sequence[RankedBriefingEvidence],
+) -> tuple[LLMMessage, ...]:
+    """Ask the screening model which candidates juxtapose unrelated stories.
+
+    The judgment is semantic on purpose: roundup formats drift (column names,
+    separators, and source notes all vary), so no local keyword or separator
+    rule can stay correct across sources.
+    """
+    blocks: list[str] = []
+    for index, item in enumerate(candidates, start=1):
+        source = item.evidence
+        blocks.append(
+            f"[{index}] 标题：{source.title}\n"
+            f"来源：{source.source_name}\n"
+            f"正文摘录：\n{source.excerpt[:_SCREEN_EXCERPT_CHARS]}"
+        )
+    user_content = (
+        "逐篇判断下列候选是否为“多条互不相关新闻的汇编”，返回一个 JSON 对象：\n"
+        '{"labels":[{"index":<候选序号>,"is_aggregate":<true或false>,'
+        '"reason":"<不超过120字的理由>"}]}\n'
+        "必须为每个候选恰好返回一条判定，序号与候选编号一致；"
+        "不要输出其他键、Markdown 或解释文字。\n\n" + "\n\n".join(blocks)
+    )
+    return (
+        LLMMessage(role="system", content=_AGGREGATE_SCREEN_SYSTEM),
+        LLMMessage(role="user", content=user_content),
+    )
+
+
 _SYSTEM_PROMPT = (
     "你是一名中文科技资讯编辑，为读者编写每日文字简报。"
     "你只能依据用户提供的证据材料写作，不得使用任何外部知识，"
@@ -124,7 +168,11 @@ def _editorial_selection_instruction(category: str | None, *, required_count: in
         "这些候选均已通过时间、正文、中文来源与原文链接核验，但尚未代表已经入选。"
         "请依据正文事实同时判断事件的管理价值、报道是否可靠完整、以及来源是否适合支撑这条结论。"
         "不得因为来源配置或关键词命中就提高优先级；来源名称本身不能证明事实、重要性或适配性。"
-        "只选有明确主体、动作、结果或下一步的实质性报道。同一事件被多家独立来源报道说明事件关注度高："
+        "只选有明确主体、动作、结果或下一步的实质性报道。"
+        "如果一篇候选的正文并列汇总了多条互不相关的新闻（媒体早报晚报、要闻速览、一周回顾等"
+        "形态，但不限于这些名称），无论其中部分内容与主题多么相关，都不得入选任何条目："
+        "它不是一条新闻，宁可少选也不得用它凑数。"
+        "同一事件被多家独立来源报道说明事件关注度高："
         "必须合并为一条入选（选事实最完整、来源最可靠的一篇作代表，不得逐条罗列），"
         "绝不能因为'多个来源都在报道同一件事'就把该事件整体跳过；只有同一来源对同一事件的"
         "重复推送才需要去重。候选中有足够合格内容时必须选满 "

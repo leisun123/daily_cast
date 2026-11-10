@@ -41,7 +41,7 @@ from dailycast.llm.artifacts import LLMResponseValidationError
 from dailycast.llm.budget import BudgetController
 from dailycast.llm.contracts import LLMMessage, LLMUsage, StructuredResult
 from dailycast.llm.editorial_service import AIEditorialService
-from dailycast.llm.prompts.score_events_v2 import SCORE_EVENTS_V2
+from dailycast.llm.prompts.score_events_v3 import SCORE_EVENTS_V3
 from dailycast.pipeline.context import PipelineContext
 from dailycast.pipeline.steps.ranking import RankingStep
 
@@ -216,11 +216,11 @@ def event_score(event_id: int, *, importance: int, relevance: int) -> dict[str, 
     }
 
 
-def test_score_events_v2_prompt_declares_the_complete_json_object_contract() -> None:
+def test_score_events_v3_prompt_declares_the_complete_json_object_contract() -> None:
     """JSON-object mode needs an explicit semantic schema when strict output is unavailable."""
-    instruction = SCORE_EVENTS_V2.system_instruction
+    instruction = SCORE_EVENTS_V3.system_instruction
 
-    assert SCORE_EVENTS_V2.version == "score_events_v2"
+    assert SCORE_EVENTS_V3.version == "score_events_v3"
     assert "`scores`" in instruction
     assert "event_id" in instruction
     assert "recommend" in instruction
@@ -228,6 +228,7 @@ def test_score_events_v2_prompt_declares_the_complete_json_object_contract() -> 
     assert "high-impact" in instruction
     assert "listener" in instruction
     assert "press releases" in instruction
+    assert "roundup" in instruction.lower()
 
 
 def test_event_card_is_bounded_and_excludes_full_article_content(
